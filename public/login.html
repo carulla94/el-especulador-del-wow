@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#142029">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Entrar · El Especulador del WoW</title>
+  <link rel="stylesheet" href="/login.css">
+  <script src="/login.js" defer></script>
+</head>
+<body>
+  <main class="login-shell">
+    <section class="login-card" aria-labelledby="login-title">
+      <div class="crest" aria-hidden="true"><svg viewBox="0 0 80 92"><path d="M40 3 72 17v30c0 17-18 31-32 40C26 78 8 64 8 47V17Z" fill="#17344f" stroke="#ceaa64" stroke-width="3"/><path d="M40 10 65 21v25c0 13-13 25-25 33-12-8-25-20-25-33V21Z" fill="none" stroke="#997646"/><path d="m25 51 15-29 15 29M31 43h18M28 59h24M40 58v11" fill="none" stroke="#e8c77f" stroke-width="3"/><circle cx="40" cy="21" r="3" fill="#edc977"/></svg></div>
+      <p class="eyebrow">EUROPA · PVP · ALIANZA</p>
+      <h1 id="login-title"><small>El</small> Especulador <span>del WoW</span></h1>
+      <div class="rule" aria-hidden="true">◆</div>
+      <h2>Tu libro de subastas.</h2>
+      <p class="intro">Entra para consultar tus escaneos, inventario y resultados.</p>
+      <form id="login-form" method="post" action="/api/login">
+        <label for="password">Contraseña de acceso</label>
+        <input id="password" name="password" type="password" required maxlength="256" autocomplete="current-password" autofocus>
+        <button type="submit" id="login-submit">Entrar en mi cuenta <span aria-hidden="true">→</span></button>
+        <p id="login-feedback" class="feedback" role="alert" aria-live="polite"></p>
+      </form>
+      <p class="private-note"><span aria-hidden="true">◆</span> Acceso privado · Datos guardados en la nube</p>
+    </section>
+    <p class="footnote">EL ESPECULADOR DEL WoW <span>·</span> Tu mesa de operaciones de Azeroth</p>
+  </main>
+</body>
+</html>
