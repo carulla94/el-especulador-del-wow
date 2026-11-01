@@ -26,6 +26,21 @@ Cloudflare construye los ZIP del sincronizador y del puente mediante `scripts/pr
 
 También puedes conectar este repositorio desde Workers & Pages → Create application → GitHub. Directorio raíz del proyecto; comando de construcción `npm run build`; despliegue `npx wrangler deploy`. Conserva la configuración del repositorio y añade `OWNER_PASSWORD` como secreto del Worker.
 
+## Alternativa: desplegar desde GitHub Actions
+
+El flujo `.github/workflows/deploy-cloudflare.yml` valida y publica esta misma app en tu cuenta de Cloudflare. Usa las acciones oficiales de GitHub para preparar Node.js 24.16.0 y Python 3.13; instala las herramientas del proyecto, ejecuta las pruebas de Node y del sincronizador, construye las descargas y comprueba el paquete de Wrangler antes de publicar.
+
+1. En este repositorio privado, abre **Settings > Secrets and variables > Actions > New repository secret**.
+2. Nombre del secreto: `CLOUDFLARE_API_TOKEN`. Guarda ahi la clave de usuario limitada a **Workers Scripts: Edit** para la cuenta de Cloudflare indicada en el flujo. Este paso concede al flujo de GitHub acceso de despliegue a esa cuenta y debe estar autorizado por su titular. Nunca pegues la clave en el codigo, en un issue ni en los logs.
+3. Abre **Actions > Validar y publicar en Cloudflare > Run workflow**, selecciona `main` y ejecuta el flujo. Los siguientes cambios en `main` volveran a validar y publicar automaticamente.
+4. Comprueba la URL confirmada por Wrangler y configura `OWNER_PASSWORD` como secreto del **Worker en Cloudflare**, con al menos 16 caracteres. No es una variable de construccion ni un secreto que este flujo necesite en GitHub.
+
+Si falta `CLOUDFLARE_API_TOKEN`, las pruebas y la construccion se ejecutan, el despliegue se omite sin error y el resumen indica como habilitarlo. El flujo no recibe eventos de pull requests, solo permite publicar `main`, concede a `GITHUB_TOKEN` permiso de lectura del codigo y serializa los despliegues sin interrumpir una migracion en curso. La clave de Cloudflare solo se entrega a la comprobacion de disponibilidad y al paso de publicacion, despues de las validaciones.
+
+La cuenta de destino esta fijada en `CLOUDFLARE_ACCOUNT_ID`; no se selecciona automaticamente una cuenta distinta. La clave debe permitir las operaciones necesarias en esa cuenta. Si Cloudflare rechaza la creacion inicial por permisos, crea primero el Worker `el-especulador-del-wow` desde el panel con tu sesion habitual y vuelve a ejecutar el flujo. No amplíes permisos ni habilites servicios ajenos a esta app sin revisar el motivo del error.
+
+Referencia oficial: [Cloudflare con GitHub Actions](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/).
+
 ## Entrar y traer tus datos
 
 1. Abre la URL que confirme Cloudflare y entra con la contraseña del Worker.
