@@ -1,0 +1,16 @@
+{
+  "name": "el-especulador-del-wow",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22.13.0"},
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build": "node scripts/prepare-downloads.mjs",
+    "build:dashboard": "node scripts/prepare-downloads.mjs && node scripts/bundle-dashboard.mjs",
+    "dev": "wrangler dev",
+    "check:deploy": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {"wrangler": "^4.102.0"}
+}
