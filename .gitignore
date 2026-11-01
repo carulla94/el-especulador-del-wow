@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+.dev.vars
+.env
+dashboard-deploy/
+public/downloads/*.zip
+__pycache__/
+*.pyc
+*.sqlite3
