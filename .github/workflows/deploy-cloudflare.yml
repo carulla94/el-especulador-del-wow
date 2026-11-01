@@ -1,0 +1,98 @@
+name: Validar y publicar en Cloudflare
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Do not interrupt a deployment or a Durable Object migration already in progress.
+concurrency:
+  group: cloudflare-production
+  cancel-in-progress: false
+
+jobs:
+  validate-and-deploy:
+    # Manual runs must also use the production branch.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ac6a5b5c547bb675adc48a7cf88bec84
+    steps:
+      - name: Descargar el codigo
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.16.0'
+          package-manager-cache: false
+
+      - name: Preparar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Instalar las herramientas del proyecto
+        run: npm install --no-audit --no-fund
+
+      - name: Validar backend e importadores
+        run: npm test
+
+      - name: Validar el sincronizador del PC
+        run: python -m unittest discover -s pc_sync -p 'test_*.py' -q
+
+      - name: Construir las descargas
+        run: npm run build
+
+      - name: Comprobar el paquete de Cloudflare
+        run: npm run check:deploy
+
+      # Expose the Cloudflare secret only to this check and the deployment step,
+      # never to checkout, dependency installation, tests, or build scripts.
+      - name: Comprobar si el despliegue esta configurado
+        id: deployment
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -n "$CLOUDFLARE_API_TOKEN" ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ### Validacion completada; despliegue pendiente
+
+          Las pruebas y la construccion han terminado correctamente.
+          El despliegue se ha omitido porque falta el secreto del repositorio `CLOUDFLARE_API_TOKEN`.
+
+          Un administrador debe guardarlo en Settings > Secrets and variables > Actions.
+          Despues, abre Actions > Validar y publicar en Cloudflare > Run workflow y selecciona `main`.
+          No escribas la clave en el codigo, en un issue ni en los logs.
+          SUMMARY
+          fi
+
+      - name: Publicar en Cloudflare
+        if: steps.deployment.outputs.enabled == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm run deploy
+
+      - name: Resumir el despliegue
+        if: steps.deployment.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ### Despliegue completado
+
+          Wrangler ha publicado `el-especulador-del-wow` en la cuenta Cloudflare configurada.
+          Consulta la URL confirmada por Wrangler en el paso Publicar en Cloudflare.
+
+          Para habilitar el acceso privado, configura `OWNER_PASSWORD` como secreto del Worker en Cloudflare.
+          Debe tener al menos 16 caracteres. No lo guardes en este repositorio ni como variable de construccion.
+          SUMMARY
