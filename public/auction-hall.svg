@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 340" fill="none">
+  <defs>
+    <linearGradient id="room" x1="0" y1="0" x2="1400" y2="340" gradientUnits="userSpaceOnUse"><stop stop-color="#0e1117"/><stop offset=".52" stop-color="#17191d"/><stop offset="1" stop-color="#25211a"/></linearGradient>
+    <linearGradient id="stone" x1="0" y1="0" x2="0" y2="340" gradientUnits="userSpaceOnUse"><stop stop-color="#3c3a35"/><stop offset=".55" stop-color="#25282b"/><stop offset="1" stop-color="#12171c"/></linearGradient>
+    <linearGradient id="arch" x1="0" y1="0" x2="0" y2="260"><stop stop-color="#575044"/><stop offset=".5" stop-color="#383835"/><stop offset="1" stop-color="#20262a"/></linearGradient>
+    <linearGradient id="inside" x1="0" y1="0" x2="0" y2="280"><stop stop-color="#0c131f"/><stop offset="1" stop-color="#203047"/></linearGradient>
+    <linearGradient id="blue" x1="0" y1="0" x2="120" y2="250"><stop stop-color="#3e5b80"/><stop offset=".4" stop-color="#233c61"/><stop offset="1" stop-color="#111f39"/></linearGradient>
+    <linearGradient id="wood" x1="740" y1="260" x2="1250" y2="340" gradientUnits="userSpaceOnUse"><stop stop-color="#5a3d23"/><stop offset=".4" stop-color="#34271d"/><stop offset="1" stop-color="#1f1b18"/></linearGradient>
+    <linearGradient id="leather" x1="1010" y1="222" x2="1120" y2="321" gradientUnits="userSpaceOnUse"><stop stop-color="#74502a"/><stop offset=".45" stop-color="#3e2e21"/><stop offset="1" stop-color="#211c19"/></linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f1d394"/><stop offset=".25" stop-color="#b68c43"/><stop offset=".55" stop-color="#e4c17b"/><stop offset="1" stop-color="#725025"/></linearGradient>
+    <linearGradient id="vellum" x1="827" y1="270" x2="972" y2="320" gradientUnits="userSpaceOnUse"><stop stop-color="#c2a577"/><stop offset=".5" stop-color="#95815e"/><stop offset="1" stop-color="#594d39"/></linearGradient>
+    <linearGradient id="dark" x1="130" y1="150" x2="1040" y2="150" gradientUnits="userSpaceOnUse"><stop stop-color="#0e121a" stop-opacity=".96"/><stop offset=".52" stop-color="#0e121a" stop-opacity=".87"/><stop offset="1" stop-color="#0e121a" stop-opacity="0"/></linearGradient>
+    <radialGradient id="amber" cx="0" cy="0" r="1" gradientTransform="translate(1280 117) rotate(155) scale(355 290)" gradientUnits="userSpaceOnUse"><stop stop-color="#bc8139" stop-opacity=".34"/><stop offset=".45" stop-color="#bf843a" stop-opacity=".11"/><stop offset="1" stop-color="#ae7430" stop-opacity="0"/></radialGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(1286 126) scale(60 88)" gradientUnits="userSpaceOnUse"><stop stop-color="#edb55f" stop-opacity=".36"/><stop offset="1" stop-color="#b46c23" stop-opacity="0"/></radialGradient>
+    <pattern id="masonry" width="184" height="82" patternUnits="userSpaceOnUse"><path d="M0 1h184M0 42h184M1 0v42m92 0v40m90-82v42" stroke="#565249" stroke-opacity=".2"/><path d="M0 3h184M0 44h184" stroke="#080d12" stroke-opacity=".35"/><path d="M8 8h75M102 48h68" stroke="#78705f" stroke-opacity=".06"/></pattern>
+    <g id="arc"><path d="M0 271V113C0 55 43 12 95 0c52 12 95 55 95 113v158" fill="url(#arch)" stroke="#11171c" stroke-width="4"/><path d="M18 271V115c0-46 34-81 77-94 43 13 77 48 77 94v156" fill="url(#inside)" stroke="#6d604c" stroke-opacity=".35" stroke-width="2"/><path d="M30 271V117c0-39 29-67 65-81 36 14 65 42 65 81v154" fill="#0b121c"/><path d="M22 99 8 93m23-29L17 54m36-18L42 24m36-10-5-11m36 11 5-11m28 33 11-12m11 40 14-10m-5 45 14-6M2 137h15m-15 38h15m-15 38h15m155-76h16m-16 38h16m-16 38h16" stroke="#131a20" stroke-opacity=".65" stroke-width="2"/><path d="M95 39v231M31 133h128M31 208h128" stroke="#253443" stroke-width="5"/><path d="M95 42v225M34 134h123M34 209h123" stroke="#45505a" stroke-opacity=".35"/>
+    </g>
+    <g id="coin"><ellipse cx="0" cy="0" rx="12" ry="4" fill="#53381c" stroke="#b08b4a"/><path d="M-12-2v-3c0-2 6-4 12-4s12 2 12 4v3" fill="#82602c"/><ellipse cy="-5" rx="12" ry="4" fill="url(#gold)"/><ellipse cy="-5" rx="8" ry="2.3" stroke="#7e5a26" stroke-width=".6"/></g>
+  </defs>
+  <path fill="url(#room)" d="M0 0h1400v340H0z"/>
+  <path fill="url(#masonry)" d="M380 0h1020v340H380z"/>
+  <path d="M613 0h32v303h-32zM843 0h30v303h-30zM1111 0h30v303h-30zM1356 0h32v303h-32z" fill="url(#stone)"/>
+  <path d="M611 16h36m-36 12h36m194-12h34m-34 12h34m238-12h34m-34 12h34m211-12h36m-36 12h36" stroke="#5a5040" stroke-opacity=".3" stroke-width="3"/>
+  <g transform="translate(658 -10)"><use href="#arc"/></g>
+  <g transform="translate(904 -10)"><use href="#arc"/></g>
+  <g transform="translate(1150 -10)"><use href="#arc"/></g>
+  <path d="m955 89 24-36 24 36 13-17 20 26v70h-81z" fill="#172130"/><path d="M970 129h5m21-30h5m19 40h5m-48 25h5m27 0h5" stroke="#7b715b" stroke-opacity=".35" stroke-width="3"/>
+  <path d="m1178 190 40-57 40 57 25-29 37 47v54h-142z" fill="#17212e"/><path d="M1219 141v120m38-72v72m25-91v91" stroke="#26303a" stroke-width="4"/>
+  <path d="M824-9h108l-8 164-44 48-47-45z" fill="#0d1420" stroke="#11151b" stroke-width="6"/>
+  <path d="M832-9h91l-7 161-36 39-40-41z" fill="url(#blue)" stroke="#b29459" stroke-opacity=".7" stroke-width="2"/>
+  <path d="M840-4h75l-7 151-28 31-32-32z" stroke="#897346" stroke-opacity=".65"/>
+  <path d="m882 33 21 23v49l-21 23-24-23V56z" fill="#c4a66a" fill-opacity=".13" stroke="#b99c61" stroke-width="1.5"/>
+  <path d="m882 48 10 27-10 35-11-35zM869 75h26m-13-27v62" stroke="#dfc389" stroke-opacity=".72" stroke-width="2"/>
+  <path d="m840 13 10 130 30 35m35-160-8 129-27 31" stroke="#49628a" stroke-opacity=".4"/>
+  <path d="M1197 270h142l24 70h-183z" fill="#13171a"/>
+  <path d="M1263 161h45l-9 10v64h-26v-64z" fill="#2b251d" stroke="#7a5930"/>
+  <path d="m1278 169 8-34 8 34M1273 182h26m-26 39h26" stroke="#ac8244" stroke-width="2"/>
+  <ellipse cx="1286" cy="126" rx="54" ry="70" fill="url(#glow)"/>
+  <path d="M1285 142c-22-7-12-23-8-30 1 13 8 11 5-4 0-9 8-15 10-23 7 13 2 20 8 27 13 15 3 28-15 30Z" fill="#bb6a24"/>
+  <path d="M1286 137c-12-6-5-16-2-24 2 7 7 8 8-3 9 13 10 20-6 27Z" fill="#efbd60"/>
+  <path d="M1287 136c-5-4-1-9 2-14 4 7 6 11-2 14Z" fill="#ffe1a0"/>
+  <path fill="url(#amber)" d="M680 0h720v340H680z"/>
+  <path d="M680 287 1195 258l205 49v33H678z" fill="#151718"/>
+  <path d="m722 280 477-25 201 49v15l-208-43-470 24z" fill="#6b4b2b" stroke="#251e18" stroke-width="2"/>
+  <path d="m725 298 467-22 208 43v21H725z" fill="url(#wood)"/>
+  <path d="m769 289 428-20 161 33m-531-9 368-17 116 25m-564-2 452-21" stroke="#ad8150" stroke-opacity=".15"/>
+  <path d="m815 285 96-10 62 25-109 13z" fill="#100f0d" fill-opacity=".5"/>
+  <path d="m826 279 86-7 53 22-103 11-36-17z" fill="url(#vellum)" stroke="#7f6a48"/>
+  <path d="m837 278 74-6 47 20-93 10-28-14z" stroke="#d1b27e" stroke-opacity=".3"/>
+  <path d="m850 282 54-5m-45 10 58-5m-49 10 48-4m-35 8 39-4" stroke="#453d2e" stroke-opacity=".55" stroke-width="1.5"/>
+  <path d="m834 278-8 1c-12 2-5 11 5 10l12-1m110 5 8-1c8 0 14 8 4 10l-13 1" stroke="#b49666" stroke-width="4"/>
+  <path d="m1025 260 100-8 84 26v46l-108 9-76-28z" fill="#11100e"/>
+  <path d="m1020 245 101-10 86 25v53l-107 10-80-28z" fill="url(#leather)" stroke="#98703c" stroke-width="2"/>
+  <path d="m1020 245 80 25 107-10m-107 10v53" stroke="#cb9e56" stroke-opacity=".6" stroke-width="2"/>
+  <path d="M1020 245c-2-28 21-53 50-53l53-4c34 0 65 32 84 72l-107 10z" fill="url(#leather)" stroke="#bc9253" stroke-width="2"/>
+  <path d="M1042 251c-3-25 19-55 45-57m-4 69c-3-30 18-66 44-74m-82 24 99-9m-112 31 128-11" stroke="#211b14" stroke-width="2"/>
+  <path d="m1035 251 11 4 1 50-12-4zm42 13 11 4v50l-11-4zm47 3 12-1v53l-12 1zm59-5 11-1v53l-11 1z" fill="url(#gold)" stroke="#49341d"/>
+  <path d="m1126 261 15-1v26l-15 1z" fill="#c6a363" stroke="#5b3e1f"/>
+  <path d="m1131 272 5-1v8l-5 1z" fill="#342a1b"/>
+  <path d="m1039 274 4 2m-4 16 4 2m39-7 3 1m-3 15 3 1m44-5 4-1m55-5 3-1" stroke="#684a28" stroke-width="2"/>
+  <g transform="translate(989 306)"><use href="#coin"/></g>
+  <g transform="translate(988 301)"><use href="#coin"/></g>
+  <g transform="translate(989 296)"><use href="#coin"/></g>
+  <g transform="translate(961 311)"><use href="#coin"/></g>
+  <g transform="translate(960 306)"><use href="#coin"/></g>
+  <g transform="translate(979 320)"><use href="#coin"/></g>
+  <g transform="translate(1229 311)"><use href="#coin"/></g>
+  <g transform="translate(1228 307)"><use href="#coin"/></g>
+  <g transform="translate(1254 316)"><use href="#coin"/></g>
+  <path d="m1183 284 7 4 6-5-5-5z" fill="#b9b0a1" stroke="#55545b"/>
+  <path d="m1183 284 8-6-2 10z" fill="#dfd6c6" fill-opacity=".7"/>
+  <path d="M1184 283v-25l6-7 5 5-6 31" fill="#182c43" stroke="#5a6c81"/>
+  <path d="M1190 251v-13m-7 13 7-5 7 5" stroke="#a58e5c" stroke-width="2"/>
+  <path fill="url(#dark)" d="M0 0h1150v340H0z"/>
+  <path d="M0 338h1400" stroke="#9e7a3f" stroke-opacity=".35" stroke-width="2"/>
+  <path d="M0 1h1400" stroke="#b89961" stroke-opacity=".1"/>
+</svg>
