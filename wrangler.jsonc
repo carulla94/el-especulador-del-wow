@@ -4,6 +4,7 @@
   "main": "src/worker.mjs",
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
+  "preview_urls": false,
   "build": {"command": "node scripts/prepare-downloads.mjs"},
   "assets": {
     "directory": "./public",
