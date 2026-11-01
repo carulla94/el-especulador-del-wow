@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: El Especulador del WoW - Puente Auctioneer
+## Notes: Exporta observaciones de Auctioneer para el panel local. Experimental; no compra ni publica.
+## Author: El Especulador del WoW
+## Version: 0.2.0-experimental
+## Dependencies: Auctioneer
+## SavedVariables: EspeculadorBridgeDB
+
+EspeculadorBridge.lua
