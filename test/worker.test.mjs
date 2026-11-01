@@ -139,12 +139,46 @@ test("health exposes configuration status without password, tokens or account da
   assert.equal(response.status, 200);
   const text = await response.text();
   const body = JSON.parse(text);
-  assert.deepEqual(Object.keys(body).sort(), ["configured", "ok", "version"]);
+  assert.deepEqual(Object.keys(body).sort(), ["configurationIssue", "configured", "ok", "version"]);
   assert.equal(body.configured, true);
+  assert.equal(body.configurationIssue, null);
   assert.ok(!text.includes(PASSWORD));
   assert.ok(!text.includes(f.env.SESSION_SECRET));
   assert.ok(response.headers.get("Content-Security-Policy").includes("frame-ancestors 'none'"));
   assert.equal(response.headers.get("X-Robots-Tag"), "noindex, nofollow, noarchive");
+});
+
+test("configuration diagnostics distinguish missing, wrong type and short passwords without leaking them", async t => {
+  const cases = [
+    {value:undefined, issue:"missing_password", message:/Configura el secreto OWNER_PASSWORD/},
+    {value:null, issue:"missing_password", message:/Configura el secreto OWNER_PASSWORD/},
+    {value:"", issue:"missing_password", message:/Configura el secreto OWNER_PASSWORD/},
+    {value:{marker:"private-wrong-type-value"}, issue:"invalid_password_type", message:/no está configurado como texto/, marker:"private-wrong-type-value"},
+    {value:1234567890123456, issue:"invalid_password_type", message:/no está configurado como texto/, marker:"1234567890123456"},
+    {value:"short-secret-15", issue:"password_too_short", message:/contraseña guardada.*menos de 16 caracteres/, marker:"short-secret-15"},
+    {value:"valid-secret-016", issue:null, marker:"valid-secret-016"}
+  ];
+  for (const entry of cases) {
+    const f = fixture(t);
+    f.env.OWNER_PASSWORD = entry.value;
+    const health = await f.call("/api/health");
+    assert.equal(health.status, 200);
+    const healthText = await health.text(), body = JSON.parse(healthText);
+    assert.deepEqual(Object.keys(body).sort(), ["configurationIssue", "configured", "ok", "version"]);
+    assert.equal(body.configurationIssue, entry.issue);
+    assert.equal(body.configured, entry.issue === null);
+    assert.equal(health.headers.get("Cache-Control"), "private, no-store");
+    const state = await f.call("/api/state");
+    assert.equal(state.status, entry.issue === null ? 401 : 503);
+    const stateText = await state.text();
+    if (entry.issue) assert.match(JSON.parse(stateText).error, entry.message);
+    if (entry.marker) {
+      assert.ok(!healthText.includes(entry.marker));
+      assert.ok(!stateText.includes(entry.marker));
+    }
+    if (entry.issue === null) assert.equal((await f.login(entry.value)).response.status, 200);
+    else assert.equal((await f.login()).response.status, 503);
+  }
 });
 
 test("bad login is rejected; good login issues a secure private cookie", async t => {

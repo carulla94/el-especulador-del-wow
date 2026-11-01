@@ -73,7 +73,17 @@ function secure(response) {
   headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   return new Response(response.body, {status:response.status, statusText:response.statusText, headers});
 }
-function configured(env) { return typeof env.OWNER_PASSWORD === "string" && env.OWNER_PASSWORD.length >= 16; }
+function configurationIssue(env) {
+  const password = env.OWNER_PASSWORD;
+  if (password === undefined || password === null || password === "") return "missing_password";
+  if (typeof password !== "string") return "invalid_password_type";
+  return password.length < 16 ? "password_too_short" : null;
+}
+function configurationError(issue) {
+  if (issue === "password_too_short") return "La contraseña guardada en Cloudflare tiene menos de 16 caracteres. Sustitúyela por una de al menos 16 caracteres y despliega el cambio para habilitar el acceso privado.";
+  if (issue === "invalid_password_type") return "El secreto OWNER_PASSWORD no está configurado como texto. Configúralo como un secreto de texto en Cloudflare y despliega el cambio para habilitar el acceso privado.";
+  return "La app está preparada. Configura el secreto OWNER_PASSWORD (mínimo 16 caracteres) en Cloudflare para habilitar el acceso privado.";
+}
 function portfolio(env) { return env.PORTFOLIO.get(env.PORTFOLIO.idFromName("owner-eu-pvp-alliance-v1")); }
 async function internal(env, path, data, headers = {}) {
   return portfolio(env).fetch(new Request("https://portfolio.internal"+path, {method:"POST", headers:{"Content-Type":"application/json",...headers}, body:JSON.stringify(data)}));
@@ -87,14 +97,14 @@ function originCheck(request) {
 export default {
   async fetch(request, env) {
     try {
-      const url = new URL(request.url), path = url.pathname;
-      if (path === "/api/health" && request.method === "GET") return secure(json({ok:true,version:VERSION,configured:configured(env)}));
+      const url = new URL(request.url), path = url.pathname, setupIssue = configurationIssue(env);
+      if (path === "/api/health" && request.method === "GET") return secure(json({ok:true,version:VERSION,configured:setupIssue === null,configurationIssue:setupIssue}));
       const publicAssets = new Set(["/login", "/login.html", "/login.js", "/login.css", "/styles.css", "/auction-hall.svg"]);
       if (request.method === "GET" && publicAssets.has(path)) {
         if (path === "/login") url.pathname = "/login.html";
         return secure(await env.ASSETS.fetch(new Request(url,request)));
       }
-      if (!configured(env)) return secure(path.startsWith("/api/") ? json({error:"La app está preparada. Configura el secreto OWNER_PASSWORD (mínimo 16 caracteres) en Cloudflare para habilitar el acceso privado."},503) : Response.redirect(url.origin+"/login",302));
+      if (setupIssue) return secure(path.startsWith("/api/") ? json({error:configurationError(setupIssue)},503) : Response.redirect(url.origin+"/login",302));
       if (path === "/api/login" && request.method === "POST") {
         originCheck(request);
         const ip = await digest("login:"+(request.headers.get("CF-Connecting-IP") || "unknown"));
