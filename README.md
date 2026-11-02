@@ -1,8 +1,43 @@
-# El Especulador del WoW · Cloudflare
+# El Especulador del WoW · Cloudflare y GitHub Pages
 
 Aplicación privada para WoW Forever, Europa, PvP y Alianza. Versión cloud 0.3.0.
 
 La interfaz, contabilidad, inventario, cálculos y datos persistentes se ejecutan en Cloudflare Workers con SQLite en un Durable Object. Puedes importar los archivos de Auctioneer desde el navegador o emparejar el sincronizador del PC para enviar sus cambios por HTTPS.
+
+El código está en el repositorio privado [carulla94/el-especulador-del-wow](https://github.com/carulla94/el-especulador-del-wow). La app privada en la nube está en [el-especulador-del-wow.arqcon-cat.workers.dev](https://el-especulador-del-wow.arqcon-cat.workers.dev/). Para trabajar con otra persona, añade su usuario de GitHub como colaborador desde **Settings > Collaborators**; compartir el enlace por sí solo no concede acceso a un repositorio privado. Lee [CONTRIBUTING.md](CONTRIBUTING.md) para el entorno de desarrollo y el flujo de ramas.
+
+## Edición local para GitHub Pages
+
+GitHub Pages sirve archivos estáticos. Esta edición reutiliza los cálculos y los importadores de la app, y guarda la cartera en **IndexedDB de este navegador**. Permite importar manualmente Lua/JSON/AHL1, registrar movimientos, configurar reglas y exportar o restaurar copias JSON. No conecta la cuenta privada de Cloudflare ni envía los archivos importados a un servidor.
+
+Los datos son distintos en cada navegador, perfil, dispositivo y origen. Borrar los datos del sitio, usar navegación privada o perder el perfil puede hacer perder la cartera local. Exporta copias JSON con frecuencia; el sitio no ofrece una contraseña que proteja los datos de otra persona que use ese mismo perfil. La sincronización automática desde el PC y las claves de equipos pertenecen a la edición en Cloudflare. La interfaz de Pages identifica este modo y conserva un enlace a la app en la nube.
+
+```text
+npm run build:pages
+python -m http.server 8000 --bind 127.0.0.1 --directory dist-pages
+```
+
+Abre `http://127.0.0.1:8000/` para revisar el resultado. El directorio `dist-pages` se genera desde una lista limitada de archivos: interfaz, módulos de cálculo e importación, runtime local y ZIP del addon. No incluye el Worker, contraseñas, tokens, cartera ni el sincronizador del PC. No abras el HTML mediante `file://`: los módulos e IndexedDB necesitan un origen HTTP/HTTPS estable.
+
+Para publicar:
+
+1. Comprueba que el plan y la visibilidad del repositorio permiten GitHub Pages. **GitHub Free permite Pages en repositorios públicos; los privados requieren un plan compatible, como GitHub Pro.** Este proyecto permanece privado: no cambies su visibilidad sin autorización del propietario. Que el repositorio sea privado no hace que una página publicada sea privada.
+2. En **Settings > Pages > Build and deployment > Source**, selecciona **GitHub Actions**. Este paso debe habilitarse en GitHub; añadir el archivo del flujo no activa Pages por sí solo.
+3. Abre **Actions > Publicar edición local en GitHub Pages > Run workflow**, selecciona `main` y ejecuta. El flujo prueba el proyecto, construye `dist-pages` y publica solo ese artefacto con las acciones oficiales de GitHub y su token temporal OIDC. No utiliza la clave de Cloudflare ni necesita secretos propios.
+4. Utiliza la URL que confirme el despliegue. Si se publica como sitio de proyecto, la ruta esperada es `https://carulla94.github.io/el-especulador-del-wow/`; la URL solo está disponible cuando Pages está habilitado y el flujo termina correctamente.
+
+La publicación de Pages es manual por diseño. Para publicar cambios, vuelve a ejecutar su flujo después de fusionar la rama revisada en `main`. El flujo de Cloudflare existente sigue publicando la edición en la nube al cambiar `main`.
+
+El flujo independiente **Comprobar Pages con Chromium** prueba el artefacto bajo una ruta de proyecto real. Comprueba la persistencia de ajustes y compras tras recargar usando IndexedDB de Chromium, la descarga de la copia JSON y el fallo claro cuando IndexedDB está bloqueado. También verifica que ese modo no envía peticiones a una API ni a otros servidores. No recibe credenciales de Cloudflare ni publica cambios. Para ejecutarlo en un entorno de desarrollo preparado:
+
+```text
+npm install
+npm run build:pages
+npx playwright install chromium
+npm run test:browser
+```
+
+Referencias oficiales: [qué es GitHub Pages](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages), [crear un sitio y planes compatibles](https://docs.github.com/en/pages/getting-started-with-github-pages/creating-a-github-pages-site) y [flujos personalizados para Pages](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).
 
 ## Publicar en tu cuenta
 

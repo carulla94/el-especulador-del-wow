@@ -57,6 +57,7 @@
   }
 
   async function request(path, data) {
+    if (window.especuladorLocal) return window.especuladorLocal.request(path, data);
     const options = {headers: {Accept: "application/json"}, cache: "no-store"};
     if (data !== undefined) {
       options.method = "POST";
@@ -305,6 +306,11 @@
     button.disabled = true;
     button.textContent = "Consultando mercado…";
     try {
+      if (window.especuladorLocal) {
+        await refresh();
+        showToast("Datos revisados. Importa un archivo nuevo de Auctioneer para actualizar los precios.");
+        return;
+      }
       const devices = state.auctioneer?.devices || [];
       if (devices.some(device => !device.revoked) || state.auctioneer?.connection?.configured) {
         await refresh();
@@ -368,7 +374,7 @@
       await request("/api/transactions", payload);
       await refresh();
       $("#transaction-dialog").close();
-      showToast("Movimiento guardado en tu cuenta.");
+      showToast(window.especuladorLocal ? "Movimiento guardado en este navegador." : "Movimiento guardado en tu cuenta.");
     } catch (error) { feedback.textContent = error.message; }
     finally { button.disabled = false; }
   });
@@ -540,7 +546,7 @@
   $("#auctioneer-history-next").addEventListener("click", () => { historyPage += 1; renderAuctioneer(); });
   $("#auctioneer-sync-button").addEventListener("click", event => auctioneerAction(event.currentTarget, async () => {
     await refresh();
-    showToast("Estado actualizado. Los nuevos escaneos llegan desde tu PC cuando WoW guarda los archivos.");
+    showToast(window.especuladorLocal ? "Datos revisados. Importa los archivos guardados por WoW para incorporar nuevos escaneos." : "Estado actualizado. Los nuevos escaneos llegan desde tu PC cuando WoW guarda los archivos.");
   }));
   $("#device-form").addEventListener("submit", event => {
     event.preventDefault();

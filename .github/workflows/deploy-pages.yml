@@ -1,0 +1,63 @@
+name: Publicar edición local en GitHub Pages
+
+# Enable Pages in Settings before running this workflow. A source commit alone
+# must not attempt to enable Pages, change repository visibility, or publish.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Preparar Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24.16.0'
+          package-manager-cache: false
+      - name: Preparar Python
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Validar la app y el sincronizador
+        run: |
+          npm test
+          python -m unittest discover -s pc_sync -p 'test_*.py' -q
+      - name: Construir solo la edición local
+        run: npm run build:pages
+      - name: Leer la configuración de Pages existente
+        uses: actions/configure-pages@v6.0.0
+      - name: Preparar el artefacto público
+        uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: dist-pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publicar en Pages
+        id: deployment
+        uses: actions/deploy-pages@v5.0.1

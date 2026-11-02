@@ -6,11 +6,13 @@
   "engines": {"node": ">=22.13.0"},
   "scripts": {
     "test": "node --test test/*.test.mjs",
+    "test:browser": "playwright test",
     "build": "node scripts/prepare-downloads.mjs",
+    "build:pages": "node scripts/build-pages.mjs",
     "build:dashboard": "node scripts/prepare-downloads.mjs && node scripts/bundle-dashboard.mjs",
     "dev": "wrangler dev",
     "check:deploy": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy"
   },
-  "devDependencies": {"wrangler": "^4.102.0"}
+  "devDependencies": {"wrangler": "^4.102.0", "@playwright/test": "1.64.1"}
 }

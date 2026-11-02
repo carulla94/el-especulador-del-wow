@@ -1,0 +1,32 @@
+name: Comprobar Pages con Chromium
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Preparar Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24.16.0'
+          package-manager-cache: false
+      - name: Instalar herramientas de prueba
+        run: npm install --no-audit --no-fund
+      - name: Construir la edición local
+        run: npm run build:pages
+      - name: Instalar Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Verificar interfaz y persistencia real
+        run: npm run test:browser
