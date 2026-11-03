@@ -416,12 +416,12 @@ local function wowSerialize(value, indent)
   return table.concat(out, "\n")
 end
 
--- Historial de 80 objetos con 120 días y `pointsPerDay` escaneos al día durante 14 días, con precios realistas.
+-- Historial de 114 objetos con 120 días y `pointsPerDay` escaneos al día durante 14 días, con precios realistas.
 local function fullHist(pointsPerDay)
   local now = 1793746800 + 130 * 86400
   local today = Spec.DayIndex(now)
   local items = {}
-  for i = 1, 80 do
+  for i = 1, 114 do
     local id = 2770 + i * 97
     local recs, points = {}, {}
     for d = today - 119, today do
@@ -446,7 +446,7 @@ test("Tamaño: el estimador da exactamente el tamaño del formato de WoW", funct
   eq(Spec.EstimateSize(odd, "X"), #("X = " .. wowSerialize(odd) .. "\n"))
 end)
 
-test("Tamaño: 80 objetos x 120 días + 14 días de 4 escaneos caben en 512 KB; con 120 puntos, Shrink quita puntos primero", function()
+test("Tamaño: 114 objetos x 120 días + 14 días de 4 escaneos caben en 768 KB; con 120 puntos, Shrink quita puntos primero", function()
   local hist, now = fullHist(4)
   local size = Spec.EstimateSize(hist)
   local step, after = Spec.Shrink(hist, Spec.MAX_BYTES, now)

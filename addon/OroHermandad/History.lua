@@ -32,7 +32,7 @@ local isInt = Spec.IsInt
 local hist                     -- OroHermandadHist (la tabla viva que el juego guarda al salir)
 local db = {}                  -- OroHermandadDB: estado privado (extras vigilados, día de la última importación)
 local marketKeyFn              -- función de Core que da "Reino-Facción"
-local version = "0.3.0"
+local version = "0.3.1"
 local loadInfo = {}            -- cómo se cargó OroHermandadHist (para /oro sondeo)
 local shapes = {}              -- tipo de escaneo -> forma de su primera fila (para /oro sondeo)
 local queue, running = {}, nil
@@ -329,7 +329,7 @@ end
 
 -- En ADDON_LOADED. saved: lo que el juego cargó en OroHermandadHist (nil si nada). opts: db (OroHermandadDB ya
 -- preparado), market (función "Reino-Facción"), version, dbLoaded (OroHermandadDB venía del archivo).
--- Limpia, poda (120 días, 14 días de puntos) y deja el total en 512 KB o menos. Devuelve la tabla que debe quedar en
+-- Limpia, poda (120 días, 14 días de puntos) y deja el total en 768 KB o menos. Devuelve la tabla que debe quedar en
 -- OroHermandadHist.
 function History.Load(saved, opts)
   opts = opts or {}
@@ -367,7 +367,7 @@ end
 function History.Hist() return hist end
 function History.LoadInfo() return loadInfo end
 
--- En PLAYER_LOGOUT, antes de que el juego escriba el archivo: el tope de 512 KB también para lo de esta sesión.
+-- En PLAYER_LOGOUT, antes de que el juego escriba el archivo: el tope de 768 KB también para lo de esta sesión.
 function History.BeforeSave()
   if not hist then return nil end
   hist.schema, hist.addon = History.SCHEMA, version

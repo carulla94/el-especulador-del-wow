@@ -2,7 +2,7 @@
 
 Addon para WoW Forever que te dice qué hacer para ganar oro. Lee los precios de Auctionator, tus bolsas y tu banco, tus profesiones y las de tu hermandad, y te da una lista corta de acciones. También te avisa cuando los precios de la subasta están viejos y, con el modo **Especular**, te señala chollos para comprar y revender.
 
-Versión 0.3.0, para el cliente 1.60 de Forever (Interface 16001). **Todavía no se ha probado dentro del juego** (ver «Límites conocidos»). La instalación está explicada paso a paso en la guía `INSTALAR_ORO_DE_HERMANDAD.md`; pídela a quien te pasó el addon.
+Versión 0.3.1, para el cliente 1.60 de Forever (Interface 16001). **Todavía no se ha probado dentro del juego** (ver «Límites conocidos»). La instalación está explicada paso a paso en la guía `INSTALAR_ORO_DE_HERMANDAD.md`; pídela a quien te pasó el addon.
 
 ## Cómo se usa
 
@@ -56,12 +56,12 @@ Los importes ya descuentan la comisión de la subasta (5 % por defecto; puedes c
 
 ## Historial de precios
 
-Desde la versión 0.3.0 el addon apunta los precios de una lista de 80 materiales y consumibles comunes: minerales y lingotes, piedras, gemas, hierbas, cuero, tela, pociones, elixires, frascos, comida, vendas, materiales de encantamiento y esencias. Puedes añadir hasta 40 objetos más con `/oro vigilar`. Con estos datos funciona el modo Especular.
+Desde la versión 0.3.0 el addon apunta los precios de una lista de materiales y consumibles comunes (114 desde la 0.3.1, con todo lo que da la recolección y lo que hace falta para valorar la fundición): minerales y lingotes, piedras, gemas, hierbas, cuero, tela, pociones, elixires, frascos, comida, vendas, materiales de encantamiento y esencias. Puedes añadir hasta 40 objetos más con `/oro vigilar`. Con estos datos funciona el modo Especular.
 
 - **Cuándo apunta:** con cada escaneo terminado de Auctionator. Por cada día guarda el precio mínimo más bajo y el más alto, el último, cuántas unidades había a la venta y cuántos escaneos hubo. De los últimos 14 días guarda además cada escaneo con su hora. Una búsqueda que corta el escaneo de Auctionator solo apunta ese momento: no cuenta para el día. Tus propias subastas no cuentan como precio del mercado (en el escaneo completo).
 - **Días que faltan:** al entrar, una vez al día, los rellena con el historial de Auctionator (sus últimos 21 días). Nunca sustituye lo que el addon vio por sí mismo.
 - **Depósitos:** con la subasta abierta apunta cuánto cuesta publicar una unidad de cada objeto, según la duración.
-- **Tamaño:** como mucho 512 KB. Guarda 120 días por objeto; si hiciera falta, recorta primero los escaneos sueltos más viejos.
+- **Tamaño:** como mucho 768 KB. Guarda 120 días por objeto; si hiciera falta, recorta primero los escaneos sueltos más viejos.
 - **`/oro tabla`:** abre una ventana con una tabla lista para pegar en Excel (columnas separadas por `;` y coma decimal). Tiene, por objeto, el precio de hoy, el normal de los últimos 14 días, el cambio en 1 y en 7 días (en %), el mínimo y el máximo de esos 14 días, la oferta de hoy, los días con precio y la confianza. Los precios van en oro: `0,0082` son 82 cobres. Ya sale seleccionada: pulsa Ctrl+C y pégala en Excel.
 - **Privacidad:** todo se queda en tu PC, en el archivo `WTF\Account\<cuenta>\SavedVariables\OroHermandad.lua`, en el bloque `OroHermandadHist`. Ahí solo hay precios de objetos (con su nombre, su precio de mercader, su categoría y los depósitos) por reino y facción. No hay personajes, ni oro, ni profesiones. El addon no lo envía a nadie. Solo si instalas el subidor de la hermandad, cuando esté listo, se enviará ese bloque, y nada más de ese archivo.
 - **`/oro sondeo`:** comprueba lo que el addon necesita saber del juego: la versión de Auctionator y la forma de sus escaneos, su historial, los depósitos y las duraciones de la subasta, y si el historial se guardó bien tras el último `/reload`. Cópialo de la ventana y pégalo en una incidencia: no lleva nombres de personajes ni tu oro. Hazlo una vez el primer día, con la subasta abierta, y repítelo tras un `/reload`.

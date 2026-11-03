@@ -174,8 +174,29 @@ test("wrangler and the worker entry add GuildMarket without touching Portfolio o
   assert.deepEqual(config.migrations, [{tag: "v1", new_sqlite_classes: ["Portfolio"]}, {tag: "v2", new_sqlite_classes: ["GuildMarket"]}]);
   assert.equal(config.main, "src/worker.mjs");
   assert.equal(WorkerGuildMarket, GuildMarket);
-  assert.equal(WATCH_IDS.length, 80);
-  assert.equal(new Set(WATCH_IDS).size, 80);
+  assert.equal(WATCH_IDS.length, 114);
+  assert.equal(new Set(WATCH_IDS).size, 114);
+});
+
+test("the server's watchlist is the addon's Data.WATCH, category by category", () => {
+  const lua = fs.readFileSync(new URL("../addon/OroHermandad/Data.lua", import.meta.url), "utf8");
+  const start = lua.indexOf("Data.WATCH = {") + "Data.WATCH = {".length;
+  const block = lua.slice(start, lua.indexOf("Data.CATEGORY_ORDER = {", start)).replace(/--.*$/gm, "");
+  const parsed = Object.fromEntries([...block.matchAll(/(\w+)\s*=\s*\{([^}]*)\}/g)].map(([, cat, ids]) => [cat, ids.match(/\d+/g).map(Number)]));
+  assert.deepEqual(parsed, {...WATCHLIST});
+});
+
+test("an extra that has since joined the watchlist becomes a watchlist item on the next upload", async t => {
+  const f = fixture(t), owner = await f.owner(), ana = await f.member(owner, "Ana");
+  const send = lo => f.sync(ana.key, upload([item(2775, {name: "Mineral de plata", cat: "otro", days: flat(lo, T0, T0)})]));
+  assert.equal((await send(500)).status, 200);
+  f.gdb.prepare("UPDATE guild_items SET watch=0,category='otro' WHERE market=? AND item_id=2775").run(MARKET);
+  assert.equal((await (await f.market(owner)).json()).items.find(e => e.id === 2775).watch, false);
+  f.advance(3600000);
+  assert.equal((await send(600)).status, 200);
+  const row = f.gdb.prepare("SELECT category,watch FROM guild_items WHERE market=? AND item_id=2775").get(MARKET);
+  assert.deepEqual([row.category, row.watch], ["metal", 1]);
+  assert.equal((await (await f.market(owner)).json()).items.find(e => e.id === 2775).watch, true);
 });
 
 test("unknown guild paths and wrong methods are rejected before any authentication", async t => {
@@ -538,13 +559,13 @@ test("caps: 50 active members and keys, 24 uploads a day, 60 attempts an hour, 3
   f.advance(3600000);
   assert.equal((await f.sync(b.key, upload([]))).status, 200);
 
-  // 300 items per market: the 80 watchlist items always fit, the rest share 220 slots.
+  // 300 items per market: the 114 watchlist items always fit, the rest share 186 slots.
   const c = members[3];
   const extras = Array.from({length: 300}, (_, i) => item(200000 + i, {cat: "otro", days: flat(5, f.T, f.T)}));
   const first = await (await f.sync(c.key, upload(extras))).json();
-  assert.deepEqual([first.markets[0].items, first.markets[0].skippedItems.length, first.markets[0].skippedItems[0]], [220, 80, 200220]);
+  assert.deepEqual([first.markets[0].items, first.markets[0].skippedItems.length, first.markets[0].skippedItems[0]], [186, 114, 200186]);
   const watched = await (await f.sync(c.key, upload(WATCH_IDS.map(id => item(id, {days: flat(5, f.T, f.T)}))))).json();
-  assert.deepEqual([watched.markets[0].items, watched.markets[0].skippedItems], [80, []]);
+  assert.deepEqual([watched.markets[0].items, watched.markets[0].skippedItems], [114, []]);
   assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_items WHERE market=?").get(MARKET).n, LIMITS.itemsPerMarket);
   const late = await (await f.sync(replacement.key, upload([item(300001, {days: flat(5, T0 + 1, T0 + 1)})]))).json();
   assert.deepEqual(late.markets[0].skippedItems, [300001]);
@@ -1071,14 +1092,14 @@ test("a purge or the retention frees the slots and names of items left without d
   // An item that brings nothing storable gets no row, so it cannot hold a slot.
   const nothing = await (await f.sync(ana.key, upload(Array.from({length: 300}, (_, i) => item(500000 + i, {cat: "otro", days: [[2400, 5, 5, 5, 1, 1, "a"]]}))))).json();
   assert.deepEqual([nothing.markets[0].items, nothing.markets[0].skippedItems, listed()], [0, [], []]);
-  const junk = Array.from({length: 220}, (_, i) => item(900000 + i, {name: "BASURA " + i, cat: "otro", days: flat(1000, T0, T0)}));
+  const junk = Array.from({length: 186}, (_, i) => item(900000 + i, {name: "BASURA " + i, cat: "otro", days: flat(1000, T0, T0)}));
   assert.equal((await f.sync(ana.key, upload([item(2770, {name: "Mena de cobre", cat: "metal", days: flat(500, T0, T0)}), ...junk], {deposits: [[900001, 3, 40]]}))).status, 200);
   await f.sync(bruno.key, upload([item(900005, {name: "Compartido", cat: "otro", days: flat(900, T0, T0)})]));
   const full = await (await f.sync(bruno.key, upload([item(12345, {name: "Mi extra", cat: "otro", days: flat(700, T0, T0)})]))).json();
-  assert.deepEqual(full.markets[0].skippedItems, [12345], "Ana's 220 extras fill every free slot");
+  assert.deepEqual(full.markets[0].skippedItems, [12345], "Ana's 186 extras fill every free slot");
 
   const purge = await f.post("/api/guild/members/revoke", {memberId: ana.id, purge: true}, owner);
-  assert.deepEqual(await purge.json(), {revoked: true, memberId: ana.id, purged: 221 + 1});
+  assert.deepEqual(await purge.json(), {revoked: true, memberId: ana.id, purged: 187 + 1});
   assert.deepEqual(listed(), [[900005, ""]], "only the item Bruno also has stays, without the name Ana gave it");
   assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_deposits").get().n, 0);
   assert.deepEqual(f.gdb.prepare("SELECT DISTINCT member_id FROM guild_item_vendor").all().map(r => r.member_id), [bruno.id]);
