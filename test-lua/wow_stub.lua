@@ -20,7 +20,9 @@ local function newObject(kind, name)
   function methods:GetText() return self.__text end
   function methods:GetStringHeight() return 12 end
   function methods:GetWidth() return 140 end
-  function methods:GetHeight() return 140 end
+  function methods:SetHeight(h) self.__height = h end
+  function methods:GetHeight() return self.__height or 140 end
+  function methods:SetMaxLines(n) self.__maxLines = n end
   function methods:GetCenter() return 700, 500 end
   function methods:GetEffectiveScale() return 1 end
   function methods:SetPoint(...) self.__points[#self.__points + 1] = {...} end
@@ -145,18 +147,55 @@ function Stub.install()
 
   local prices = Stub.prices
   Stub.autoscan = false
+  Stub.vendorPrices = {} -- caché de precios de mercader de Auctionator (de toda la cuenta)
+  -- EventBus interno de Auctionator (como Source/Utilities/EventBusMixin.lua): listener:ReceiveEvent(nombre, ...).
+  Stub.bus = {}
+  local bus = {Register = function(self, listener, names)
+    assert(type(listener.ReceiveEvent) == "function", "ReceiveEvent")
+    for _, name in ipairs(names) do Stub.bus[name] = Stub.bus[name] or {}; table.insert(Stub.bus[name], listener) end
+    return self
+  end}
+  local EVENTS = {full = "replicate_scan_complete", summary = "full_incremental_scan_complete",
+                  prices = "incremental_prices_processed"}
+  function Stub.busFire(name, ...)
+    for _, listener in ipairs(Stub.bus[name] or {}) do listener:ReceiveEvent(name, ...) end
+  end
+  -- Una tanda de resultados de búsqueda (favoritos, pestaña Comprar, lista de la compra): no es un escaneo.
+  function Stub.dbCallback() Stub.busFire(EVENTS.prices) end
+  -- Fin de un escaneo: "full" (replicate) o "summary" (el de resumen, que después procesa los precios).
+  function Stub.scanComplete(kind)
+    if kind == "full" then Stub.busFire(EVENTS.full, {}) else Stub.busFire(EVENTS.summary, {}); Stub.busFire(EVENTS.prices) end
+  end
   _G.Auctionator = {
     API = {v1 = {
       GetAuctionPriceByItemID = function(caller, id) assert(type(caller) == "string"); return prices[id] end,
       GetAuctionAgeByItemID = function(caller, id) if prices[id] then return Stub.ages[id] or 0 end end,
-      GetVendorPriceByItemID = function() return nil end,
-      RegisterForDBUpdate = function(caller, cb) Stub.dbCallback = cb end,
+      GetVendorPriceByItemID = function(caller, id) return Stub.vendorPrices[id] end,
+      -- Como el real: avisa con cada tanda de búsqueda (PricesProcessed) y al terminar un escaneo completo.
+      RegisterForDBUpdate = function(caller, cb)
+        bus:Register({ReceiveEvent = function() cb() end}, {EVENTS.prices, EVENTS.full})
+      end,
       ConvertToSearchString = function(caller, term) return "\"" .. term.searchString .. "\";;;;;;;;;;;" .. (term.quantity or "") end,
       CreateShoppingList = function(caller, name, strings) Stub.shoppingList = {name = name, strings = strings} end,
       MultiSearchAdvanced = function(caller, terms) Stub.multiSearch = terms end,
     }},
     Config = {Options = {AUTOSCAN = "autoscan"}, Get = function() return Stub.autoscan end},
+    EventBus = bus,
+    FullScan = {Events = {ScanStart = "replicate_scan_start", ScanComplete = EVENTS.full}},
+    IncrementalScan = {Events = {ScanStart = "full_incremental_scan_start", ScanComplete = EVENTS.summary,
+                                 PricesProcessed = EVENTS.prices}},
+    SavedState = {},
   }
+
+  -- Mercader abierto: cada fila {id, price, stack, available, purchasable, extended}.
+  Stub.merchant = {}
+  _G.GetMerchantNumItems = function() return #Stub.merchant end
+  _G.GetMerchantItemID = function(i) return Stub.merchant[i] and Stub.merchant[i].id end
+  _G.C_MerchantFrame = {GetItemInfo = function(i)
+    local m = Stub.merchant[i]
+    return {price = m.price, stackCount = m.stack or 1, numAvailable = m.available or -1,
+            isPurchasable = m.purchasable ~= false, isUsable = true, hasExtendedCost = m.extended or false}
+  end}
 
   -- Profesiones (Forever: GetProfessions devuelve prof1, prof2, primeros auxilios, pesca, cocina).
   _G.GetProfessions = function() return 1, 2, nil, nil, nil end

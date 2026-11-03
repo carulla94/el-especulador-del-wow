@@ -8,6 +8,9 @@ local ROW_TEXT_WIDTH = 340
 local COIN_ICON = "Interface\\Icons\\INV_Misc_Coin_01"
 local NOTE_ICON = "Interface\\Icons\\INV_Misc_Note_01"
 local LEVEL_COLORS = {ok = {0.45, 0.85, 0.45}, warn = {1, 0.78, 0.2}, error = {1, 0.35, 0.3}}
+-- Parte de abajo, de abajo arriba: botones (y 8-30), pie de hasta 3 líneas (y 34-70), lista (desde y 74).
+local BUTTON_Y, FOOTER_Y, FOOTER_HEIGHT, FOOTER_LINES = 8, 34, 36, 3
+local LIST_BOTTOM = FOOTER_Y + FOOTER_HEIGHT + 4
 local SECTION_TITLES = {notes = "Avisos", now = "Ahora", farm = "Recoger", group = "Hermandad"}
 local SECTION_ORDER = {"notes", "now", "farm", "group"}
 local EMPTY_TEXT = {
@@ -15,6 +18,8 @@ local EMPTY_TEXT = {
   farm = "Sin datos de recolección: necesitas una profesión de recolección y precios.",
   group = "Nadie de la hermandad con datos todavía. Pídeles que instalen el addon o usa /oro amigo.",
 }
+-- Sección Hermandad vacía cuando sí se conoce a alguien (info.guildKnown): no hay nada que les sirva ahora.
+local EMPTY_GROUP_KNOWN = "Nada para la hermandad con lo que llevas ahora."
 
 local frame, content
 local rows, headers, empties = {}, {}, {}
@@ -121,22 +126,27 @@ function UI.Create(opts)
   local ok, scroll = pcall(CreateFrame, "ScrollFrame", "OroHermandadScroll", frame, "ScrollFrameTemplate")
   if not ok or not scroll then scroll = CreateFrame("ScrollFrame", "OroHermandadScroll2", frame, "UIPanelScrollFrameTemplate") end
   scroll:SetPoint("TOPLEFT", 12, -92)
-  scroll:SetPoint("BOTTOMRIGHT", -32, 58)
+  scroll:SetPoint("BOTTOMRIGHT", -32, LIST_BOTTOM)
   content = CreateFrame("Frame", nil, scroll)
   content:SetSize(WIDTH - 60, 10)
   scroll:SetScrollChild(content)
   frame.scroll = scroll
 
   frame.shopButton = button("Comprar lo que falta", 160, function() if callbacks.onShop then callbacks.onShop() end end)
-  frame.shopButton:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 12, 30)
+  frame.shopButton:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 12, BUTTON_Y)
   frame.shopButton:Hide()
   frame.optionsButton = button("Opciones", 90, function() if callbacks.onOptions then callbacks.onOptions() end end)
-  frame.optionsButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -12, 30)
+  frame.optionsButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -12, BUTTON_Y)
 
+  -- El pie tiene su propio hueco entre los botones y la lista: alto fijo y como mucho 3 líneas, para que un texto
+  -- largo no crezca hacia arriba y se meta debajo de los botones.
   frame.footer = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  frame.footer:SetPoint("BOTTOMLEFT", 14, 12)
-  frame.footer:SetWidth(WIDTH - 28)
+  frame.footer:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 14, FOOTER_Y)
+  frame.footer:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -14, FOOTER_Y)
+  frame.footer:SetHeight(FOOTER_HEIGHT)
   frame.footer:SetJustifyH("LEFT")
+  frame.footer:SetJustifyV("BOTTOM")
+  if frame.footer.SetMaxLines then frame.footer:SetMaxLines(FOOTER_LINES) end
   return frame
 end
 
@@ -185,7 +195,7 @@ function UI.Render(result, info)
       if #list == 0 then
         empty:ClearAllPoints()
         empty:SetPoint("TOPLEFT", content, "TOPLEFT", 4, -y)
-        empty:SetText(EMPTY_TEXT[key] or "")
+        empty:SetText((key == "group" and info and info.guildKnown) and EMPTY_GROUP_KNOWN or EMPTY_TEXT[key] or "")
         empty:Show()
         y = y + math.max(16, empty:GetStringHeight() or 16) + 8
       else

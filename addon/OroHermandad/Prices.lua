@@ -12,9 +12,11 @@ Prices.HISTORY_DAYS = 21         -- historial por defecto de Auctionator (opció
 Prices.LIST_NAME = "Oro de Hermandad"
 local CACHE_SECONDS = 30
 
-local store                      -- tabla guardada opcional: precios de mercader vistos y comisión aprendida
+local store                      -- tabla guardada de la cuenta (opcional): comisión aprendida
+local merchant                   -- tabla guardada del personaje (opcional): lo que los mercaderes le cobran a ÉL
 local cache, cacheOwner, cacheStamp = {}, nil, 0
 local watchers, watching = {}, false
+local scanWatchers, scanWatching = {}, false
 local round = {key = nil, index = 1}
 
 local floor = math.floor
@@ -87,12 +89,14 @@ function Prices.Invalidate()
   cache, cacheStamp = {}, now()
 end
 
--- Tabla guardada (p. ej. OroHermandadDB.prices). Opcional.
-function Prices.Init(saved)
+-- saved: tabla de la cuenta (p. ej. OroHermandadDB.prices). perChar: tabla del personaje para los precios de
+-- mercader (un descuento de reputación es de un personaje, y la otra facción puede no tener ese mercader). Opcionales.
+function Prices.Init(saved, perChar)
   if type(saved) == "table" then
     store = saved
-    store.merchant = type(store.merchant) == "table" and store.merchant or {}
+    store.merchant = nil -- la 0.2.0 los guardaba para toda la cuenta: podían ser descuentos de otro personaje
   end
+  if type(perChar) == "table" then merchant = perChar end
 end
 
 function Prices.Available()
@@ -175,16 +179,17 @@ local function auctionatorVendor(id)
 end
 
 -- Lo que cuesta COMPRARLO a un mercader de existencias ilimitadas (precio / pila; puede tener decimales).
--- Primero lo que te cobró a ti un mercader (incluye descuentos de reputación), luego lo que aprendió Auctionator.
+-- Primero lo que un mercader le cobró a ESTE personaje (incluye sus descuentos de reputación). Si no, lo que aprendió
+-- Auctionator, que es de toda la cuenta: puede ser el descuento de otro personaje, así que no baja del precio de la tabla.
 function Prices.VendorBuy(itemID)
   local id = toID(itemID)
   if not id then return nil end
-  local own = store and store.merchant and positive(store.merchant[id])
+  local own = merchant and positive(merchant[id])
   if own then return own end
   local learned = cached("v", id, auctionatorVendor)
-  if learned then return learned end
-  local static = ns.Data and ns.Data.VENDOR_BUY and ns.Data.VENDOR_BUY[id]
-  return positive(static)
+  local static = positive(ns.Data and ns.Data.VENDOR_BUY and ns.Data.VENDOR_BUY[id])
+  if learned and static then return math.max(learned, static) end
+  return learned or static
 end
 
 -- Lo que te paga un mercader por una unidad (precio de venta del objeto).
@@ -197,10 +202,11 @@ function Prices.ItemName(itemID)
   return ns.Items.Name(itemID)
 end
 
--- Llamar en MERCHANT_SHOW (con C_Timer.After(0.3, ...)): guarda el precio de compra por unidad de lo que el
--- mercader vende sin límite. En Forever la ficha moderna es C_MerchantFrame.GetItemInfo(i).
+-- Llamar en MERCHANT_SHOW (con C_Timer.After(0.3, ...)): guarda en la tabla del personaje el precio de compra por
+-- unidad de lo que el mercader vende sin límite y él puede comprar (el cliente pinta de rojo lo que no:
+-- isPurchasable = false). En Forever la ficha moderna es C_MerchantFrame.GetItemInfo(i).
 function Prices.RecordMerchant()
-  if not store or type(GetMerchantNumItems) ~= "function" or type(GetMerchantItemID) ~= "function" then return 0 end
+  if not merchant or type(GetMerchantNumItems) ~= "function" or type(GetMerchantItemID) ~= "function" then return 0 end
   local okCount, count = pcall(GetMerchantNumItems)
   count = okCount and tonumber(readable(count)) or 0
   local getInfo = type(C_MerchantFrame) == "table" and C_MerchantFrame.GetItemInfo or nil
@@ -208,20 +214,21 @@ function Prices.RecordMerchant()
   for i = 1, count do
     local okID, rawID = pcall(GetMerchantItemID, i)
     local id = okID and toID(readable(rawID)) or nil
-    local price, stack, available, extended
+    local price, stack, available, extended, purchasable
     if id and type(getInfo) == "function" then
       local ok, info = pcall(getInfo, i)
       if ok and type(info) == "table" then
         price, stack, available, extended = info.price, info.stackCount, info.numAvailable, info.hasExtendedCost
+        purchasable = info.isPurchasable
       end
     elseif id and type(GetMerchantItemInfo) == "function" then
-      local ok, _, _, p, s, a, _, _, e = pcall(GetMerchantItemInfo, i)
-      if ok then price, stack, available, extended = p, s, a, e end
+      local ok, _, _, p, s, a, buyable, _, e = pcall(GetMerchantItemInfo, i)
+      if ok then price, stack, available, purchasable, extended = p, s, a, buyable, e end
     end
-    price, stack, available = readable(price), readable(stack), readable(available)
+    price, stack, available, purchasable = readable(price), readable(stack), readable(available), readable(purchasable)
     if id and type(price) == "number" and price > 0 and type(stack) == "number" and stack > 0
-        and available == -1 and not extended then
-      store.merchant[id] = price / stack
+        and available == -1 and not extended and purchasable ~= false then
+      merchant[id] = price / stack
       learned = learned + 1
     end
   end
@@ -278,6 +285,8 @@ local function fire()
 end
 
 -- Auctionator llama tras cada tanda de resultados de búsqueda y tras un escaneo completo (sin argumentos).
+-- Sirve para refrescar, NO para fechar los precios: también salta con los favoritos que la subasta busca al abrirse,
+-- con la pestaña Comprar y con las listas de la compra, que solo actualizan unos pocos objetos.
 -- No hay forma de darse de baja: se registra una sola vez y se reparte a todos los interesados.
 function Prices.Watch(callback)
   if type(callback) == "function" then watchers[#watchers + 1] = callback end
@@ -287,6 +296,45 @@ function Prices.Watch(callback)
     watching = pcall(v1.RegisterForDBUpdate, CALLER, fire) and true or false
   end
   return watching
+end
+
+-- Final de un escaneo de Auctionator: callback(kind, rows), con kind "full" (escaneo completo, el de replicate) o
+-- "summary" (su escaneo de resumen de toda la subasta) y rows = cuántos resultados trae (los que Auctionator pasa con
+-- el evento; nil si su versión no los pasa). No es API pública (EventBus y los eventos ScanComplete de FullScan e
+-- IncrementalScan): todo se comprueba y va en pcall. Devuelve false si no se pueden oír (ver Prices.LastScanTime).
+function Prices.WatchScans(callback)
+  if type(callback) == "function" then scanWatchers[#scanWatchers + 1] = callback end
+  if scanWatching then return true end
+  scanWatching = pcall(function()
+    local A = _G.Auctionator
+    local bus = A.EventBus
+    assert(type(bus) == "table" and type(bus.Register) == "function")
+    local kinds, names = {}, {}
+    for kind, module in pairs({full = A.FullScan, summary = A.IncrementalScan}) do
+      local name = type(module) == "table" and type(module.Events) == "table" and module.Events.ScanComplete or nil
+      if type(name) == "string" then kinds[name], names[#names + 1] = kind, name end
+    end
+    assert(#names > 0)
+    bus:Register({ReceiveEvent = function(_, eventName, data)
+      Prices.Invalidate()
+      local rows = type(data) == "table" and #data or nil
+      for i = 1, #scanWatchers do pcall(scanWatchers[i], kinds[eventName], rows) end
+    end}, names)
+  end) and true or false
+  return scanWatching
+end
+
+function Prices.WatchingScans() return scanWatching end
+
+-- Respaldo si no se pueden oír los escaneos: cuándo EMPEZÓ Auctionator su último escaneo (lo guarda para toda la
+-- cuenta, no por reino). nil si no se sabe.
+function Prices.LastScanTime()
+  local ok, t = pcall(function()
+    local saved = _G.Auctionator.SavedState
+    return math.max(tonumber(readable(saved.TimeOfLastBrowseScan)) or 0, tonumber(readable(saved.TimeOfLastReplicateScan)) or 0)
+  end)
+  if ok and type(t) == "number" and t > 0 then return t end
+  return nil
 end
 
 -- Opción interna de Auctionator (no es API pública): escanear al abrir la subasta. nil si no se puede leer.
@@ -315,6 +363,16 @@ end
 
 function Prices.CanShop()
   return has("CreateShoppingList") and has("ConvertToSearchString")
+end
+
+-- ¿Está Auctionator haciendo su escaneo de resumen? (estado interno, no es API pública: false si no se puede leer).
+-- Mientras dura, cualquier búsqueda en la subasta lo corta y Auctionator lo da por terminado solo con ella.
+function Prices.ScanRunning()
+  local ok, running = pcall(function()
+    local scan = _G.Auctionator.State.IncrementalScanFrameRef
+    return type(scan) == "table" and scan.doingFullScan == true
+  end)
+  return ok and running == true
 end
 
 -- Llama a done cuando el cliente conoce todos los nombres. Devuelve true si tiene que esperar.
@@ -365,7 +423,8 @@ local function shopWithAuctionator(list)
   if #strings == 0 then return end
   -- Reemplaza la lista del mismo nombre; Auctionator la despliega en su pestaña Compras.
   pcall(v1.CreateShoppingList, CALLER, Prices.LIST_NAME, strings)
-  if not Prices.AuctionHouseOpen() then return end
+  -- Buscar durante el escaneo de resumen de Auctionator lo cortaría: solo se crea la lista.
+  if not Prices.AuctionHouseOpen() or Prices.ScanRunning() then return end
   -- MultiSearchAdvanced recibe TABLAS de búsqueda (no cadenas) y conserva las cantidades.
   if type(v1.MultiSearchAdvanced) == "function" and pcall(v1.MultiSearchAdvanced, CALLER, terms) then return end
   if type(v1.MultiSearchExact) == "function" then pcall(v1.MultiSearchExact, CALLER, names) end
@@ -375,23 +434,22 @@ end
 -- Devuelve:
 --   "auctionator"  lista "Oro de Hermandad" creada y buscada (subasta abierta)
 --   "list"         lista creada; la subasta está cerrada (se busca al abrir Compras en Auctionator)
+--   "scanning"     lista creada sin buscarla: Auctionator está escaneando la subasta y la búsqueda lo cortaría
 --   "loading"      el cliente carga nombres; se completa solo en un momento
 --   "searchbox", item  sin Auctionator: el nombre del siguiente objeto está en la caja de búsqueda; pulsa Buscar
 --   "notbuytab", item  sin Auctionator: la subasta no está en la pestaña Comprar
 --   "closed"       sin Auctionator y la subasta cerrada
---   "none"         no falta nada
+--   "none"         no falta nada (la lista que ya tuvieras en Auctionator no se toca)
 function Prices.ShopFor(items)
   local list = normalize(items)
-  if #list == 0 then
-    if Prices.CanShop() then pcall(api().CreateShoppingList, CALLER, Prices.LIST_NAME, {}) end
-    return "none"
-  end
+  if #list == 0 then return "none" end
   if Prices.CanShop() then
     local ids = {}
     for i, item in ipairs(list) do ids[i] = item.id end
     local waiting = withNames(ids, function() shopWithAuctionator(list) end)
     if waiting then return "loading" end
-    return Prices.AuctionHouseOpen() and "auctionator" or "list"
+    if not Prices.AuctionHouseOpen() then return "list" end
+    return Prices.ScanRunning() and "scanning" or "auctionator"
   end
   if not Prices.AuctionHouseOpen() then return "closed" end
   local parts = {}

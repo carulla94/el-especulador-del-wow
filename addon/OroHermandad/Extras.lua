@@ -40,13 +40,14 @@ local function onDragUpdate(self)
   placeButton(self, angle)
 end
 
-local function showTooltip(owner, anchor)
+-- fromCompartment: la entrada del menú de addons del minimapa no se puede arrastrar (solo el botón redondo).
+local function showTooltip(owner, anchor, fromCompartment)
   if not GameTooltip then return end
   GameTooltip:SetOwner(owner, anchor or "ANCHOR_LEFT")
   GameTooltip:SetText("Oro de Hermandad")
   GameTooltip:AddLine("Clic: abrir / cerrar", 1, 1, 1)
   GameTooltip:AddLine("Clic derecho: opciones", 1, 1, 1)
-  GameTooltip:AddLine("Arrastrar: mover el botón", 0.7, 0.7, 0.7)
+  if not fromCompartment then GameTooltip:AddLine("Arrastrar: mover el botón", 0.7, 0.7, 0.7) end
   GameTooltip:Show()
 end
 
@@ -113,7 +114,7 @@ function OroHermandad_OnCompartmentClick(_, buttonName)
     state.onToggle()
   end
 end
-function OroHermandad_OnCompartmentEnter(_, menuButton) showTooltip(menuButton, "ANCHOR_LEFT") end
+function OroHermandad_OnCompartmentEnter(_, menuButton) showTooltip(menuButton, "ANCHOR_LEFT", true) end
 function OroHermandad_OnCompartmentLeave() if GameTooltip then GameTooltip:Hide() end end
 
 ---------------------------------------------------------------------------

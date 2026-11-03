@@ -35,12 +35,22 @@ Data.PROFESSIONS = {
   fishing        = {label = "Pesca",             names = {"Fishing", "Pesca"}},
 }
 
--- Rango de instructor según el tope de habilidad.
+-- Rango según el tope de habilidad. level = nivel de personaje que pide el instructor de una profesión principal
+-- (reglas de Classic, las mismas en Forever).
 Data.TIERS = {
   {max = 75,  name = "Aprendiz"},
-  {max = 150, name = "Oficial"},
-  {max = 225, name = "Experto"},
-  {max = 300, name = "Artesano"},
+  {max = 150, name = "Oficial",  level = 10},
+  {max = 225, name = "Experto",  level = 20},
+  {max = 300, name = "Artesano", level = 35},
+}
+
+-- Las secundarias no siempre se aprenden con un instructor: Experto es un libro que vende un mercader y Artesano,
+-- una misión. Por tope del rango: how = "trainer", "book" o "quest"; level = nivel de personaje (nil: no pide);
+-- book = el libro.
+Data.SECONDARY_RANKS = {
+  cooking  = {[150] = {how = "trainer", level = 10}, [225] = {how = "book", book = 16072, level = 20}, [300] = {how = "quest", level = 35}},
+  firstaid = {[150] = {how = "trainer"},             [225] = {how = "book", book = 16084},             [300] = {how = "quest", level = 35}},
+  fishing  = {[150] = {how = "trainer"},             [225] = {how = "book", book = 16083, level = 20}, [300] = {how = "quest", level = 35}},
 }
 
 -- Quita tildes y pasa a minúsculas para comparar nombres.
@@ -183,7 +193,8 @@ for _, smelt in ipairs(Data.SMELT) do
 end
 
 -- Precio de compra a mercaderes de materiales con existencias ilimitadas (cobre por unidad).
--- Se usa si Auctionator o tu visita a un mercader no dan uno mejor.
+-- Se usa si este personaje no ha comprado aún a un mercader que lo venda; lo que aprendió Auctionator (de toda la
+-- cuenta) solo cuenta si no es más barato que esto.
 Data.VENDOR_BUY = {
   [3857] = 500,   -- Carbón
   [2880] = 100,   -- Fundente débil
@@ -281,6 +292,8 @@ local NAMES_esES = {
   [8169] = "Pellejo grueso", [8170] = "Cuero basto", [8171] = "Pellejo basto",
   [2589] = "Paño de lino", [2592] = "Paño de lana", [4306] = "Paño de seda", [4338] = "Tela de paño mágico",
   [14047] = "Paño rúnico", [14256] = "Tela de inferi",
+  [16072] = "Libro de cocina para expertos", [16083] = "Pesca para expertos: La lubina y tú",
+  [16084] = "Primeros auxilios para expertos: Entre vendas",
 }
 local NAMES_esMX = {
   [2770] = "Mena de cobre", [2771] = "Mena de estaño", [2775] = "Mena de plata", [2772] = "Mena de hierro",
@@ -292,8 +305,8 @@ local NAMES_esMX = {
   [13466] = "Flor de plaga", [14256] = "Tela vil",
 }
 Data.FALLBACK_NAMES = {}
-for id, name in pairs(NAMES_esES) do Data.FALLBACK_NAMES[id] = name end
 function Data.ApplyLocale(locale)
+  for id, name in pairs(NAMES_esES) do Data.FALLBACK_NAMES[id] = name end
   if locale == "esMX" then
     for id, name in pairs(NAMES_esMX) do Data.FALLBACK_NAMES[id] = name end
   end

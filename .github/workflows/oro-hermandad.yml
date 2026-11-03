@@ -6,14 +6,12 @@ on:
       - 'addon/OroHermandad/**'
       - 'test-lua/**'
       - 'scripts/build-oro-hermandad.mjs'
-      - 'descargas/**'
       - '.github/workflows/oro-hermandad.yml'
   pull_request:
     paths:
       - 'addon/OroHermandad/**'
       - 'test-lua/**'
       - 'scripts/build-oro-hermandad.mjs'
-      - 'descargas/**'
       - '.github/workflows/oro-hermandad.yml'
   workflow_dispatch:
 
@@ -38,10 +36,13 @@ jobs:
         with:
           node-version: '24.16.0'
           package-manager-cache: false
-      - name: El zip de descargas está al día
-        run: |
-          node scripts/build-oro-hermandad.mjs "$RUNNER_TEMP/nuevo.zip"
-          mkdir -p "$RUNNER_TEMP/subido" "$RUNNER_TEMP/nuevo"
-          unzip -q descargas/OroHermandad.zip -d "$RUNNER_TEMP/subido"
-          unzip -q "$RUNNER_TEMP/nuevo.zip" -d "$RUNNER_TEMP/nuevo"
-          diff -r "$RUNNER_TEMP/subido" "$RUNNER_TEMP/nuevo" || { echo "Ejecuta: node scripts/build-oro-hermandad.mjs"; exit 1; }
+      # El zip no se guarda en Git: se construye aquí y queda en la ejecución (artefacto OroHermandad.zip)
+      # para que los colaboradores lo descarguen desde la pestaña Actions.
+      - name: Construir el zip del addon
+        run: node scripts/build-oro-hermandad.mjs "$RUNNER_TEMP/OroHermandad.zip"
+      - name: Guardar el zip en la ejecución
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          path: ${{ runner.temp }}/OroHermandad.zip
+          archive: false
+          if-no-files-found: error
