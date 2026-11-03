@@ -127,7 +127,7 @@ test("/oro comprar calcula en el momento: ventana cerrada, bolsas cambiadas, mod
   table.insert(Stub.slots[0], {itemID = 12365, stackCount = 5, quality = 1, isBound = false})
   Stub.printed = {}
   slash("comprar")
-  assert(printed("no falta nada"), "ya lo tienes")
+  assert(printed("no hay nada que comprar en la subasta para las recetas sugeridas."), "ya lo tienes")
   assert(Stub.shoppingList == list and #list.strings == 1, "la lista de Auctionator no se toca")
   table.remove(Stub.slots[0])
   -- Tranquilo no lista lo que falta: lo explica y no toca Auctionator.
@@ -198,7 +198,8 @@ test("Descripción de objetos: precio, quién lo usa y cuántos hay en el banco"
   slash("amigo ana mineria 150") -- cambia la hermandad: se vuelve a calcular
   tip.__lines = {}
   Stub.tooltipPost(tip, {id = 2772})
-  assert(uses.n == 2 and has(table.concat(tip.__lines, " | "), "Lo usa: Ana (Minería), Luis (Minería)"), table.concat(tip.__lines, " | "))
+  -- Con varios, en plural.
+  assert(uses.n == 2 and has(table.concat(tip.__lines, " | "), "Lo usan: Ana (Minería), Luis (Minería)"), table.concat(tip.__lines, " | "))
   slash("amigo borrar ana")
   uses.restore()
   tip.__lines = {}
@@ -253,6 +254,12 @@ test("Precios viejos: aviso al abrir la subasta, ventana pegada a ella; una bús
   visit()
   assert(not printed("Precios de hace"), "el mismo aviso no se repite")
   assert(#Stub.sounds == 0, "ni suena")
+  -- Un escaneo de resumen cortado por una búsqueda (barra de búsqueda, pestaña Compras, «Comprar lo que falta»):
+  -- Auctionator lo da por terminado solo con los resultados de esa búsqueda. No fecha los precios.
+  Stub.scanComplete("summary", 3)
+  Stub.runTimers(5)
+  assert(OroHermandadDB.dbUpdated[KEY] == old and ns.Core.Context().fullScanAt == nil, "un resumen cortado no cuenta")
+  assert(lastRender.result.db.level == "warn", lastRender.result.db.text)
   -- Termina el escaneo de resumen de Auctionator (el que hace por defecto): recorre toda la subasta, así que cuenta
   -- como escaneo completo.
   Stub.scanComplete("summary")
@@ -298,6 +305,46 @@ test("Escaneos de Auctionator sin su EventBus: se usa su hora guardada", functio
   ns.Prices.WatchingScans = watching
   assert(OroHermandadDB.fullScan["Forever-Alliance"] == Stub.now, "respaldo")
   OroHermandadDB.fullScan["Forever-Alliance"] = before
+end)
+
+test("Escaneo de resumen: cuenta si trae una parte creíble de la subasta; si la subasta encoge, el siguiente sí", function()
+  local KEY, db = "Forever-Alliance", OroHermandadDB
+  local saved = {db.dbUpdated[KEY], db.fullScan[KEY], db.scanRows[KEY]}
+  assert(saved[3] == 1000, "se recuerda cuántos trajo el último que contó: " .. tostring(saved[3]))
+  db.dbUpdated[KEY], db.fullScan[KEY] = nil, nil
+  Stub.scanComplete("summary", 400) -- menos de la mitad que el último
+  Stub.runTimers(5)
+  assert(db.fullScan[KEY] == nil and db.dbUpdated[KEY] == nil, "corto: no cuenta")
+  assert(db.scanRows[KEY] == 750, "la referencia baja un poco: " .. tostring(db.scanRows[KEY]))
+  Stub.scanComplete("summary", 400) -- la subasta ha encogido de verdad
+  Stub.runTimers(5)
+  assert(db.fullScan[KEY] == Stub.now and db.dbUpdated[KEY] == Stub.now and db.scanRows[KEY] == 400, "el siguiente ya cuenta")
+  -- Sin el número de resultados (versión de Auctionator que no los pasa): fecha el escaneo, pero no como completo.
+  db.dbUpdated[KEY], db.fullScan[KEY] = nil, nil
+  Stub.busFire("full_incremental_scan_complete")
+  Stub.runTimers(5)
+  assert(db.dbUpdated[KEY] == Stub.now and db.fullScan[KEY] == nil, "sin resultados")
+  db.dbUpdated[KEY], db.fullScan[KEY], db.scanRows[KEY] = saved[1], saved[2], saved[3]
+end)
+
+test("Comprar lo que falta durante el escaneo de Auctionator: crea la lista pero no la busca (lo cortaría)", function()
+  local ah = _G.AuctionHouseFrame
+  local wasShown = ah.__shown
+  ah:Show()
+  slash("atope")
+  Stub.scanFrame.doingFullScan = true
+  Stub.shoppingList, Stub.multiSearch, Stub.printed = nil, nil, {}
+  slash("comprar")
+  Stub.scanFrame.doingFullScan = false
+  assert(Stub.shoppingList and has(Stub.shoppingList.strings[1], "Piedra densa"), "lista creada")
+  assert(Stub.multiSearch == nil, "sin búsqueda en la subasta")
+  assert(printed("no la busco") and printed("pestaña Compras"), "lo explica")
+  Stub.shoppingList, Stub.printed = nil, {}
+  slash("comprar")
+  assert(Stub.multiSearch and Stub.multiSearch[1].searchString == "Piedra densa", "sin escaneo, sí busca")
+  assert(printed("buscando en la subasta"), "mensaje normal")
+  Stub.multiSearch, Stub.printed = nil, {}
+  ah.__shown = wasShown
 end)
 
 test("Oro de la sesión", function()
@@ -390,6 +437,61 @@ test("Menú de addons del minimapa: la descripción no invita a arrastrar (el bo
   local button = _G.OroHermandadMinimapButton
   button.__scripts.OnEnter(button)
   assert(has(table.concat(tip.__lines, " | "), "Arrastrar: mover el botón"), "el botón del minimapa sí se arrastra")
+end)
+
+test("/oro comprar: si lo que falta lo vende un mercader, lo dice; si lo tienes en el banco, se saca", function()
+  local bags, bank = Stub.slots[0], OroHermandadCharDB.bank
+  Stub.items[3859], Stub.items[3857] = {"Lingote de acero", 1, "", 50, 7}, {"Carbón", 1, "", 125, 7}
+  Stub.prices[3859] = 3000 -- el carbón no está en la subasta: solo lo vende un mercader
+  Stub.slots[0] = {{itemID = 3575, stackCount = 20, quality = 1, isBound = false},
+                   {itemID = 12365, stackCount = 5, quality = 1, isBound = false}}
+  OroHermandadCharDB.bank = {items = {}, at = Stub.now}
+  ns.Prices.Invalidate()
+  slash("atope")
+  local steel = rendered("craft", function(item) return item.icon == 3859 end)
+  assert(steel and has(steel.detail, "Compra a un mercader 20× Carbón"), steel and steel.detail)
+  Stub.shoppingList, Stub.printed = nil, {}
+  slash("comprar")
+  assert(printed("no hay nada que comprar en la subasta") and printed("Lo que falta lo vende un mercader: 20× Carbón."),
+    table.concat(Stub.printed, " / "))
+  assert(not printed("no falta nada") and Stub.shoppingList == nil, "ni «no falta nada» ni lista en Auctionator")
+  -- Con el carbón en el banco: se saca, no se compra.
+  OroHermandadCharDB.bank.items[3857] = {count = 20, quality = 1}
+  slash("atope")
+  steel = rendered("craft", function(item) return item.icon == 3859 end)
+  assert(steel and has(steel.title, "Saca del banco y funde 20× Lingote de acero"), steel and steel.title)
+  assert(has(steel.detail, "Del banco: 20× Carbón.") and not has(steel.detail, "mercader"), steel.detail)
+  Stub.printed = {}
+  slash("comprar")
+  assert(printed("no hay nada que comprar en la subasta") and not printed("mercader"), table.concat(Stub.printed, " / "))
+  Stub.slots[0], OroHermandadCharDB.bank, Stub.prices[3859] = bags, bank, nil
+  ns.Prices.Invalidate()
+  Stub.printed = {}
+end)
+
+test("Hermandad sin sugerencias: si se conoce a alguien, no dice que nadie tiene datos", function()
+  slash("tranquilo")
+  assert(lastRender.info.guildKnown == true, "Core dice a la ventana que hay hermandad conocida")
+  -- Otra instancia de UI.lua para ver los textos que pinta (sin tocar la ventana de la sesión).
+  local texts, saved = {}, {frame = _G.OroHermandadFrame, scroll = _G.OroHermandadScroll, createFrame = _G.CreateFrame}
+  _G.CreateFrame = function(...)
+    local f = saved.createFrame(...)
+    f.CreateFontString = function() local fs = Stub.newObject("FontString"); texts[#texts + 1] = fs; return fs end
+    return f
+  end
+  local ok, err = pcall(function()
+    local U = {Items = ns.Items}
+    assert(loadfile("addon/OroHermandad/UI.lua"))("OroHermandad", U)
+    U.UI.Create({position = {}})
+    local function shown(sub) for _, fs in ipairs(texts) do if fs.__shown and has(fs.__text, sub) then return true end end end
+    local empty = {mode = "lazy", notes = {}, sections = {now = {}, farm = {}, group = {}}}
+    U.UI.Render(empty, {footer = "Hermandad: 0 con addon, 2 del roster", guildKnown = true})
+    assert(shown("Nada para la hermandad con lo que llevas ahora.") and not shown("Nadie de la hermandad"), "con hermandad conocida")
+    U.UI.Render(empty, {footer = "Hermandad: 0 con addon"})
+    assert(shown("Nadie de la hermandad con datos todavía") and not shown("Nada para la hermandad"), "sin nadie conocido")
+  end)
+  _G.CreateFrame, _G.OroHermandadFrame, _G.OroHermandadScroll = saved.createFrame, saved.frame, saved.scroll
+  if not ok then error(err, 0) end
 end)
 
 test("Sin Auctionator no rompe y lo explica", function()

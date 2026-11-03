@@ -162,10 +162,15 @@ function Stub.install()
   end
   -- Una tanda de resultados de búsqueda (favoritos, pestaña Comprar, lista de la compra): no es un escaneo.
   function Stub.dbCallback() Stub.busFire(EVENTS.prices) end
-  -- Fin de un escaneo: "full" (replicate) o "summary" (el de resumen, que después procesa los precios).
-  function Stub.scanComplete(kind)
-    if kind == "full" then Stub.busFire(EVENTS.full, {}) else Stub.busFire(EVENTS.summary, {}); Stub.busFire(EVENTS.prices) end
+  -- Fin de un escaneo: "full" (replicate) o "summary" (el de resumen, que después procesa los precios). Como el real,
+  -- el evento lleva los resultados del escaneo (rawScan / fixedScanData): rows filas, 1000 si no se dice.
+  function Stub.scanComplete(kind, rows)
+    local data = {}
+    for i = 1, rows or 1000 do data[i] = {} end
+    if kind == "full" then Stub.busFire(EVENTS.full, data) else Stub.busFire(EVENTS.summary, data); Stub.busFire(EVENTS.prices) end
   end
+  -- Marco del escaneo de resumen de Auctionator (Auctionator.State.IncrementalScanFrameRef): doingFullScan mientras dura.
+  Stub.scanFrame = {doingFullScan = false}
   _G.Auctionator = {
     API = {v1 = {
       GetAuctionPriceByItemID = function(caller, id) assert(type(caller) == "string"); return prices[id] end,
@@ -185,6 +190,7 @@ function Stub.install()
     IncrementalScan = {Events = {ScanStart = "full_incremental_scan_start", ScanComplete = EVENTS.summary,
                                  PricesProcessed = EVENTS.prices}},
     SavedState = {},
+    State = {IncrementalScanFrameRef = Stub.scanFrame},
   }
 
   -- Mercader abierto: cada fila {id, price, stack, available, purchasable, extended}.

@@ -280,6 +280,7 @@ test("Material de mercader (a tope): no limita cuántas haces ni va a la lista d
   assert(steel and has(steel.title, "Funde 20× Lingote de acero"), steel and steel.title)
   assert(has(steel.detail, "Compra a un mercader 20× Carbón"), steel.detail)
   eq(steel.shopping, nil, "el carbón no se busca en la subasta")
+  assert(steel.vendorBuys and steel.vendorBuys[1].id == 3857 and steel.vendorBuys[1].count == 20, "lo que se compra al mercader (para /oro comprar)")
   eq(find(r.sections.now, function(s) return s.kind == "sell" and has(s.title, "Lingote de hierro") end), nil, "el hierro no se vende")
   -- Con 5 de carbón en las bolsas solo compras 15.
   bags[3857] = {count = 5, quality = 1}
@@ -291,6 +292,7 @@ test("Material de mercader (a tope): no limita cuántas haces ni va a la lista d
   local steel3 = find(r3.sections.now, function(s) return s.icon == 3859 end)
   assert(steel3 and has(steel3.detail, "1× Carbón (cómpralo a un mercader)"), steel3 and steel3.detail)
   eq(#steel3.shopping, 1); eq(steel3.shopping[1].id, 3575)
+  assert(steel3.vendorBuys and steel3.vendorBuys[1].id == 3857 and steel3.vendorBuys[1].count == 1, "carbón al mercader")
   -- Si la subasta es más barata que el mercader, el carbón sí va a la lista.
   PRICES[3857] = 300
   local r4 = Engine.Suggest(ctx({mode = "farm", vendorBuy = vendorBuy, bags = {}}))
@@ -301,6 +303,49 @@ test("Material de mercader (a tope): no limita cuántas haces ni va a la lista d
   eq(find(Engine.Suggest(ctx({vendorBuy = vendorBuy, bags = {[3575] = {count = 20, quality = 1}}})).sections.now,
     function(s) return s.icon == 3859 end), nil)
   PRICES[3859], PRICES[3857] = nil, nil
+end)
+
+test("Material de mercader guardado en el banco (a tope): se saca, no se compra ni se sugiere venderlo", function()
+  PRICES[3859] = 2500 -- el carbón no está en la subasta (lo normal): solo lo vende un mercader
+  local vendorBuy = function(id) return id == 3857 and 500 or nil end
+  local vendor = function(id) return id == 3857 and 125 or 1 end
+  local function steelRow(r) return find(r.sections.now, function(s) return s.icon == 3859 end) end
+  local function sellsCoal(r)
+    return find(r.sections.now, function(s) return s.kind == "bank" and has(s.title, "vende") and has(s.detail, "Carbón") end)
+  end
+  local bags = {[3575] = {count = 20, quality = 1}}
+  -- Todo el carbón en el banco: igual que en tranquilo.
+  local r = Engine.Suggest(ctx({mode = "farm", vendorBuy = vendorBuy, vendor = vendor, bags = bags,
+    bank = {[3857] = {count = 20, quality = 1}}}))
+  local steel = steelRow(r)
+  assert(steel and steel.title == "Saca del banco y funde 20× Lingote de acero", steel and steel.title)
+  assert(has(steel.detail, "Del banco: 20× Carbón.") and not has(steel.detail, "mercader"), steel.detail)
+  eq(steel.vendorBuys, nil, "nada que comprar")
+  local lazy = steelRow(Engine.Suggest(ctx({vendorBuy = vendorBuy, vendor = vendor, bags = bags, bank = {[3857] = {count = 20, quality = 1}}})))
+  eq(lazy and lazy.title, steel.title, "mismo consejo en los dos modos")
+  -- Parte en el banco: se saca y el resto se compra.
+  steel = steelRow(Engine.Suggest(ctx({mode = "farm", vendorBuy = vendorBuy, vendor = vendor, bags = bags,
+    bank = {[3857] = {count = 8, quality = 1}}})))
+  assert(has(steel.detail, "Del banco: 8× Carbón. Compra a un mercader 12× Carbón."), steel.detail)
+  assert(steel.vendorBuys and steel.vendorBuys[1].count == 12, "12 al mercader")
+  -- Con el carbón en la subasta justo por encima del mercader: el del banco no se sugiere vender.
+  PRICES[3857] = 510
+  r = Engine.Suggest(ctx({mode = "farm", vendorBuy = vendorBuy, vendor = vendor, bags = bags, bank = {[3857] = {count = 20, quality = 1}}}))
+  assert(has(steelRow(r).detail, "Del banco: 20× Carbón."), steelRow(r).detail)
+  eq(sellsCoal(r), nil, "no se vende lo que la receta saca del banco")
+  -- Sin hierro: la fila «para vender» dice que el carbón está en el banco, no que lo compres, y tampoco se vende.
+  r = Engine.Suggest(ctx({mode = "farm", vendorBuy = vendorBuy, vendor = vendor, bags = {}, bank = {[3857] = {count = 20, quality = 1}}}))
+  steel = steelRow(r)
+  assert(steel and has(steel.detail, "1× Carbón (tienes 20 en el banco)") and not has(steel.detail, "mercader"), steel and steel.detail)
+  eq(#steel.shopping, 1); eq(steel.shopping[1].id, 3575); eq(steel.vendorBuys, nil)
+  eq(sellsCoal(r), nil, "el carbón reservado no se vende")
+  PRICES[3857] = nil
+  -- Hierro y carbón en el banco: se saca todo, nada al mercader.
+  steel = steelRow(Engine.Suggest(ctx({mode = "farm", vendorBuy = vendorBuy, vendor = vendor, bags = {},
+    bank = {[3575] = {count = 20, quality = 1}, [3857] = {count = 20, quality = 1}}})))
+  assert(steel and has(steel.detail, "Del banco: 20× Lingote de hierro, 20× Carbón.") and not has(steel.detail, "mercader"),
+    steel and steel.detail)
+  PRICES[3859] = nil
 end)
 
 test("Material de mercader: se usa el más barato entre mercader y subasta", function()

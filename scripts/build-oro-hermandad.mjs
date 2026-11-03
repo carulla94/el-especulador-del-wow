@@ -1,6 +1,7 @@
 /** Empaqueta el addon Oro de Hermandad en un zip (solo biblioteca estándar de Node).
- * Uso: node scripts/build-oro-hermandad.mjs [ruta-de-salida.zip]  (por defecto public/downloads/OroHermandad.zip,
- * que Git ignora: los ZIP generados no se suben al repositorio). El zip sale igual en Windows y en Linux. */
+ * Uso: node scripts/build-oro-hermandad.mjs [ruta-de-salida.zip]  (por defecto dist-addon/OroHermandad.zip, que Git
+ * ignora: los ZIP generados no se suben al repositorio). No va en public/: esa carpeta es la de la web y lo que hay
+ * en ella se publica al desplegar. El zip sale igual en Windows y en Linux. */
 import fs from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
@@ -8,7 +9,7 @@ import {deflateRawSync} from "node:zlib";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const source = path.join(root, "addon/OroHermandad");
-const output = process.argv[2] ? path.resolve(process.argv[2]) : path.join(root, "public/downloads/OroHermandad.zip");
+const output = process.argv[2] ? path.resolve(process.argv[2]) : path.join(root, "dist-addon/OroHermandad.zip");
 
 const table = Uint32Array.from({length: 256}, (_, value) => {
   for (let i = 0; i < 8; i++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;

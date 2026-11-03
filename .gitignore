@@ -4,6 +4,7 @@ node_modules/
 .env
 dashboard-deploy/
 dist-pages/
+dist-addon/
 playwright-report/
 test-results/
 public/downloads/*.zip

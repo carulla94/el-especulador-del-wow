@@ -548,6 +548,45 @@ test("Un amigo a mano con tu reino o en minúsculas se une a los datos del addon
   eq(m["ZÖe"], nil); eq(m["Zöe"].profs.tailoring, 10); eq(m["Zöe"].profs.mining, 100)
 end)
 
+test("0.2.0: amigos a mano guardados con tu reino («Ana-Forever») se unen a Ana; borrar quita lo que se nombra", function()
+  local db = {guilds = {
+    ["Forever/Los Mineros"] = {members = {
+      ["Ana-Forever"] = {manual = {profs = {engineering = 150, tailoring = 50}}},
+      Ana = {addon = {profs = {mining = 200}, level = 40, seen = time()}, manual = {profs = {tailoring = 75}}},
+      ["bea-forever"] = {manual = {profs = {enchanting = 120}}},
+      ["Eva-OtroReino"] = {manual = {profs = {alchemy = 100}}},
+      ["Vacio-Forever"] = {manual = {profs = {}}},
+    }},
+    -- Otra hermandad de otro reino: ahí «Ana-Forever» es alguien de fuera y no se toca.
+    ["OtroReino/Gremio"] = {members = {["Ana-Forever"] = {manual = {profs = {mining = 10}}}}},
+  }}
+  local G = freshGuild(db)
+  local m = G.Members()
+  eq(m["Ana-Forever"], nil, "sin duplicado")
+  eq(m.Ana.profs.mining, 200); eq(m.Ana.profs.engineering, 150, "lo manual se junta"); eq(m.Ana.profs.tailoring, 75, "sin pisar")
+  assert(m.Ana.addon and m.Ana.manual, "Ana conserva los datos del addon")
+  eq(m["bea-forever"], nil); eq(m.Bea.profs.enchanting, 120)
+  eq(m["Eva-OtroReino"].profs.alchemy, 100, "otro reino: se queda")
+  local stored = db.guilds["Forever/Los Mineros"].members
+  eq(stored["Vacio-Forever"], nil); eq(stored.Vacio, nil, "sin profesiones no se crea nada")
+  eq(db.guilds["OtroReino/Gremio"].members["Ana-Forever"].manual.profs.mining, 10)
+  local withAddon, manual = G.Count(); eq(withAddon, 1); eq(manual, 2)
+  eq(G.SetManual("Bea-Forever", "tailoring", 60), "Bea", "no crea otra Bea")
+  eq(G.Remove("Bea-Forever"), "Bea"); eq(G.Members().Bea, nil)
+  -- Donde no se renombra (almacén sin hermandad, que no es de ningún reino), la clave antigua se puede quitar tal cual
+  -- sin llevarse a la Ana de verdad.
+  local loose = {guilds = {_sinhermandad = {members = {["Ana-Forever"] = {manual = {profs = {engineering = 150}}},
+                                                       Ana = {manual = {profs = {mining = 100}}}}}}}
+  with({IsInGuild = function() return false end}, function()
+    local L = freshGuild(loose)
+    L.Settle()
+    eq(L.Remove("Ana-Forever"), "Ana-Forever")
+    eq(L.Members().Ana.profs.mining, 100, "la otra Ana se queda")
+    eq(L.Remove("Ana-Forever"), "Ana", "después, normalizado")
+    eq(next(L.Members()), nil)
+  end)
+end)
+
 ---------------------------------------------------------------------------
 -- Anuncios repetidos (23)
 ---------------------------------------------------------------------------

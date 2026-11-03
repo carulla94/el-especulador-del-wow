@@ -21,7 +21,7 @@ Tiene que quedar `AddOns\OroHermandad\OroHermandad.toc`. Si ves `OroHermandad\Or
 
 ## 4. Actívalo
 
-En la pantalla de personajes, pulsa **Menú** (arriba) y luego **Accesorios** (*AddOns* en inglés). Deja marcados **Oro de Hermandad** y **Auctionator**. Si alguno pone «Desactualizado», marca **Cargar accesorios desactualizados**, arriba de la lista. Si sale un aviso de accesorios desactualizados, pulsa **Cargar accesorios** (no «Desactivar») y **Aceptar**.
+En la pantalla de personajes, pulsa **Menú** (arriba) y luego **Addons** (o **Accesorios**, según el idioma del juego; *AddOns* en inglés). Deja marcados **Oro de Hermandad** y **Auctionator**. Si alguno pone «No actualizado», marca arriba de la lista **Cargar addons antiguos** (o **Cargar accesorios antiguos**). Si sale un aviso, elige cargar los addons (no «Desactivar») y pulsa **Aceptar**.
 
 ## 5. Primer uso
 
@@ -39,4 +39,4 @@ Para actualizar, borra la carpeta `OroHermandad` y repite los pasos 2 y 3. El ma
 
 ## Para quien reparte el zip
 
-Con acceso al repositorio (es privado): pestaña **Actions** → «Comprobar addon Oro de Hermandad» → última ejecución en verde de la rama `main` → **OroHermandad.zip**. Si no aparece (caduca con el tiempo), pulsa **Run workflow**. O créalo con `node scripts/build-oro-hermandad.mjs` (sale en `public/downloads/`).
+Con acceso al repositorio (es privado): pestaña **Actions** → «Comprobar addon Oro de Hermandad» → última ejecución en verde de la rama `main` (o de `oro-hermandad`, mientras no se haya fusionado) → **OroHermandad.zip**. Si no aparece (caduca con el tiempo), pulsa **Run workflow** (solo sale cuando el flujo ya está en `main`). O créalo con `node scripts/build-oro-hermandad.mjs` (sale en `dist-addon/`).

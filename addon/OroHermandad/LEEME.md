@@ -6,7 +6,7 @@ Versión 0.2.1, para el cliente 1.60 de Forever (Interface 16001). **Todavía no
 
 ## Cómo se usa
 
-- Para abrir la ventana: **botón de la moneda** junto al minimapa, `/oro`, o el menú de accesorios del minimapa.
+- Para abrir la ventana: **botón de la moneda** junto al minimapa, `/oro`, o el menú de addons (o accesorios) del minimapa.
 - Se abre sola, pegada a la subasta, cuando hablas con un subastador. Se cierra con ella.
 - **Abre cada profesión una vez** (y cuando aprendas recetas nuevas) para que el addon las conozca.
 - **Haz un escaneo completo en Auctionator** de vez en cuando, o activa en sus opciones **escanear al abrir la subasta**.
@@ -45,6 +45,7 @@ Los importes ya descuentan la comisión de la subasta (5 % por defecto; puedes c
 ## Precios de la subasta
 
 - Solo un escaneo de Auctionator terminado cuenta como «precios al día»: su escaneo completo o el de **escanear al abrir la subasta**. Una búsqueda suelta, la pestaña Comprar o tus favoritos no.
+- No busques nada mientras Auctionator escanea la subasta: una búsqueda (la barra de búsqueda o una lista de la compra) corta su escaneo y Auctionator lo da por terminado solo con lo que encontró esa búsqueda. El addon lo nota y no lo cuenta como escaneo. Por eso **Comprar lo que falta**, mientras dura el escaneo, solo crea la lista en Auctionator sin buscarla.
 - Si los precios están viejos, te avisa al abrir la subasta, con un sonido. El mismo aviso no se repite en cada visita: vuelve solo si cambia o después de otro escaneo.
 - Si acabas de hacer un escaneo completo y la subasta tiene poca oferta (un servidor nuevo, por ejemplo), te lo dice sin pedirte otro escaneo.
 
@@ -68,7 +69,7 @@ Se desactiva con `/oro info off`.
 - Si alguien no tiene el addon, el addon lee su profesión del roster de la hermandad cuando el juego la ofrece. También lo puedes añadir a mano con `/oro amigo Nombre profesión nivel`.
 - Solo se aceptan datos por susurro de miembros de tu hermandad.
 - En mazmorras, bandas y encuentros el juego bloquea los mensajes de addon: el intercambio con la hermandad se pausa y sigue al salir. Ahí tampoco se lee el roster, y lo guardado no se borra.
-- Los datos se guardan por hermandad. Si venías de la versión 0.1, los amigos que añadiste a mano pasan a tu hermandad actual al entrar.
+- Los datos se guardan por hermandad. Si venías de la versión 0.1, los amigos que añadiste a mano pasan a tu hermandad actual al entrar. Si en la 0.2.0 añadiste a alguien con tu reino (`/oro amigo Ana-Forever …`), pasa a ser `Ana` y ya no sale dos veces.
 - Los datos de alguien que deja de usar el addon desaparecen a los 30 días.
 
 ## Oro de la sesión
@@ -87,7 +88,7 @@ La sesión empieza al entrar con el personaje (un `/reload` no la reinicia). Pas
 /oro amigo borrar Ana      lo quita
 /oro sync                  envía tus datos a la hermandad y le pide los suyos
 /oro comision 5            porcentaje que se queda la subasta
-/oro opciones              panel de opciones (Esc > Opciones > Accesorios)
+/oro opciones              panel de opciones (Esc > Opciones > Addons o Accesorios)
 /oro auto | minimapa | sonido | info  on/off
 ```
 
@@ -102,7 +103,7 @@ La sesión empieza al entrar con el personaje (un `/reload` no la reinicia). Pas
 
 1. Escribe `/console scriptErrors 1` y repite lo que hacías.
 2. Copia el texto del error y pásaselo a quien mantenga el addon.
-3. Mientras tanto puedes desactivarlo desde la lista de accesorios (en la pantalla de personajes, **Menú** → **Accesorios**; dentro del juego, Esc → **Accesorios**). No toca tus subastas ni tus objetos: solo lee y sugiere.
+3. Mientras tanto puedes desactivarlo desde la lista de addons (en la pantalla de personajes, **Menú** → **Addons** o **Accesorios**, según el idioma del juego; dentro del juego, Esc → **Addons** o **Accesorios**). No toca tus subastas ni tus objetos: solo lee y sugiere.
 
 ## Para desarrolladores
 
@@ -113,7 +114,7 @@ La sesión empieza al entrar con el personaje (un `/reload` no la reinicia). Pas
   node scripts/build-oro-hermandad.mjs
   ```
 
-  El primer comando ejecuta las pruebas. El segundo crea `public/downloads/OroHermandad.zip`, con los saltos de línea normalizados para que salga igual en Windows y en Linux. Git ignora ese archivo: los ZIP generados no se suben al repositorio.
+  El primer comando ejecuta las pruebas. El segundo crea `dist-addon/OroHermandad.zip`, con los saltos de línea normalizados para que salga igual en Windows y en Linux. Git ignora esa carpeta: los ZIP generados no se suben al repositorio. No va en `public/`, que es la carpeta de la web: lo que hay ahí se publica al desplegar.
 - `Engine.lua` es lógica pura, sin API del juego.
 - `test-lua/wow_stub.lua` simula el cliente moderno de Forever: sin `GetItemInfo` global, con `C_TradeSkillUI`, bolsa de componentes, banco por pestañas y roster.
 - El flujo `.github/workflows/oro-hermandad.yml` ejecuta las pruebas, construye el zip y lo deja en la ejecución como artefacto `OroHermandad.zip` (pestaña **Actions**, «Comprobar addon Oro de Hermandad»), para descargarlo y repartirlo.
