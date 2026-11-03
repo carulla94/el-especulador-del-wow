@@ -6,9 +6,9 @@ Addon de WoW Forever que te dice cómo ganar oro: qué vender, fundir, fabricar 
 
 Pone los precios. Con la app de CurseForge: busca **Auctionator** en WoW Forever y pulsa **Instalar**.
 
-## 2. Consigue OroHermandad.zip
+## 2. Descarga OroHermandad.zip
 
-Pídeselo a quien te pasó esta guía (por Discord, por ejemplo).
+Descárgalo de la [versión 0.2.1](https://github.com/carulla94/el-especulador-del-wow/releases/download/oro-hermandad-v0.2.1/OroHermandad.zip) (todas las versiones, en [Releases](https://github.com/carulla94/el-especulador-del-wow/releases)). Si no puedes abrir el enlace, pídeselo a quien te pasó esta guía.
 
 ## 3. Descomprímelo en la carpeta AddOns
 
@@ -39,4 +39,4 @@ Para actualizar, borra la carpeta `OroHermandad` y repite los pasos 2 y 3. El ma
 
 ## Para quien reparte el zip
 
-Con acceso al repositorio (es privado): pestaña **Actions** → «Comprobar addon Oro de Hermandad» → última ejecución en verde de la rama `main` (o de `oro-hermandad`, mientras no se haya fusionado) → **OroHermandad.zip**. Si no aparece (caduca con el tiempo), pulsa **Run workflow** (solo sale cuando el flujo ya está en `main`). O créalo con `node scripts/build-oro-hermandad.mjs` (sale en `dist-addon/`).
+Cada versión se publica en [Releases](https://github.com/carulla94/el-especulador-del-wow/releases) con la etiqueta `oro-hermandad-vX.Y.Z` y el zip adjunto. Con permiso de escritura también está en la pestaña **Actions** → «Comprobar addon Oro de Hermandad» → última ejecución en verde → **OroHermandad.zip**, o se crea con `node scripts/build-oro-hermandad.mjs` (sale en `dist-addon/`).
