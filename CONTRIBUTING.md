@@ -4,7 +4,7 @@
 
 Repositorio: `https://github.com/carulla94/el-especulador-del-wow`.
 
-El repositorio es privado. El propietario debe invitar al usuario de GitHub del compañero en **Settings > Collaborators**. No hace falta compartir contraseñas de GitHub, Cloudflare o de la app. Una invitación de código permite trabajar en el proyecto; no concede por sí sola la contraseña de acceso a la cartera.
+El repositorio es público: cualquiera puede leer el código, pero para subir ramas el propietario debe invitar al usuario de GitHub del compañero en **Settings > Collaborators**. No hace falta compartir contraseñas de GitHub, Cloudflare o de la app. Una invitación de código permite trabajar en el proyecto; no concede por sí sola la contraseña de acceso a la cartera.
 
 Clona el repositorio una vez aceptada la invitación:
 
@@ -54,16 +54,20 @@ No publiques con `npm run deploy` sin revisar destino, bindings, migraciones y a
 
 | Ruta | Responsabilidad |
 | --- | --- |
-| `public/` | Interfaz y estilos compartidos; acceso privado en Cloudflare. |
+| `public/` | Interfaz y estilos compartidos. En Cloudflare la app pide la contraseña del propietario y el panel de la hermandad, una clave personal. |
 | `src/engine.mjs` | Cálculos de mercado, inventario FIFO y formato de copias. |
 | `src/auctioneer.mjs` | Lectura restringida de SavedVariables de Auctioneer y del puente. |
 | `src/worker.mjs` | Autenticación, API y coordinación de la cuenta en Cloudflare. |
 | `src/storage.mjs` | Persistencia SQLite del Durable Object. |
+| `src/guild.mjs` | Mercado de la hermandad: Durable Object `GuildMarket`, claves de miembros, envíos del sincronizador, resúmenes y CSV. |
+| `src/especular.mjs` | Reglas «Especular v1» (chollos, flips, balances, días de la semana), gemelas del `Spec.lua` del addon. La construcción la copia a `public/especular.js`. |
+| `test-vectors/` | Contrato compartido con el addon (`especular-v1.json`); no se edita: un cambio de reglas va en un archivo `-v2` nuevo. |
+| `public/hermandad.*` | Panel de la hermandad (`/hermandad`): página, estilos y JavaScript con gráficos SVG propios. |
 | `pages/` | Persistencia y adaptación de la edición local para Pages. |
 | `scripts/build-pages.mjs` | Artefacto estático `dist-pages/`, sin secretos ni datos de usuario. |
 | `addon/EspeculadorBridge/` | Puente experimental para el cliente real del juego. |
 | `pc_sync/` | Envío opcional de archivos desde el PC a la cuenta en Cloudflare. |
-| `test/` | Pruebas del motor, importadores, almacenamiento y transporte. |
+| `test/` | Pruebas del motor, importadores, almacenamiento, transporte, mercado de la hermandad y su panel. |
 | `.github/workflows/` | Validación y publicación de cada edición. |
 
 ## Antes de proponer un cambio

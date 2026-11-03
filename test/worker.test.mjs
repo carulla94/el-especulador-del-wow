@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {DatabaseSync} from "node:sqlite";
-import worker, {Portfolio, issueSession} from "../src/worker.mjs";
+import worker, {Portfolio, GuildMarket, issueSession} from "../src/worker.mjs";
 import {MARKET} from "../src/engine.mjs";
 
 const BASE = "https://especulador.test";
@@ -24,7 +24,8 @@ function sqliteContext() {
   }}}};
 }
 
-function fixture(t, configured = true) {
+// guild: also bind the GuildMarket namespace (its own SQLite), as production will; false leaves GUILD unset.
+function fixture(t, configured = true, {guild = true} = {}) {
   const {db, ctx} = sqliteContext();
   t.after(() => db.close());
   const assets = [];
@@ -42,6 +43,15 @@ function fixture(t, configured = true) {
     assert.equal(id, "owner-eu-pvp-alliance-v1");
     return {fetch(request) { return portfolio.fetch(request); }};
   }};
+  if (guild) {
+    const separate = sqliteContext();
+    t.after(() => separate.db.close());
+    const market = new GuildMarket(separate.ctx, env);
+    env.GUILD = {idFromName(name) { return name; }, get(id) {
+      assert.equal(id, "guild-forever-eu-v1");
+      return {fetch(request) { return market.fetch(request); }};
+    }};
+  }
   const f = {
     env, db, ctx, assets,
     restart() { portfolio = new Portfolio(ctx, env); },

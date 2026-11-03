@@ -1,14 +1,14 @@
 # El Especulador del WoW · Cloudflare y GitHub Pages
 
-Aplicación privada para WoW Forever, Europa, PvP y Alianza. Versión cloud 0.3.0.
+Aplicación para WoW Forever, Europa, PvP y Alianza, con acceso por contraseña. Versión cloud 0.3.0. Incluye el [panel de la hermandad](#panel-de-la-hermandad), con los precios que sube toda la hermandad.
 
 La interfaz, contabilidad, inventario, cálculos y datos persistentes se ejecutan en Cloudflare Workers con SQLite en un Durable Object. Puedes importar los archivos de Auctioneer desde el navegador o emparejar el sincronizador del PC para enviar sus cambios por HTTPS.
 
-El código está en el repositorio privado [carulla94/el-especulador-del-wow](https://github.com/carulla94/el-especulador-del-wow). La app privada en la nube está en [el-especulador-del-wow.arqcon-cat.workers.dev](https://el-especulador-del-wow.arqcon-cat.workers.dev/). Para trabajar con otra persona, añade su usuario de GitHub como colaborador desde **Settings > Collaborators**; compartir el enlace por sí solo no concede acceso a un repositorio privado. Lee [CONTRIBUTING.md](CONTRIBUTING.md) para el entorno de desarrollo y el flujo de ramas.
+El código está en el repositorio público [carulla94/el-especulador-del-wow](https://github.com/carulla94/el-especulador-del-wow): cualquiera puede leerlo, pero solo quien está invitado en **Settings > Collaborators** puede subir ramas. Que el código sea público no abre la app: la cuenta en la nube, en [el-especulador-del-wow.arqcon-cat.workers.dev](https://el-especulador-del-wow.arqcon-cat.workers.dev/), sigue pidiendo la contraseña del propietario, y el panel de la hermandad, una clave personal. No subas nunca contraseñas, claves ni SavedVariables personales. Lee [CONTRIBUTING.md](CONTRIBUTING.md) para el entorno de desarrollo y el flujo de ramas.
 
 ## Edición local para GitHub Pages
 
-GitHub Pages sirve archivos estáticos. Esta edición reutiliza los cálculos y los importadores de la app, y guarda la cartera en **IndexedDB de este navegador**. Permite importar manualmente Lua/JSON/AHL1, registrar movimientos, configurar reglas y exportar o restaurar copias JSON. No conecta la cuenta privada de Cloudflare ni envía los archivos importados a un servidor.
+GitHub Pages sirve archivos estáticos. Esta edición reutiliza los cálculos y los importadores de la app, y guarda la cartera en **IndexedDB de este navegador**. Permite importar manualmente Lua/JSON/AHL1, registrar movimientos, configurar reglas y exportar o restaurar copias JSON. No conecta la cuenta de Cloudflare ni envía los archivos importados a un servidor. Tampoco muestra el panel de la hermandad: Pages es público y nunca contiene datos de la hermandad.
 
 Los datos son distintos en cada navegador, perfil, dispositivo y origen. Borrar los datos del sitio, usar navegación privada o perder el perfil puede hacer perder la cartera local. Exporta copias JSON con frecuencia; el sitio no ofrece una contraseña que proteja los datos de otra persona que use ese mismo perfil. La sincronización automática desde el PC y las claves de equipos pertenecen a la edición en Cloudflare. La interfaz de Pages identifica este modo y conserva un enlace a la app en la nube.
 
@@ -21,7 +21,7 @@ Abre `http://127.0.0.1:8000/` para revisar el resultado. El directorio `dist-pag
 
 Para publicar:
 
-1. Comprueba que el plan y la visibilidad del repositorio permiten GitHub Pages. **GitHub Free permite Pages en repositorios públicos; los privados requieren un plan compatible, como GitHub Pro.** Este proyecto permanece privado: no cambies su visibilidad sin autorización del propietario. Que el repositorio sea privado no hace que una página publicada sea privada.
+1. El repositorio es público, así que GitHub Free permite Pages. **Una página de Pages es pública para todo internet**: no publiques en ella carteras, escaneos personales ni datos de la hermandad.
 2. En **Settings > Pages > Build and deployment > Source**, selecciona **GitHub Actions**. Este paso debe habilitarse en GitHub; añadir el archivo del flujo no activa Pages por sí solo.
 3. Abre **Actions > Publicar edición local en GitHub Pages > Run workflow**, selecciona `main` y ejecuta. El flujo prueba el proyecto, construye `dist-pages` y publica solo ese artefacto con las acciones oficiales de GitHub y su token temporal OIDC. No utiliza la clave de Cloudflare ni necesita secretos propios.
 4. Utiliza la URL que confirme el despliegue. Si se publica como sitio de proyecto, la ruta esperada es `https://carulla94.github.io/el-especulador-del-wow/`; la URL solo está disponible cuando Pages está habilitado y el flujo termina correctamente.
@@ -55,9 +55,9 @@ npx wrangler secret put OWNER_PASSWORD
 
 Omite `login` si Wrangler ya tiene sesión. Usa una contraseña exclusiva de al menos 16 caracteres. El secreto se introduce por la entrada interactiva de Wrangler o en Variables y secretos del Worker: **nunca lo escribas en este repositorio**. Hasta configurarlo, la cuenta responde cerrada con 503; solo es visible la página de acceso. No utilices despliegues temporales en una cuenta distinta.
 
-Cloudflare construye los ZIP del sincronizador y del puente mediante `scripts/prepare-downloads.mjs` antes de desplegar. El resto del código de aplicación no necesita paquetes de ejecución externos. Wrangler es una dependencia de desarrollo.
+Cloudflare construye los ZIP del sincronizador y del puente mediante `scripts/prepare-downloads.mjs` antes de desplegar. El mismo paso copia `src/especular.mjs` a `public/especular.js` (archivo generado, fuera de Git) para que el panel de la hermandad use en el navegador exactamente las reglas del servidor. El resto del código de aplicación no necesita paquetes de ejecución externos. Wrangler es una dependencia de desarrollo.
 
-`wrangler.jsonc` conserva el nombre estable del Worker y de su clase `Portfolio`. No cambies esos nombres ni elimines su namespace si quieres mantener los datos. La configuración crea la base SQLite con la migración `v1`.
+`wrangler.jsonc` conserva el nombre estable del Worker y de su clase `Portfolio`. No cambies esos nombres ni elimines su namespace si quieres mantener los datos. La configuración crea la base SQLite de la cartera con la migración `v1` y la del mercado de la hermandad (`GuildMarket`, binding `GUILD`) con la migración aditiva `v2`, que no toca `Portfolio`.
 
 También puedes conectar este repositorio desde Workers & Pages → Create application → GitHub. Directorio raíz del proyecto; comando de construcción `npm run build`; despliegue `npx wrangler deploy`. Conserva la configuración del repositorio y añade `OWNER_PASSWORD` como secreto del Worker.
 
@@ -65,7 +65,7 @@ También puedes conectar este repositorio desde Workers & Pages → Create appli
 
 El flujo `.github/workflows/deploy-cloudflare.yml` valida y publica esta misma app en tu cuenta de Cloudflare. Usa las acciones oficiales de GitHub para preparar Node.js 24.16.0 y Python 3.13; instala las herramientas del proyecto, ejecuta las pruebas de Node y del sincronizador, construye las descargas y comprueba el paquete de Wrangler antes de publicar.
 
-1. En este repositorio privado, abre **Settings > Secrets and variables > Actions > New repository secret**.
+1. En el repositorio, abre **Settings > Secrets and variables > Actions > New repository secret**. Los secretos no son visibles aunque el código sea público.
 2. Nombre del secreto: `CLOUDFLARE_API_TOKEN`. Guarda ahi la clave de usuario limitada a **Workers Scripts: Edit** para la cuenta de Cloudflare indicada en el flujo. Este paso concede al flujo de GitHub acceso de despliegue a esa cuenta y debe estar autorizado por su titular. Nunca pegues la clave en el codigo, en un issue ni en los logs.
 3. Abre **Actions > Validar y publicar en Cloudflare > Run workflow**, selecciona `main` y ejecuta el flujo. Los siguientes cambios en `main` volveran a validar y publicar automaticamente.
 4. Comprueba la URL confirmada por Wrangler y configura `OWNER_PASSWORD` como secreto del **Worker en Cloudflare**, con al menos 16 caracteres. No es una variable de construccion ni un secreto que este flujo necesite en GitHub.
@@ -86,9 +86,46 @@ Referencia oficial: [Cloudflare con GitHub Actions](https://developers.cloudflar
 
 Las claves del PC solo permiten enviar datos de mercado, no leer movimientos, exportar copias o registrar operaciones. Puedes revocarlas desde la app sin borrar los escaneos ya recibidos.
 
+## Panel de la hermandad
+
+`/hermandad` es una página aparte, fuera del juego, con el mercado que sube **toda la hermandad** desde el addon Oro de Hermandad: chollos del día con la compra y reventa calculadas (comisión del 5 % y depósitos incluidos), una tabla de materiales y consumibles por categoría que se puede ordenar, filtrar y exportar a CSV para Excel, el balance semanal, el detalle de cada objeto con 60 días de precios, el patrón por día de la semana cuando hay datos suficientes y una calculadora editable. Las reglas son las de `src/especular.mjs`, gemelo exacto del `Spec.lua` del addon; el contrato compartido está en `test-vectors/especular-v1.json`. Durante el lanzamiento el panel lo dice claramente: «Aprendiendo precios» los primeros 7 días y sin chollos hasta el 18 de noviembre.
+
+Es independiente de la cartera: usa su propio Durable Object (`GuildMarket`), su propia base SQLite, sus propias claves, su propia cookie y su propio CSRF. Las rutas son `/api/guild/*`; sin el binding `GUILD` responden 503 «Hermandad no configurada».
+
+**Cómo lo configura el propietario**
+
+1. Despliega la rama revisada: `wrangler.jsonc` ya declara el binding `GUILD` y la migración `v2`. No hace falta ningún secreto nuevo.
+2. Entra en la app con tu contraseña y pulsa **Hermandad** en el menú. Como propietario puedes hacerlo todo.
+3. En **Miembros**, añade a cada compañero con el nombre que quieras mostrar (no hace falta que sea su personaje). Se crea su clave personal `gld_…`: **se muestra una sola vez**, cópiala y envíasela por privado. Se guarda solo su SHA-256.
+4. Si quieres ayuda, haz administrador a alguien: podrá crear y revocar claves de miembros normales. Revocar a un miembro corta sus claves al momento (el panel lo saca en el siguiente minuto); marca «borrar también sus precios» si subió datos falsos.
+
+Límites de la app (no son los del plan de Cloudflare): 50 miembros y 50 claves activas, 300 objetos por mercado, 180 días de historia, envíos de hasta 2 MiB y 24 envíos por miembro y día. Quien se une tarde guarda como mucho los 30 días anteriores a su primer envío. Un objeto que se queda sin días (por la retención o porque se borraron los precios de un miembro) desaparece del mercado y libera su hueco.
+
+**Cuota diaria de escritura.** El plan gratuito de Cloudflare limita las filas que los Durable Objects escriben al día por cuenta (100.000 cuando se diseñó esto; se reinicia a las 00:00 UTC), y la cartera comparte esa cuota. Por eso la hermandad se reserva como mucho 40.000 filas al día, índices incluidos: al llegar, el panel responde 429 «La hermandad ha agotado por hoy su cuota de escritura…» sin guardar nada, y el subidor lo vuelve a intentar solo. Quien administra ve las filas del día en `GET /api/guild/me` (`writesToday`). Medido con el código de esta rama sobre SQLite real, con 120 objetos por miembro:
+
+| Caso | Filas escritas |
+| --- | --- |
+| Un envío normal (lo nuevo desde el anterior) | unas 700 |
+| 10 miembros con 3 envíos al día | unas 22.000 al día |
+| 10 miembros con 8 envíos al día | unas 53.000 al día (llega al límite por la tarde) |
+| Primer envío de quien se une con 120 días de historia | unas 19.000 |
+| Reenvío completo sin nada nuevo (subidor antiguo o `--reset`) | unas 700 |
+
+Las lecturas se quedan muy por debajo (unas 76.000 filas al día en el caso de 3 envíos). Si la hermandad sube más que eso, pasa a Workers Paid y aumenta el límite con la variable `GUILD_WRITE_ROWS_PER_DAY` (por ejemplo en `vars` de `wrangler.jsonc`). Antes de fusionar, comprueba los límites vigentes en la [documentación de Cloudflare](https://developers.cloudflare.com/durable-objects/platform/limits/).
+
+**Cómo se une un miembro**
+
+1. Instala el addon Oro de Hermandad desde [las versiones publicadas](https://github.com/carulla94/el-especulador-del-wow/releases), junto a Auctionator.
+2. Entra en `https://<tu-worker>/hermandad` con su clave. En **Unirse y descargas** tiene el sincronizador.
+3. Descomprime el ZIP y ejecuta `HERMANDAD.cmd` (Windows, Python 3.10 o superior). La primera vez pide la dirección del panel, la carpeta de WoW y la clave, que se guarda cifrada con DPAPI. Después sube los precios cada vez que WoW guarda (`/reload` o salir del juego). La guía completa está en `pc_sync/LEEME.md`.
+
+**Qué se comparte**
+
+Solo `OroHermandadHist`: precios, cantidades y escaneos de los objetos vigilados, su nombre, precio de vendedor y categoría, los depósitos aprendidos y el mercado (reino y facción). Nunca se envían `OroHermandadDB` ni `OroHermandadCharDB` (personajes, lista de la hermandad, profesiones) ni la base de datos de Auctionator. El panel muestra el nombre que puso quien administra, nunca el del personaje. Los precios publicados no son ventas confirmadas: todo cálculo es una estimación que hay que comprobar en la subasta.
+
 ## Datos y seguridad
 
-- Cuenta única privada con contraseña en un secreto de Cloudflare.
+- Cartera de un único propietario, con contraseña en un secreto de Cloudflare. El panel de la hermandad usa claves personales aparte y nunca lee la cartera.
 - Sesión firmada de ocho horas, cookie HttpOnly/Secure/SameSite y protección CSRF en escrituras del navegador.
 - Límite de intentos de acceso persistente. Cambiar la contraseña o el secreto opcional `SESSION_SECRET` invalida las sesiones anteriores.
 - Los tokens del PC se guardan únicamente como hashes; no se incluyen en las exportaciones.

@@ -2,6 +2,10 @@ import {Store} from "./storage.mjs";
 import {MARKET, emptyState, validateSettings, normalizeSnapshot, importSnapshot, addTransaction,
   computeState, historyState, addHistory, exportBackup, restoreBackup, latestSnapshotRealm} from "./engine.mjs";
 import {normalizeOverTime, normalizeBridge} from "./auctioneer.mjs";
+import {GuildMarket, guildFetch} from "./guild.mjs";
+
+// Durable Object class of the guild market; wrangler finds it here because this is the main module.
+export {GuildMarket};
 
 const VERSION = "0.3.0";
 const COOKIE = "__Host-especulador_session";
@@ -99,12 +103,18 @@ export default {
     try {
       const url = new URL(request.url), path = url.pathname, setupIssue = configurationIssue(env);
       if (path === "/api/health" && request.method === "GET") return secure(json({ok:true,version:VERSION,configured:setupIssue === null,configurationIssue:setupIssue}));
-      const publicAssets = new Set(["/login", "/login.html", "/login.js", "/login.css", "/styles.css", "/auction-hall.svg"]);
+      // The guild panel is public at the asset level (members have no owner session); its data stays behind
+      // /api/guild/*. /especular.js is src/especular.mjs, copied by the build (scripts/prepare-downloads.mjs).
+      const publicAssets = new Set(["/login", "/login.html", "/login.js", "/login.css", "/styles.css", "/auction-hall.svg",
+        "/hermandad", "/hermandad.html", "/hermandad.js", "/hermandad.css", "/especular.js"]);
       if (request.method === "GET" && publicAssets.has(path)) {
         if (path === "/login") url.pathname = "/login.html";
+        if (path === "/hermandad") url.pathname = "/hermandad.html";
         return secure(await env.ASSETS.fetch(new Request(url,request)));
       }
       if (setupIssue) return secure(path.startsWith("/api/") ? json({error:configurationError(setupIssue)},503) : Response.redirect(url.origin+"/login",302));
+      // Guild market: own member keys, cookie and CSRF in the GuildMarket Durable Object; never forwarded to Portfolio.
+      if (path === "/api/guild" || path.startsWith("/api/guild/")) return secure(await guildFetch(request,env,{ownerSession:()=>readSession(request,env)}));
       if (path === "/api/login" && request.method === "POST") {
         originCheck(request);
         const ip = await digest("login:"+(request.headers.get("CF-Connecting-IP") || "unknown"));

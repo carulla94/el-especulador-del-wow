@@ -1,4 +1,4 @@
-/** Build the two private downloads with Node's standard library only. */
+/** Build the two private downloads, and the guild panel's copy of the market rules, with Node's standard library only. */
 import fs from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
@@ -22,7 +22,10 @@ function zip(entries){
   return Buffer.concat([...local,directory,end]);
 }
 function entry(folder,name,prefix=""){return [prefix+name,fs.readFileSync(path.join(root,folder,name))];}
-fs.writeFileSync(path.join(destination,"Sincronizador_PC.zip"),zip(["sincronizar.py","SINCRONIZAR.cmd","LEEME.md"].map(name=>entry("pc_sync",name))));
+fs.writeFileSync(path.join(destination,"Sincronizador_PC.zip"),zip(["sincronizar.py","SINCRONIZAR.cmd","LEEME.md","hermandad.py","HERMANDAD.cmd"].map(name=>entry("pc_sync",name))));
 const addonFiles=fs.readdirSync(path.join(root,"addon/EspeculadorBridge")).filter(name=>/\.(lua|toc|md)$/.test(name));
 fs.writeFileSync(path.join(destination,"EspeculadorBridge.zip"),zip(addonFiles.map(name=>entry("addon/EspeculadorBridge",name,"EspeculadorBridge/"))));
-console.log("Descargas preparadas: sincronizador del PC y puente de Auctioneer.");
+// The guild panel (public/hermandad.js) loads the market rules as /especular.js: a byte-for-byte copy of
+// src/especular.mjs made here, so the rules keep a single source. public/especular.js is ignored by Git.
+fs.copyFileSync(path.join(root,"src/especular.mjs"),path.join(root,"public/especular.js"));
+console.log("Descargas preparadas: sincronizador del PC, puente de Auctioneer y reglas del panel de la hermandad.");
