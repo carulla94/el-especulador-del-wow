@@ -240,10 +240,15 @@ end
 -- Comisión
 ------------------------------------------------------------------------------------------------
 
-function Prices.Cut()
+-- Comisión aprendida de las facturas (0 a 0,5), o nil si todavía no se ha aprendido ninguna.
+function Prices.LearnedCut()
   local learned = store and tonumber(store.ahCut)
   if learned and learned >= 0 and learned < 0.5 then return learned end
-  return Prices.AH_CUT
+  return nil
+end
+
+function Prices.Cut()
+  return Prices.LearnedCut() or Prices.AH_CUT
 end
 
 -- Lo que te queda al vender `count` unidades a `price` cada una, tras la comisión.
@@ -298,10 +303,11 @@ function Prices.Watch(callback)
   return watching
 end
 
--- Final de un escaneo de Auctionator: callback(kind, rows), con kind "full" (escaneo completo, el de replicate) o
--- "summary" (su escaneo de resumen de toda la subasta) y rows = cuántos resultados trae (los que Auctionator pasa con
--- el evento; nil si su versión no los pasa). No es API pública (EventBus y los eventos ScanComplete de FullScan e
--- IncrementalScan): todo se comprueba y va en pcall. Devuelve false si no se pueden oír (ver Prices.LastScanTime).
+-- Final de un escaneo de Auctionator: callback(kind, rows, data), con kind "full" (escaneo completo, el de replicate)
+-- o "summary" (su escaneo de resumen de toda la subasta), rows = cuántos resultados trae y data = esos resultados tal
+-- como los pasa Auctionator con el evento (nil si su versión no los pasa; History.lua los valida campo a campo).
+-- No es API pública (EventBus y los eventos ScanComplete de FullScan e IncrementalScan): todo se comprueba y va en
+-- pcall. Devuelve false si no se pueden oír (ver Prices.LastScanTime).
 function Prices.WatchScans(callback)
   if type(callback) == "function" then scanWatchers[#scanWatchers + 1] = callback end
   if scanWatching then return true end
@@ -317,8 +323,9 @@ function Prices.WatchScans(callback)
     assert(#names > 0)
     bus:Register({ReceiveEvent = function(_, eventName, data)
       Prices.Invalidate()
-      local rows = type(data) == "table" and #data or nil
-      for i = 1, #scanWatchers do pcall(scanWatchers[i], kinds[eventName], rows) end
+      if type(data) ~= "table" then data = nil end
+      local rows = data and #data or nil
+      for i = 1, #scanWatchers do pcall(scanWatchers[i], kinds[eventName], rows, data) end
     end}, names)
   end) and true or false
   return scanWatching

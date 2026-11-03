@@ -258,6 +258,40 @@ Data.BASKET = {2770, 2771, 2772, 3858, 10620, 2589, 2592, 4306, 4338, 14047, 231
                2447, 785, 2453, 3356, 3818, 8831, 8838, 13464, 2835, 2836, 2838, 7912, 12365}
 
 ---------------------------------------------------------------------------
+-- Lista vigilada del historial de precios (History.lua): 80 materiales y consumibles comunes
+---------------------------------------------------------------------------
+-- Las claves son las categorías de OroHermandadHist (el contrato con el subidor de la hermandad); el orden es el
+-- de Data.CATEGORY_ORDER. Incluye toda la cesta de arriba. Son IDs de Classic que Forever debería mantener: el addon
+-- solo vigila los que el cliente reconoce (C_Item.GetItemInfoInstant), y /oro sondeo lista los que no.
+-- Sin confirmar todavía en Forever (marcados con «?»): 15417, 13931, 18254.
+Data.WATCH = {
+  metal     = {2770, 2771, 2772, 3858, 10620,                                -- minerales: cobre, estaño, hierro, mitril, torio
+               2840, 2841, 3575, 3859, 3860, 6037, 12359, 12360},          -- lingotes: cobre, bronce, hierro, acero, mitril, veraplata, torio, arcanita
+  piedra    = {2835, 2836, 2838, 7912, 12365},                             -- basta, burda, pesada, sólida, densa
+  gema      = {7910, 12361, 12363, 12364, 12800},                          -- rubí estrella, zafiro azul, cristal arcano, esmeralda enorme, diamante de Azeroth
+  hierba    = {2447, 785, 2453, 3356, 3357, 3818, 8831, 8838, 8846,         -- flor de paz … gromsanguina
+               13463, 13464, 13465, 13466, 13467, 13468},                  -- hojasueño, sansam, salviargenta, flor de peste, setelo, loto negro
+  piel      = {2318, 2319, 4234, 4304, 8170, 15417},                       -- cuero ligero, medio, pesado, grueso, basto; demosaurio (?)
+  tela      = {2589, 2592, 4306, 4338, 14047, 14256, 14342},               -- lino, lana, seda, paño mágico, rúnico, tela de inferi, tela lunar
+  pocion    = {3928, 13446, 13444, 13442, 5634},                           -- sanación superior y mayor, maná mayor, ira poderosa, acción libre
+  elixir    = {13452, 9187, 9206, 13454},                                  -- mangosta, agilidad superior, gigantes, arcano superior
+  frasco    = {13510, 13511, 13512, 13513},                                -- titanes, sabiduría destilada, poder supremo, resistencia cromática
+  comida    = {13928, 13931, 18254},                                       -- calamar a la parrilla, sopa de aleta nocturna (?), tubérculo Runn Tum (?)
+  venda     = {14529, 14530},                                              -- de paño rúnico y de paño rúnico gruesa
+  encantar  = {11137, 11176, 16204, 16203, 14344, 20725},                  -- polvo de visión, sueño, ilusión; esencia eterna mayor; fragmento brillante grande; cristal de nexo
+  elemental = {7076, 7078, 7080, 12808},                                   -- esencias de tierra, fuego, agua y no-muerte
+  otro      = {12811},                                                     -- orbe de rectitud
+}
+Data.CATEGORY_ORDER = {"metal", "piedra", "gema", "hierba", "piel", "tela", "pocion", "elixir", "frasco", "comida",
+                       "venda", "encantar", "elemental", "otro"}
+Data.CATEGORY_LABELS = {
+  metal = "Metal", piedra = "Piedra", gema = "Gema", hierba = "Hierba", piel = "Piel", tela = "Tela",
+  pocion = "Poción", elixir = "Elixir", frasco = "Frasco", comida = "Comida", venda = "Venda",
+  encantar = "Encantamiento", elemental = "Elemental", otro = "Otro",
+}
+Data.WATCH_EXTRA_MAX = 40 -- objetos que cada jugador puede añadir con /oro vigilar
+
+---------------------------------------------------------------------------
 -- Material exclusivo de WoW Forever (IDs vistos en guías de la beta; sin confirmar)
 ---------------------------------------------------------------------------
 -- Solo se usan si el cliente confirma que el objeto existe (C_Item.DoesItemExistByID).
@@ -294,6 +328,12 @@ local NAMES_esES = {
   [14047] = "Paño rúnico", [14256] = "Tela de inferi",
   [16072] = "Libro de cocina para expertos", [16083] = "Pesca para expertos: La lubina y tú",
   [16084] = "Primeros auxilios para expertos: Entre vendas",
+  -- Lista vigilada (solo los nombres seguros; el resto lo da el cliente al cargar el objeto)
+  [12360] = "Lingote de arcanita", [14342] = "Tela lunar",
+  [13510] = "Frasco de los titanes", [13511] = "Frasco de sabiduría destilada", [13512] = "Frasco de poder supremo",
+  [13513] = "Frasco de resistencia cromática", [13452] = "Elixir de la mangosta", [9206] = "Elixir de gigantes",
+  [5634] = "Poción de acción libre", [11137] = "Polvo de visión", [11176] = "Polvo de sueño", [16204] = "Polvo de ilusión",
+  [20725] = "Cristal de nexo", [7076] = "Esencia de tierra", [7078] = "Esencia de fuego", [7080] = "Esencia de agua",
 }
 local NAMES_esMX = {
   [2770] = "Mena de cobre", [2771] = "Mena de estaño", [2775] = "Mena de plata", [2772] = "Mena de hierro",

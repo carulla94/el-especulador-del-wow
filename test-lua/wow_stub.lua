@@ -18,6 +18,9 @@ local function newObject(kind, name)
   function methods:IsShown() return self.__shown end
   function methods:SetText(text) self.__text = text end
   function methods:GetText() return self.__text end
+  function methods:HighlightText() self.__highlighted = true end -- EditBox: selecciona el texto
+  function methods:LockHighlight() self.__locked = true end      -- botón resaltado (el modo activo)
+  function methods:UnlockHighlight() self.__locked = false end
   function methods:GetStringHeight() return 12 end
   function methods:GetWidth() return 140 end
   function methods:SetHeight(h) self.__height = h end
@@ -53,6 +56,8 @@ Stub.prices = {[2772] = 120, [3575] = 100, [2770] = 30, [2840] = 45, [12365] = 3
                [2771] = 40, [2589] = 10, [2592] = 25, [2318] = 20, [2319] = 40, [2447] = 20, [785] = 40, [2453] = 60,
                [2835] = 8, [2836] = 15, [2838] = 40}
 Stub.ages = {}
+-- IDs que el cliente no conoce (C_Item.GetItemInfoInstant no devuelve nada). Los demás existen, como en el juego.
+Stub.unknownItems = {}
 
 -- Contenido de bolsas: 0 mochila, 5 bolsa de componentes, 6 primera pestaña del banco.
 Stub.slots = {
@@ -81,6 +86,13 @@ function Stub.install()
   _G.SlashCmdList = {}
   _G.print = function(...) local parts = {} for i = 1, select("#", ...) do parts[#parts + 1] = tostring(select(i, ...)) end table.insert(Stub.printed, table.concat(parts, " ")) end
   _G.time = function() return Stub.now end
+  _G.GetServerTime = function() return Stub.now end
+  _G.date = function(format, t) return os.date(format, t or Stub.now) end
+  _G.GetBuildInfo = function() return "1.60.1", "70707", "Oct 30 2026", 16001 end
+  _G.C_AddOns = {GetAddOnMetadata = function(name, field)
+    if name == "Auctionator" and field == "Version" then return Stub.auctionatorVersion end
+  end}
+  Stub.auctionatorVersion = "11.0.9-forever"
   _G.GetTime = function() return Stub.gameTime end
   _G.C_Timer = {After = function(delay, fn) table.insert(Stub.timers, {at = Stub.gameTime + (delay or 0), fn = fn}) end}
   _G.UnitName = function() return "Javi" end
@@ -129,10 +141,14 @@ function Stub.install()
       if not it then return nil end
       return it[1], "|Hitem:" .. id .. "|h", it[2], 10, 1, "", "", 20, it[3], 134400, it[4], it[5], 0, 0
     end,
+    -- Como el cliente: conoce cualquier objeto que exista (sin preguntar al servidor), aunque no tenga su nombre.
     GetItemInfoInstant = function(id)
       local it = items[id]
-      if not it then return nil end
-      return id, "", "", it[3], 134400, it[5], 0
+      if not it then
+        if type(id) ~= "number" or id <= 0 or id >= 300000 or Stub.unknownItems[id] then return nil end
+        return id, "", "", "", 134400, 7, 0
+      end
+      return id, "", "", it[3], 134400, it[5], it[6] or 0
     end,
     GetItemNameByID = function(id) return items[id] and items[id][1] or nil end,
     GetItemIconByID = function() return 134400 end,
@@ -163,15 +179,28 @@ function Stub.install()
   -- Una tanda de resultados de búsqueda (favoritos, pestaña Comprar, lista de la compra): no es un escaneo.
   function Stub.dbCallback() Stub.busFire(EVENTS.prices) end
   -- Fin de un escaneo: "full" (replicate) o "summary" (el de resumen, que después procesa los precios). Como el real,
-  -- el evento lleva los resultados del escaneo (rawScan / fixedScanData): rows filas, 1000 si no se dice.
-  function Stub.scanComplete(kind, rows)
-    local data = {}
-    for i = 1, rows or 1000 do data[i] = {} end
+  -- el evento lleva los resultados del escaneo (fixedScanData / rawScan): rows filas, 1000 si no se dice, hechas con
+  -- Stub.scanRows. data: filas a medida en lugar de esas.
+  function Stub.scanComplete(kind, rows, data)
+    data = data or Stub.scanRows(kind, rows or 1000)
     if kind == "full" then Stub.busFire(EVENTS.full, data) else Stub.busFire(EVENTS.summary, data); Stub.busFire(EVENTS.prices) end
+    return data
   end
   -- Marco del escaneo de resumen de Auctionator (Auctionator.State.IncrementalScanFrameRef): doingFullScan mientras dura.
   Stub.scanFrame = {doingFullScan = false}
+  -- Historial interno de Auctionator (Database:GetPriceHistory): dbKey (texto) -> filas, de la más nueva a la más
+  -- vieja, como en Source/Database/Mixin.lua: {date, rawDay = "2499", minSeen, maxSeen, available}.
+  Stub.history, Stub.historyCalls = {}, 0
+  _G.AUCTIONATOR_PRICE_DATABASE = {__dbversion = 8}
   _G.Auctionator = {
+    Database = {GetPriceHistory = function(self, dbKey)
+      assert(type(self) == "table" and type(dbKey) == "string", "GetPriceHistory(self, dbKey de texto)")
+      Stub.historyCalls = Stub.historyCalls + 1
+      if Stub.onHistory then Stub.onHistory(dbKey) end
+      if Stub.historyError then error("CBOR roto") end
+      return Stub.history[dbKey] or {}
+    end},
+    Constants = {SCAN_DAY_0 = 1577833200},
     API = {v1 = {
       GetAuctionPriceByItemID = function(caller, id) assert(type(caller) == "string"); return prices[id] end,
       GetAuctionAgeByItemID = function(caller, id) if prices[id] then return Stub.ages[id] or 0 end end,
@@ -192,6 +221,38 @@ function Stub.install()
     SavedState = {},
     State = {IncrementalScanFrameRef = Stub.scanFrame},
   }
+
+  -- Subasta moderna (C_AuctionHouse). El depósito sale del precio de venta a un mercader; 1:4:12 entre las tres
+  -- duraciones, como se midió en la beta de Forever. nil para lo que no es mercancía (Stub.notCommodity).
+  Stub.notCommodity, Stub.depositCalls, Stub.copperValues, Stub.commodity = {}, 0, true, {}
+  _G.C_AuctionHouse = {
+    CalculateCommodityDeposit = function(id, duration, quantity)
+      assert(type(id) == "number" and type(duration) == "number" and type(quantity) == "number", "argumentos")
+      Stub.depositCalls = Stub.depositCalls + 1
+      local it = items[id]
+      if Stub.notCommodity[id] or duration < 1 or duration > 3 then return nil end
+      return math.ceil((it and it[4] or 10) * quantity * ({5, 20, 60})[duration] / 100)
+    end,
+    SupportsCopperValues = function() return Stub.copperValues end,
+    -- Resultados de buscar una mercancía (pestaña Comprar): Stub.commodity[id] = {{unitPrice, quantity, numOwnerItems}, ...}.
+    GetNumCommoditySearchResults = function(id)
+      assert(type(id) == "number", "itemID")
+      return #(Stub.commodity[id] or {})
+    end,
+    GetCommoditySearchResultInfo = function(id, index)
+      local row = (Stub.commodity[id] or {})[index]
+      if not row then return nil end
+      return {itemID = id, quantity = row[2], unitPrice = row[1], auctionID = index, owners = {}, totalNumberOfOwners = 1,
+              numOwnerItems = row[3] or 0, containsOwnerItem = (row[3] or 0) > 0, containsAccountItem = false}
+    end,
+    GetItemCommodityStatus = function(location)
+      assert(type(location) == "table" and location.bag and location.slot, "ItemLocation")
+      local info = Stub.slots[location.bag] and Stub.slots[location.bag][location.slot]
+      return info and (Stub.notCommodity[info.itemID] and 1 or 2) or 0
+    end,
+  }
+  _G.ItemLocation = {CreateFromBagAndSlot = function(self, bag, slot) return {bag = bag, slot = slot} end}
+  _G.AUCTION_DURATION_ONE, _G.AUCTION_DURATION_TWO, _G.AUCTION_DURATION_THREE = "12 horas", "24 horas", "48 horas"
 
   -- Mercader abierto: cada fila {id, price, stack, available, purchasable, extended}.
   Stub.merchant = {}
@@ -240,6 +301,54 @@ function Stub.install()
       return {name = "Luis-Forever", level = 40, profession1ID = 186, profession1Rank = 210, profession1Name = "Minería"}
     end,
   }
+end
+
+-- Filas de un escaneo como las que Auctionator pasa con ScanComplete.
+-- listings: {{id, price (por unidad), qty, lots = {{count, unitPrice, owner}, ...}}, ...}; por defecto, todo lo de
+-- Stub.prices con 50 unidades (completo: lotes de 10 al precio, 5 un 4 % más caros y 35 un 20 % más caros).
+-- Completo (replicate, Source_Mainline/FullScan/Mixins/Frame.lua): {replicateInfo = {GetReplicateItemInfo(i)},
+-- itemLink, timeLeft}; [3] cantidad, [10] compra ya del lote, [14] vendedor, [17] itemID.
+-- Resumen (IncrementalScan): BrowseResultInfo {itemKey, totalQuantity, minPrice (por unidad), containsOwnerItem}.
+-- Se rellena con objetos no vigilados (IDs 200000+) hasta rows filas; con menos filas, se corta.
+function Stub.defaultListings()
+  local ids = {}
+  for id in pairs(Stub.prices) do ids[#ids + 1] = id end
+  table.sort(ids)
+  local out = {}
+  for _, id in ipairs(ids) do
+    local p = Stub.prices[id]
+    out[#out + 1] = {id = id, price = p, qty = 50,
+                     lots = {{10, p}, {5, math.floor(p * 104 / 100)}, {35, math.floor(p * 120 / 100)}}}
+  end
+  return out
+end
+
+function Stub.scanRows(kind, rows, listings)
+  listings = listings or Stub.defaultListings()
+  local data = {}
+  local function replicate(id, count, unit, owner)
+    local name = Stub.items[id] and Stub.items[id][1] or ("Objeto " .. id)
+    return {replicateInfo = {name, 134400, count, 1, true, 1, "", 0, 0, math.floor(unit * count + 0.5), 0, nil, nil,
+                             owner or "Vendedor", nil, 0, id, true},
+            itemLink = "|cffffffff|Hitem:" .. id .. "::::::::32:::::|h[" .. name .. "]|h|r", timeLeft = 3}
+  end
+  for _, l in ipairs(listings) do
+    if kind == "full" then
+      for _, lot in ipairs(l.lots or {{l.qty, l.price}}) do data[#data + 1] = replicate(l.id, lot[1], lot[2], lot[3]) end
+    else
+      data[#data + 1] = {itemKey = {itemID = l.id, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = l.pet or 0},
+                         totalQuantity = l.qty, minPrice = l.price, containsOwnerItem = false}
+    end
+  end
+  local filler = 200000
+  while #data < (rows or #data) do
+    filler = filler + 1
+    if kind == "full" then data[#data + 1] = replicate(filler, 1, 100)
+    else data[#data + 1] = {itemKey = {itemID = filler, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0},
+                            totalQuantity = 1, minPrice = 100, containsOwnerItem = false} end
+  end
+  while rows and #data > rows do table.remove(data) end
+  return data
 end
 
 -- Ejecuta los temporizadores pendientes avanzando el reloj de juego.

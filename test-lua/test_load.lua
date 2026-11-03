@@ -368,7 +368,9 @@ test("Comandos en español: auto no / auto / comision / amigo", function()
   Stub.printed = {}
   slash("amigo borrar nadie"); assert(printed("no encuentro a nadie"))
   slash("amigo borrar bea"); assert(printed("he quitado a Bea de tu lista."))
-  slash("ayuda"); assert(printed("/oro comprar — (modo A tope)"), "la ayuda dice para qué modo es")
+  slash("ayuda"); assert(printed("/oro comprar — lista de la compra en Auctionator: lo que falta para tus recetas (A tope) y los chollos"),
+    "la ayuda dice para qué modo es")
+  assert(printed("/oro especular — modo para especular") and printed("/oro especular presupuesto 200"), "y el modo Especular")
   -- Al entrar, la hermandad tarda unos segundos en cargar: se dice en vez de mostrar el uso.
   local setManual = ns.Guild.SetManual
   ns.Guild.SetManual = function() return nil end
@@ -492,6 +494,334 @@ test("Hermandad sin sugerencias: si se conoce a alguien, no dice que nadie tiene
   end)
   _G.CreateFrame, _G.OroHermandadFrame, _G.OroHermandadScroll = saved.createFrame, saved.frame, saved.scroll
   if not ok then error(err, 0) end
+end)
+
+---------------------------------------------------------------------------
+-- Modo Especular en la sesión
+---------------------------------------------------------------------------
+local Spec = ns.Spec
+local KEY = "Forever-Alliance"
+local WORKED = {9600, 9800, 10000, 10200, 10400, 9900, 10100, 9700, 10300, 10000, 9900, 10100, 10000, 10000}
+-- Paño rúnico con 14 días de precios en OroHermandadHist (escritos con los codificadores de Spec, como History) y un
+-- escaneo propio de hace 10 min a 60p.
+local function seedHistory(id, lo)
+  local T = Spec.DayIndex(Stub.now)
+  local records = {}
+  for i, v in ipairs(WORKED) do records[i] = {d = T - 15 + i, lo = v, hi = v, last = v, qty = 400, scans = 2, src = "o"} end
+  local market = ns.History.Hist().markets[KEY]
+  market.items[id] = {n = "Paño rúnico", c = "tela", v = 100, d = Spec.EncodeDays(records),
+                      p = Spec.EncodePoints({{t = Stub.now - 600, lo = lo or 6000, qty = 300, qty5 = 40}})}
+  market.dep[id] = "1:13,2:50,3:150"
+end
+local function specRow(kind)
+  for _, item in ipairs(lastRender.result.sections.spec or {}) do if item.kind == kind then return item end end
+end
+
+test("Tres modos: botones, /oro especular, resaltado y botón de la tabla", function()
+  local frame = _G.OroHermandadFrame
+  assert(#frame.modeButtons == 3, "tres botones")
+  assert(frame.modeButtons[1].__text == "Tranquilo" and frame.modeButtons[2].__text == "A tope" and frame.modeButtons[3].__text == "Especular",
+    "en el orden de Engine.MODE_ORDER")
+  slash("tranquilo")
+  frame.specButton.__scripts.OnClick(frame.specButton)
+  Stub.runTimers(5)
+  assert(OroHermandadDB.mode == "spec" and lastRender.result.mode == "spec", "el botón cambia de modo")
+  assert(frame.specButton.__locked and not frame.lazyButton.__locked and not frame.farmButton.__locked, "resaltado el activo")
+  assert(frame.tableButton.__shown, "botón de la tabla en Especular")
+  slash("atope")
+  assert(frame.farmButton.__locked and not frame.specButton.__locked and not frame.tableButton.__shown, "A tope: sin botón de tabla")
+  Stub.printed = {}
+  slash("especular")
+  assert(OroHermandadDB.mode == "spec" and printed("modo Especular."), "/oro especular cambia de modo")
+  -- En Especular no hay recetas, ventas, rutas ni hermandad.
+  for _, key in ipairs({"now", "farm", "group"}) do assert(#lastRender.result.sections[key] == 0, key) end
+  slash("tranquilo")
+end)
+
+test("/oro especular on|off y presupuesto (por defecto, el 25 % de tu oro)", function()
+  Stub.printed = {}
+  slash("especular presupuesto")
+  assert(printed("presupuesto para chollos: el 25 % de tu oro, ahora " .. ns.Engine.Money(math.floor(Stub.money / 4))), table.concat(Stub.printed, " / "))
+  slash("especular presupuesto 200")
+  assert(OroHermandadDB.spec.budget == 2000000 and printed("presupuesto para chollos: 200o (cada chollo usa como mucho 50o)."), "200 oros")
+  slash("especular 12,5")
+  assert(OroHermandadDB.spec.budget == 125000, "coma decimal: " .. tostring(OroHermandadDB.spec.budget))
+  Stub.printed = {}
+  slash("especular presupuesto muchos")
+  assert(printed("uso: /oro especular") and OroHermandadDB.spec.budget == 125000, "uso")
+  slash("especular presupuesto auto")
+  assert(OroHermandadDB.spec.budget == nil, "vuelve al 25 %")
+  slash("especular 50"); slash("especular presupuesto 0")
+  assert(OroHermandadDB.spec.budget == nil, "0 también, como en el panel de opciones")
+  Stub.printed = {}
+  slash("especular off")
+  assert(OroHermandadDB.spec.on == false and printed("Especular apagado en Tranquilo, A tope y la descripción de los objetos."), "apagado")
+  slash("especular si")
+  assert(OroHermandadDB.spec.on == true and printed("Especular encendido"), "encendido")
+  Stub.printed = {}
+  slash("estado")
+  assert(printed("Especular: presupuesto para chollos") and printed("(el 25 % de tu oro)") and printed("encendido."), "estado")
+  slash("especular presupuesto 200")
+end)
+
+test("Especular con historial: chollo, «Comprar lo que falta» con su cantidad (también en Tranquilo) y la tabla", function()
+  Stub.items[14047] = {"Paño rúnico", 1, "", 100, 7}
+  seedHistory(14047)
+  slash("especular")
+  local row = specRow("flip")
+  assert(row and row.title == "Chollo: Paño rúnico a 60p (40 % por debajo de lo normal)", row and row.title)
+  assert(has(row.detail, "Compra 40× a 82p 16c como máximo") and has(row.detail, "Precio de hace 10 min."), row.detail)
+  assert(row.shopping[1].id == 14047 and row.shopping[1].count == 40, "lista de la compra")
+  assert(has(lastRender.result.spec.text, "Recuerda: el precio mínimo publicado no es una venta confirmada."), lastRender.result.spec.text)
+  Stub.shoppingList, Stub.printed = nil, {}
+  slash("comprar")
+  assert(Stub.shoppingList and Stub.shoppingList.strings[1] == "\"Paño rúnico\";;;;;;;;;;;40", Stub.shoppingList and Stub.shoppingList.strings[1])
+  assert(not printed("no hay nada que comprar"), "hay algo que comprar")
+  -- Tranquilo: el mismo chollo (confianza alta) y el mismo botón.
+  slash("tranquilo")
+  assert(specRow("flip") and #lastRender.result.sections.spec == 1, "1 chollo en Tranquilo")
+  Stub.shoppingList = nil
+  slash("comprar")
+  assert(Stub.shoppingList and has(Stub.shoppingList.strings[#Stub.shoppingList.strings], "Paño rúnico"), "Tranquilo también lo compra")
+  -- Especular apagado: Tranquilo ya no lo enseña ni lo compra.
+  slash("especular off")
+  slash("tranquilo")
+  assert(#lastRender.result.sections.spec == 0, "apagado")
+  Stub.shoppingList, Stub.printed = nil, {}
+  slash("comprar")
+  assert(Stub.shoppingList == nil and printed("en modo Tranquilo"), "nada que comprar")
+  slash("especular on")
+  -- El botón «Tabla» abre /oro tabla.
+  slash("especular")
+  local frame = _G.OroHermandadFrame
+  frame.tableButton.__scripts.OnClick(frame.tableButton)
+  local text = _G.OroHermandadTextFrame
+  assert(text and text.__shown and has(text.edit.__text, ns.History.TABLE_HEADER) and has(text.edit.__text, "Paño rúnico;Tela;"), "tabla")
+  text:Hide()
+end)
+
+test("Lo que muestra la subasta al buscar el objeto: precio confirmado y sin tus propias unidades", function()
+  Stub.commodity[14047] = {{5000, 10, 10}, {5800, 1}, {6000, 40}, {6200, 60}, {7900, 100}, {9500, 200}}
+  Stub.fire("COMMODITY_SEARCH_RESULTS_UPDATED", 14047)
+  Stub.runTimers(5)
+  local book = ns.History.Books()[14047]
+  assert(book and #book.lots == 5 and book.lots[1][1] == 5800 and book.at == Stub.now, "lotes sin los tuyos")
+  local row = specRow("flip")
+  assert(row and row.title == "Chollo: Paño rúnico a 58p (42 % por debajo de lo normal)", row and row.title)
+  assert(has(row.detail, "Compra 82× a 82p 16c como máximo; no revendas por debajo de 64p 73c; objetivo 1o; ganancia ≈ 27o 48p")
+    and has(row.detail, "Precio confirmado en la subasta hace menos de 1 min."), row.detail)
+  assert(row.shopping[1].count == 82, "82 unidades")
+  -- Objetos que no se vigilan: no se guardan.
+  Stub.commodity[2901] = {{900, 1}}
+  Stub.fire("COMMODITY_SEARCH_RESULTS_UPDATED", 2901)
+  assert(ns.History.Books()[2901] == nil, "no vigilado")
+  -- Pasados 5 minutos vuelve a valer el último escaneo (estimado).
+  Stub.now = Stub.now + 400
+  ns.History.Hist().markets[KEY].items[14047].p = Spec.EncodePoints({{t = Stub.now - 60, lo = 6000, qty = 300, qty5 = 40}})
+  slash("especular")
+  assert(has(specRow("flip").detail, "estimado: confirma en la subasta"), specRow("flip").detail)
+end)
+
+test("Descripción de objetos con Especular: precio normal y chollo, con caché de 30 s", function()
+  local tip = _G.GameTooltip
+  local calls = counter(ns.Engine, "SpecLines")
+  local function hover(id) tip.__lines = {}; Stub.tooltipPost(tip, {id = id}); return table.concat(tip.__lines, " | ") end
+  local text = hover(14047)
+  assert(has(text, "Oro de Hermandad · Normal (14 d) = 1o · hoy -40 %"), text)
+  assert(has(text, "Chollo: compra hasta 40 a 82p 16c como máximo; no revendas por debajo de"), text)
+  for _ = 1, 10 do Stub.gameTime = Stub.gameTime + 0.2; text = hover(14047) end
+  assert(calls.n == 1, "una vez en 30 s: " .. calls.n)
+  assert(not has(text, "Oro de Hermandad · Oro de Hermandad"), "la línea guardada no se modifica: " .. text)
+  Stub.gameTime = Stub.gameTime + 31
+  hover(14047)
+  assert(calls.n == 2, "pasados 30 s se recalcula: " .. calls.n)
+  -- Un escaneo nuevo también vacía la caché.
+  Stub.scanComplete("summary")
+  Stub.runTimers(5)
+  hover(14047)
+  assert(calls.n == 3, "tras un escaneo: " .. calls.n)
+  -- Lo que no se vigila no lleva líneas de Especular; apagado, tampoco lo vigilado (fuera del modo Especular).
+  assert(not has(hover(2901), "Normal (14 d)"), "no vigilado")
+  slash("tranquilo")
+  slash("especular off")
+  assert(not has(hover(14047), "Normal (14 d)"), "apagado")
+  slash("especular on")
+  calls.restore()
+end)
+
+test("Escaneo grande con la ventana abierta: se repinta cuando el historial termina de escribirlo (y la descripción)", function()
+  -- Sin escaneo de hoy no hay chollo; el escaneo trae el Paño rúnico a 60p (300) y los 80 vigilados entre 60 000 filas.
+  ns.History.Hist().markets[KEY].items[14047].p = ""
+  assert(Stub.prices[14047] == nil, "sin precio de Auctionator: el chollo solo puede venir del escaneo")
+  slash("especular")
+  assert(ns.UI.IsShown() and specRow("flip") == nil, "antes del escaneo no hay chollo")
+  local tip = _G.GameTooltip
+  local function hover() tip.__lines = {}; Stub.tooltipPost(tip, {id = 14047}); return table.concat(tip.__lines, " | ") end
+  -- Como en el cliente: un temporizador creado en un fotograma salta como pronto en el siguiente (también After(0)),
+  -- a 60 fotogramas por segundo. Así las tandas de History tardan lo que tardarían en el juego.
+  local frameNo, timers, original, renders = 0, {}, _G.C_Timer.After, {}
+  _G.C_Timer.After = function(delay, fn) timers[#timers + 1] = {at = Stub.gameTime + (delay or 0), born = frameNo, fn = fn} end
+  local function frame()
+    frameNo = frameNo + 1
+    Stub.gameTime = Stub.gameTime + 1 / 60
+    local due, keep = {}, {}
+    for _, t in ipairs(timers) do
+      if t.born < frameNo and t.at <= Stub.gameTime + 1e-9 then due[#due + 1] = t else keep[#keep + 1] = t end
+    end
+    timers = keep
+    table.sort(due, function(a, b) return a.at < b.at end)
+    for _, t in ipairs(due) do t.fn() end
+  end
+  local render = ns.UI.Render
+  ns.UI.Render = function(result, info)
+    local flip = false
+    for _, row in ipairs(result.sections.spec or {}) do if row.kind == "flip" and row.icon == 14047 then flip = true end end
+    renders[#renders + 1] = {t = Stub.gameTime, flip = flip, pending = ns.History.Pending()}
+    return render(result, info)
+  end
+  local ok, err = pcall(function()
+    local listings = {{id = 14047, price = 6000, qty = 300, lots = {{300, 6000}}}}
+    for _, id in ipairs(ns.History.FixedIDs()) do
+      if id ~= 14047 then listings[#listings + 1] = {id = id, price = 1000, qty = 50, lots = {{50, 1000}}} end
+    end
+    local t0 = Stub.gameTime
+    Stub.scanComplete("full", 60000, Stub.scanRows("full", 60000, listings))
+    local doneAt, during
+    for i = 1, 600 do
+      frame()
+      if i == 3 then during = hover() end -- el jugador pasa el ratón por el objeto mientras History escribe
+      if not doneAt and ns.History.Pending() == 0 then doneAt = Stub.gameTime end
+    end
+    assert(doneAt and doneAt - t0 > 0.5, "History tarda más que el repintado de 0,5 s: " .. tostring(doneAt and doneAt - t0))
+    assert(renders[1] and renders[1].t < doneAt and renders[1].pending > 0 and not renders[1].flip,
+      "el primer repintado (0,5 s) aún no tiene el escaneo")
+    local last = renders[#renders]
+    assert(last.t >= doneAt and last.pending == 0 and last.flip, "se repinta al terminar, ya con el chollo")
+    assert(specRow("flip") and specRow("flip").title == "Chollo: Paño rúnico a 60p (40 % por debajo de lo normal)",
+      specRow("flip") and specRow("flip").title)
+    assert(not has(during, "Chollo"), "durante el escaneo aún no: " .. during)
+    -- Unos segundos después (la caché es de 30 s): la descripción ya tiene el escaneo.
+    local text = hover()
+    -- 83: lo que cabe en la cuarta parte del presupuesto de 200o a 60p.
+    assert(has(text, "hoy -40 %") and has(text, "Chollo: compra hasta 83 a 82p 16c como máximo"), text)
+  end)
+  _G.C_Timer.After, ns.UI.Render = original, render
+  for _, t in ipairs(timers) do Stub.timers[#Stub.timers + 1] = {at = t.at, fn = t.fn} end
+  if not ok then error(err, 0) end
+end)
+
+test("Escaneo de resumen con un chollo: «Posible chollo», «Comprar lo que falta» lo busca y al abrirlo sale la compra", function()
+  Stub.now = Stub.now + 3 * 3600 -- el escaneo completo de la prueba anterior ya tiene más de 2 h
+  ns.History.Hist().markets[KEY].items[14047].p = ""
+  -- El escaneo de resumen (el del botón de Auctionator por defecto) da el mínimo y el total, no cuántas hay cerca.
+  Stub.scanComplete("summary", 2000, Stub.scanRows("summary", 2000, {{id = 14047, price = 6000, qty = 300}}))
+  Stub.runTimers(5)
+  slash("especular")
+  assert(specRow("flip") == nil, "sin cantidades no se calcula la compra")
+  local row = specRow("check")
+  assert(row and row.title == "Posible chollo: Paño rúnico a 60p (40 % por debajo de lo normal)", row and row.title)
+  assert(has(row.detail, "Tu escaneo no dice cuántas hay a ese precio: ábrelo en la pestaña Comprar")
+    and has(row.detail, "Precio de hace menos de 1 min."), row.detail)
+  local tip = _G.GameTooltip
+  tip.__lines = {}; Stub.tooltipPost(tip, {id = 14047})
+  local text = table.concat(tip.__lines, " | ")
+  assert(has(text, "Posible chollo: tu escaneo no dice cuántas hay a ese precio") and not has(text, "No compensa"), text)
+  Stub.shoppingList = nil
+  slash("comprar")
+  assert(Stub.shoppingList and Stub.shoppingList.strings[1] == "\"Paño rúnico\";;;;;;;;;;;1",
+    Stub.shoppingList and Stub.shoppingList.strings[1])
+  -- Al abrirlo en la subasta hay 300 a 60p: ya es un chollo calculado, con el precio confirmado.
+  Stub.commodity[14047] = {{6000, 300}}
+  Stub.fire("COMMODITY_SEARCH_RESULTS_UPDATED", 14047)
+  Stub.runTimers(5)
+  assert(specRow("check") == nil and specRow("flip"), "con lo que hay a la venta, el chollo de verdad")
+  assert(has(specRow("flip").detail, "Precio confirmado en la subasta"), specRow("flip").detail)
+end)
+
+test("Ventana en Especular: estado, balance y secciones que no se ven en los otros modos", function()
+  local texts, saved = {}, {frame = _G.OroHermandadFrame, scroll = _G.OroHermandadScroll, createFrame = _G.CreateFrame}
+  _G.CreateFrame = function(...)
+    local f = saved.createFrame(...)
+    f.CreateFontString = function() local fs = Stub.newObject("FontString"); texts[#texts + 1] = fs; return fs end
+    return f
+  end
+  local ok, err = pcall(function()
+    local U = {Items = ns.Items}
+    assert(loadfile("addon/OroHermandad/UI.lua"))("OroHermandad", U)
+    local frame = U.UI.Create({position = {}})
+    local function shown(sub) for _, fs in ipairs(texts) do if fs.__shown and has(fs.__text, sub) then return true end end end
+    local ctx = ns.Core.Context()
+    ctx.mode = "spec"
+    local result = ns.Engine.Suggest(ctx)
+    U.UI.Render(result, {footer = "pie", canShop = true})
+    assert(shown("Especular") and shown("Balance de la semana") and shown(result.spec.text), "secciones y estado")
+    assert(shown("Aún no hay balance") and not shown("Ahora") and not shown("Recoger"), "solo las de Especular")
+    assert(frame.tableButton.__shown and frame.shopButton.__shown, "tabla y comprar (hay un chollo)")
+    ctx.mode = "lazy"
+    U.UI.Render(ns.Engine.Suggest(ctx), {footer = "pie", canShop = true})
+    assert(shown("Ahora") and shown("Recoger") and not shown("Balance de la semana") and not frame.tableButton.__shown, "Tranquilo")
+  end)
+  _G.CreateFrame, _G.OroHermandadFrame, _G.OroHermandadScroll = saved.createFrame, saved.frame, saved.scroll
+  if not ok then error(err, 0) end
+end)
+
+test("Panel de opciones: desplegable con los tres modos, chollos en todos los modos y presupuesto", function()
+  local registered, saved = {}, _G.Settings
+  local function setting(variable, extra) local st = extra or {}; st.variable = variable; registered[variable] = st; return st end
+  _G.Settings = {
+    VarType = {Boolean = "boolean", String = "string", Number = "number"},
+    RegisterVerticalLayoutCategory = function(name) return {name = name, GetID = function() return 42 end} end,
+    RegisterAddOnSetting = function(_, variable, key, tbl, _, label, default)
+      return setting(variable, {key = key, tbl = tbl, label = label, default = default,
+        SetValueChangedCallback = function(self, fn) self.onChange = fn end})
+    end,
+    RegisterProxySetting = function(_, variable, _, label, default, get, set)
+      return setting(variable, {label = label, default = default, get = get, set = set})
+    end,
+    CreateCheckbox = function(_, st, tooltip) st.kind, st.tooltip = "checkbox", tooltip end,
+    CreateControlTextContainer = function()
+      local data = {}
+      return {Add = function(_, value, label) data[#data + 1] = {value = value, label = label} end, GetData = function() return data end}
+    end,
+    CreateDropdown = function(_, st, options, tooltip) st.kind, st.options, st.tooltip = "dropdown", options(), tooltip end,
+    CreateSliderOptions = function(minValue, maxValue, rate) return {minValue = minValue, maxValue = maxValue, rate = rate} end,
+    CreateSlider = function(_, st, options) st.kind, st.options = "slider", options end,
+    RegisterAddOnCategory = function() end,
+  }
+  local ok, err = pcall(function()
+    local E = {Engine = ns.Engine}
+    assert(loadfile("addon/OroHermandad/Extras.lua"))("OroHermandad", E)
+    local db = {mode = "lazy", spec = {on = true}, minimap = {}}
+    local refreshed = 0
+    E.Extras.Init(db, function() end, function() end)
+    assert(E.Extras.RegisterSettings({SetMode = function(mode) db.mode = mode end, Refresh = function() refreshed = refreshed + 1 end}) == 42)
+    local modes = registered.OroHermandad_Mode
+    assert(modes.kind == "dropdown" and #modes.options == 3, "tres modos")
+    local labels = {}
+    for i, o in ipairs(modes.options) do labels[i] = o.value .. "=" .. o.label end
+    assert(table.concat(labels, ",") == "lazy=Tranquilo,farm=A tope,spec=Especular", table.concat(labels, ","))
+    assert(has(modes.tooltip, "Especular: chollos"), modes.tooltip)
+    modes.set("spec"); assert(db.mode == "spec" and modes.get() == "spec", "elige Especular")
+    local on = registered.OroHermandad_SpecOn
+    assert(on.kind == "checkbox" and on.tbl == db.spec and on.key == "on" and on.default == true, "chollos en todos los modos")
+    on.onChange(nil, false); assert(refreshed == 1, "refresca")
+    local budget = registered.OroHermandad_SpecBudget
+    assert(budget.kind == "slider" and budget.options.maxValue == 5000 and budget.get() == 0, "deslizador")
+    budget.set(200); assert(db.spec.budget == 2000000 and budget.get() == 200, "200 oros")
+    budget.set(0); assert(db.spec.budget == nil, "0 = el 25 % de tu oro")
+    db.spec.budget = 90000000; assert(budget.get() == 5000, "lo fijado con /oro se queda, el deslizador marca el tope")
+  end)
+  _G.Settings = saved
+  if not ok then error(err, 0) end
+end)
+
+test("Especular: limpieza de la prueba", function()
+  ns.History.Hist().markets[KEY].items[14047] = nil
+  ns.History.Hist().markets[KEY].dep[14047] = nil
+  Stub.commodity, Stub.items[14047] = {}, nil
+  slash("especular presupuesto auto")
+  slash("tranquilo")
+  assert(#lastRender.result.sections.spec == 0, "sin chollos")
 end)
 
 test("Sin Auctionator no rompe y lo explica", function()

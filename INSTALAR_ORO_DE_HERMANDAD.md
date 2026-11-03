@@ -8,7 +8,7 @@ Pone los precios. Con la app de CurseForge: busca **Auctionator** en WoW Forever
 
 ## 2. Descarga OroHermandad.zip
 
-Descárgalo de la [versión 0.2.1](https://github.com/carulla94/el-especulador-del-wow/releases/download/oro-hermandad-v0.2.1/OroHermandad.zip) (todas las versiones, en [Releases](https://github.com/carulla94/el-especulador-del-wow/releases)). Si no puedes abrir el enlace, pídeselo a quien te pasó esta guía.
+Descárgalo de la [versión 0.3.0](https://github.com/carulla94/el-especulador-del-wow/releases/download/oro-hermandad-v0.3.0/OroHermandad.zip) (todas las versiones, en [Releases](https://github.com/carulla94/el-especulador-del-wow/releases)). Si no puedes abrir el enlace, pídeselo a quien te pasó esta guía.
 
 ## 3. Descomprímelo en la carpeta AddOns
 
@@ -30,12 +30,13 @@ En la pantalla de personajes, pulsa **Menú** (arriba) y luego **Addons** (o **A
 3. Pulsa el **botón de la moneda** junto al minimapa o escribe `/oro`.
 
 En la ventana eliges el modo: **Tranquilo** mientras subes de nivel, **A tope** en sesiones solo para hacer oro. Cuantos más del grupo lo usen, mejores son las sugerencias de hermandad.
+El tercer modo, **Especular**, busca chollos para comprar y revender: necesita 7 días de escaneos para el precio normal y 10 para los chollos (12 en Tranquilo), y no sugiere compras hasta el 18-nov.
 
 ## Si algo falla
 
 Escribe `/console scriptErrors 1` en el chat, repite lo que hacías y pasa el texto del error al grupo.
 
-Para actualizar, borra la carpeta `OroHermandad` y repite los pasos 2 y 3. El manual va dentro del zip: `OroHermandad/LEEME.md`.
+Para actualizar, borra la carpeta `OroHermandad` y repite los pasos 2 y 3. Después **sal del juego del todo y vuelve a entrar**: un `/reload` no carga los archivos nuevos de una versión (la 0.3.0 trae dos y un historial de precios nuevo). El manual va dentro del zip: `OroHermandad/LEEME.md`.
 
 ## Para quien reparte el zip
 

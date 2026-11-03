@@ -3,8 +3,9 @@
 local DIR = "addon/OroHermandad/"
 local ns = {}
 assert(loadfile(DIR .. "Data.lua"))("OroHermandad", ns)
+assert(loadfile(DIR .. "Spec.lua"))("OroHermandad", ns)
 assert(loadfile(DIR .. "Engine.lua"))("OroHermandad", ns)
-local Engine, Data = ns.Engine, ns.Data
+local Engine, Data, Spec = ns.Engine, ns.Data, ns.Spec
 
 local passed, failed = 0, 0
 local function test(name, fn)
@@ -572,6 +573,413 @@ test("Límites por modo", function()
   local lazy = Engine.Suggest(ctx({bags = bags}))
   assert(#lazy.sections.now <= 4 and #lazy.sections.farm <= 1 and #lazy.sections.group <= 1)
   assert(#Engine.Suggest(ctx({mode = "farm", bags = bags})).sections.now <= 8)
+end)
+
+---------------------------------------------------------------------------
+-- Modos con banderas y modo Especular
+---------------------------------------------------------------------------
+local function serialize(value)
+  if type(value) ~= "table" then return type(value) .. ":" .. tostring(value) end
+  local keys = {}
+  for k in pairs(value) do keys[#keys + 1] = k end
+  table.sort(keys, function(x, y) return tostring(x) < tostring(y) end)
+  local parts = {}
+  for _, k in ipairs(keys) do parts[#parts + 1] = tostring(k) .. "=" .. serialize(value[k]) end
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+
+test("Cada modo define todas sus banderas y un límite para cada sección (también spec)", function()
+  local listed = {}
+  for _, key in ipairs(Engine.MODE_ORDER) do listed[key] = true end
+  for key, mode in pairs(Engine.MODES) do
+    assert(listed[key], key .. " no está en MODE_ORDER")
+    for _, flag in ipairs(Engine.MODE_KEYS) do assert(mode[flag] ~= nil, key .. " no define " .. flag) end
+    for _, section in ipairs(Engine.SECTIONS) do
+      assert(type(mode.limits[section]) == "number", key .. ": falta limits." .. section)
+    end
+    assert(mode.routes == "level" or mode.routes == "all", key .. ": routes")
+    assert(mode.specMinConf == "ALTA" or mode.specMinConf == "MEDIA", key .. ": specMinConf")
+    for _, section in ipairs(mode.order) do
+      assert(section == "notes" or section == "balance" or mode.limits[section], key .. ": sección desconocida " .. section)
+    end
+  end
+  eq(#Engine.MODE_ORDER, 3); eq(Engine.MODES.spec.label, "Especular")
+  eq(Engine.MODES.lazy.limits.spec, 1); eq(Engine.MODES.farm.limits.spec, 2); eq(Engine.MODES.spec.limits.spec, 8)
+end)
+
+test("Especular no se comporta como A tope: sin recetas, ventas, rutas ni hermandad", function()
+  local over = {bags = {[2770] = {count = 40, quality = 1}, [2772] = {count = 20, quality = 1}, [1000] = {count = 2, quality = 0, vendor = 50}},
+                guild = {Ana = {profs = {engineering = 100}}, Luis = {profs = {mining = 100}}},
+                recipes = {{product = 12404, qty = 1, reagents = {{12365, 1}}, prof = "blacksmithing"}}}
+  over.mode = "farm"
+  local farm = Engine.Suggest(ctx(over))
+  assert(#farm.sections.now > 0 and #farm.sections.farm > 0 and #farm.sections.group > 0, "A tope sí tiene de todo")
+  over.mode = "spec"
+  local spec = Engine.Suggest(ctx(over))
+  eq(spec.mode, "spec")
+  for _, key in ipairs({"now", "farm", "group", "spec"}) do eq(#spec.sections[key], 0, key) end
+  eq(table.concat(spec.order, ","), "notes,spec,balance"); eq(spec.tableButton, true)
+  assert(spec.showEmpty.spec and spec.showEmpty.balance and not spec.showEmpty.now, "secciones visibles")
+  -- Sin historial (la sesión no lo cargó) lo dice en vez de quedarse en blanco.
+  assert(has(spec.spec.text, "historial de precios no está disponible"), spec.spec and spec.spec.text)
+  -- Los precios se dan por viejos como en A tope (6 h), no como en Tranquilo.
+  eq(Engine.DbStatus(ctx({dbUpdatedAt = NOW - 10 * 3600}), "spec").level, "warn")
+  eq(Engine.DbStatus(ctx({dbUpdatedAt = NOW - 10 * 3600}), "lazy").level, "ok")
+  -- En Tranquilo y A tope las mismas listas de siempre, más la sección Especular (vacía sin historial).
+  eq(table.concat(farm.order, ","), "notes,now,spec,farm,group"); eq(#farm.sections.spec, 0); eq(farm.spec, nil)
+end)
+
+local T = Spec.DayIndex(NOW)
+local WORKED = {9600, 9800, 10000, 10200, 10400, 9900, 10100, 9700, 10300, 10000, 9900, 10100, 10000, 10000}
+local BOOK = {{5800, 1}, {6000, 40}, {6200, 60}, {7900, 100}, {9500, 200}}
+-- Días T-n .. T-1 (false = día sin precio) con lo = hi = el valor, y hoy si se pide.
+local function dayRecords(values, opts)
+  local out, T0 = {}, opts.T0 or T
+  for i, v in ipairs(values) do
+    if v then out[#out + 1] = {d = T0 - #values + i - 1, lo = v, hi = v, last = v, qty = opts.qty or 400, scans = 1, src = "o"} end
+  end
+  if opts.today then out[#out + 1] = {d = T0, lo = opts.today, hi = opts.today, last = opts.today, qty = opts.qty or 400, scans = 1, src = "o"} end
+  return out
+end
+local function watched(values, opts)
+  opts = opts or {}
+  return {records = dayRecords(values, opts), vendor = opts.vendor or 100, dep = opts.dep == nil and 50 or opts.dep or nil,
+          cat = opts.cat or "tela", name = opts.name,
+          point = opts.p and {t = NOW - (opts.ago or 600), lo = opts.p, qty = 300, qty5 = opts.q5 or 40} or nil}
+end
+local function specCtx(over, items, extra)
+  local c = ctx(over)
+  c.spec = {T = T, now = NOW, hints = true, budget = 2000000, items = items, books = {}}
+  for k, v in pairs(extra or {}) do c.spec[k] = v end
+  return c
+end
+local function rowsOf(r, kind)
+  local out = {}
+  for _, x in ipairs(r.sections.spec) do if not kind or x.kind == kind then out[#out + 1] = x end end
+  return out
+end
+
+test("Chollo con lo que mostró la subasta: el ejemplo trabajado de Especular, con su lista de la compra", function()
+  local items = {[14047] = watched(WORKED)}
+  for _, mode in ipairs({"lazy", "farm", "spec"}) do
+    local r = Engine.Suggest(specCtx({mode = mode}, items, {books = {[14047] = {at = NOW - 60, lots = BOOK}}}))
+    local rows = rowsOf(r, "flip")
+    eq(#rows, 1, mode)
+    local row = rows[1]
+    eq(row.title, "Chollo: Paño rúnico a 58p (42 % por debajo de lo normal)")
+    eq(row.detail, "Compra 82× a 82p 16c como máximo; no revendas por debajo de 64p 73c; objetivo 1o; ganancia ≈ 27o 48p "
+      .. "tras la comisión y un depósito perdido. Precio confirmado en la subasta hace 1 min. Fiable · 14 días · variación ±3 %.")
+    eq(row.icon, 14047); eq(row.value, 274818); eq(row.flip.cost, 500000); eq(row.flip.maxBuy, 8216); eq(row.flip.breakEven, 6473)
+    eq(#row.shopping, 1); eq(row.shopping[1].id, 14047); eq(row.shopping[1].count, 82)
+    assert(has(r.spec.text, "Recuerda: el precio mínimo publicado no es una venta confirmada."), r.spec.text)
+  end
+  -- Comisión del 15 % (/oro comision 15): compra como mucho a 73p 46c.
+  local r = Engine.Suggest(specCtx({mode = "farm", cut = 0.15}, items, {books = {[14047] = {at = NOW - 60, lots = BOOK}}}))
+  eq(rowsOf(r, "flip")[1].flip.maxBuy, 7346)
+end)
+
+test("Chollo estimado con el último escaneo propio; sin hora, viejo o sin nada a la venta no hay chollo", function()
+  local r = Engine.Suggest(specCtx({mode = "farm"}, {[14047] = watched(WORKED, {p = 6000, q5 = 40})}))
+  local row = rowsOf(r, "flip")[1]
+  assert(row and has(row.detail, "Compra 40× a 82p 16c como máximo") and has(row.detail, "· estimado: confirma en la subasta. Precio de hace 10 min."),
+    row and row.detail)
+  eq(row.shopping[1].count, 40)
+  -- Escaneo de hace más de 2 h y Auctionator con el mismo precio de hoy: se sabe el precio, no su hora.
+  local cheap = function(id) if id == 14047 then return 6000 end return PRICES[id] end
+  local old = Engine.Suggest(specCtx({mode = "spec", price = cheap}, {[14047] = watched(WORKED, {p = 6000, ago = 3 * 3600})}))
+  eq(#rowsOf(old, "flip"), 0)
+  local lines = Engine.SpecLines(specCtx({mode = "spec", price = cheap}, {[14047] = watched(WORKED, {p = 6000, ago = 3 * 3600})}), 14047)
+  -- La ventana no lo enseña, así que la descripción tampoco lo llama «Chollo» (R3).
+  eq(lines[1].right, "1o · hoy -40 %"); eq(lines[2].left, "Precio bajo (40 % por debajo de lo normal): escanea la subasta para confirmarlo")
+  -- Al buscarlo en la subasta no había nada a la venta: el escaneo de hace 10 min ya no vale.
+  local gone = Engine.Suggest(specCtx({mode = "spec"}, {[14047] = watched(WORKED, {p = 6000})}, {books = {[14047] = {at = NOW - 30, lots = {}}}}))
+  eq(#rowsOf(gone, "flip"), 0)
+  -- Lo de la subasta de hace más de 5 min ya no cuenta: vuelve el escaneo propio.
+  local stale = Engine.Suggest(specCtx({mode = "spec"}, {[14047] = watched(WORKED, {p = 6000})}, {books = {[14047] = {at = NOW - 400, lots = {}}}}))
+  eq(#rowsOf(stale, "flip"), 1)
+end)
+
+test("Sin chollo: bajada del 4 %, confianza baja, bajada de nivel, tendencia desconocida o un solo lote barato", function()
+  local function flips(items, extra) return #rowsOf(Engine.Suggest(specCtx({mode = "spec"}, items, extra)), "flip") end
+  eq(flips({[14047] = watched(WORKED, {p = 9600})}), 0, "4 % por debajo")
+  local shaky = {false, 6000, 14000, 6000, 14000, false, false, false, 6000, 14000, 6000, 14000, 10000, 6000}
+  eq(flips({[14047] = watched(shaky, {p = 3000})}), 0, "poco fiable")
+  local shifted = {10000, 10000, 10000, 10000, 8000, 10000, 8000, 8000, 10000, 7000, false, 10000, 8000, 8000}
+  eq(flips({[14047] = watched(shifted, {p = 6000})}), 0, "bajada de nivel")
+  local gaps = {10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, false, false, 10000}
+  eq(flips({[14047] = watched(gaps, {p = 6000})}), 0, "tendencia desconocida")
+  -- Un lote de 1 a 60p: ganaría menos de 1 oro.
+  eq(flips({[14047] = watched(WORKED)}, {books = {[14047] = {at = NOW - 60, lots = {{6000, 1}}}}}), 0, "un solo lote")
+  -- Y el mismo objeto con el ejemplo trabajado sí (las pruebas de arriba no fallan por los datos).
+  eq(flips({[14047] = watched(WORKED, {p = 6000})}), 1, "control")
+end)
+
+test("Límites de Especular en cada modo: Tranquilo 1, A tope 2, Especular 8", function()
+  local items = {}
+  for i = 1, 12 do items[20000 + i] = watched(WORKED, {p = 6000 + i * 10}) end
+  local function count(mode, extra) return #rowsOf(Engine.Suggest(specCtx({mode = mode}, items, extra or {budget = 100000000})), "flip") end
+  eq(count("lazy"), 1); eq(count("farm"), 2); eq(count("spec"), 8)
+  -- El de Tranquilo es el que más gana; vacío, ningún modo se rompe.
+  local lazy = Engine.Suggest(specCtx({mode = "lazy"}, items, {budget = 100000000}))
+  eq(lazy.sections.spec[1].icon, 20001)
+  for _, mode in ipairs(Engine.MODE_ORDER) do
+    local ok, r = pcall(Engine.Suggest, specCtx({mode = mode}, {}))
+    assert(ok and #r.sections.spec == 0, mode .. ": " .. tostring(r))
+  end
+end)
+
+test("Tranquilo solo enseña chollos de confianza alta; A tope y Especular, también orientativos", function()
+  local items = {[14047] = watched({false, false, false, 10200, 10400, 9900, 10100, 9700, 10300, 10000, 9900, 10100, 10000, 10000}, {p = 6000})}
+  local r = Engine.Suggest(specCtx({mode = "farm"}, items))
+  local row = rowsOf(r, "flip")[1]
+  assert(row and has(row.detail, "Orientativo · 11 días"), row and row.detail)
+  eq(#rowsOf(Engine.Suggest(specCtx({mode = "lazy"}, items)), "flip"), 0)
+  eq(#rowsOf(Engine.Suggest(specCtx({mode = "spec"}, items)), "flip"), 1)
+end)
+
+test("Protección de lanzamiento, aprendiendo precios y mercado bajando en la línea de estado", function()
+  -- 2510 (13-nov): antes del 18-nov no hay chollos; se dice cuántos habría.
+  local guard = Engine.Suggest(specCtx({mode = "spec"}, {[14047] = watched(WORKED, {p = 6000, T0 = 2510})}, {T = 2510}))
+  eq(#rowsOf(guard, "flip"), 0)
+  eq(guard.spec.level, "warn")
+  assert(has(guard.spec.text, "Protección de lanzamiento hasta el 18-nov: aún no sugiere compras para revender. Hoy habría 1 chollo."), guard.spec.text)
+  -- 2513 (18-nov): ya sí.
+  local open = Engine.Suggest(specCtx({mode = "spec"}, {[14047] = watched(WORKED, {p = 6000, T0 = 2513})}, {T = 2513}))
+  eq(#rowsOf(open, "flip"), 1); assert(not has(open.spec.text, "Protección"), open.spec.text)
+  -- 3 días de precios: hoy es el cuarto de los 7 que hacen falta.
+  local learning = Engine.Suggest(specCtx({mode = "spec"}, {[14047] = watched({10000, 10000, 10000}, {p = 6000})}))
+  eq(learning.spec.text, "Aprendiendo precios: día 4 de 7. Haz un escaneo completo cada día: el precio normal necesita 7 días y los chollos, 10.")
+  local lazyLearning = Engine.Suggest(specCtx({mode = "lazy"}, {[14047] = watched({10000, 10000, 10000}, {p = 6000})}))
+  eq(lazyLearning.spec.text, "Aprendiendo precios: día 4 de 7. Haz un escaneo completo cada día: el precio normal necesita 7 días y los chollos, 12.")
+  -- Nada guardado todavía en este mercado.
+  assert(has(Engine.Suggest(specCtx({mode = "spec"}, {})).spec.text, "Aún no hay precios guardados"))
+  -- Un 3 % menos cada día en 4 objetos: mercado bajando, sin chollos.
+  local items, falling = {}, {}
+  for i = 1, 14 do falling[i] = math.floor(20000 * 0.97 ^ i) end
+  for i = 1, 4 do items[30000 + i] = watched(falling, {p = 6000}) end
+  local down = Engine.Suggest(specCtx({mode = "spec"}, items))
+  eq(#rowsOf(down, "flip"), 0)
+  assert(has(down.spec.text, "Mercado bajando: 4 de 4 objetos han caído más de un 10 % en unos días. Vende pronto lo que farmees y no compres para revender."),
+    down.spec.text)
+  assert(has(down.spec.text, "Con precio normal: 4 de 4 objetos vigilados (0 fiables)."), down.spec.text)
+end)
+
+test("Vende ahora: solo con existencias en las bolsas o el banco, y no lo que te guardas", function()
+  local items = {[2772] = watched(WORKED, {p = 14000, cat = "metal"}), [13510] = watched(WORKED, {p = 14000, cat = "frasco"})}
+  local function spikes(over) over.mode = over.mode or "spec"; return rowsOf(Engine.Suggest(specCtx(over, items)), "spike") end
+  local rows = spikes({bags = {[2772] = {count = 20, quality = 1}, [13510] = {count = 5, quality = 1, classID = 0}}})
+  eq(#rows, 1, "el frasco no: es un consumible que no fabricas")
+  eq(rows[1].title, "Vende ahora 20× Hierro (40 % por encima de lo normal)")
+  eq(rows[1].detail, "≈ 26o 60p en la subasta, ya descontada la comisión (hoy 1o 40p; lo normal, 1o). Precio de hace 10 min.")
+  eq(#spikes({}), 0, "sin existencias")
+  eq(#spikes({bags = {[2772] = {count = 20, quality = 1, bound = true}}}), 0, "ligado")
+  local bank = spikes({bank = {[2772] = {count = 12, quality = 1}}})
+  assert(bank[1] and bank[1].title == "Vende ahora 12× Hierro (40 % por encima de lo normal)" and has(bank[1].detail, "Está todo en el banco: sácalo primero."),
+    bank[1] and bank[1].detail)
+  local both = spikes({bags = {[2772] = {count = 3, quality = 1}}, bank = {[2772] = {count = 12, quality = 1}}})
+  assert(has(both[1].detail, "Llevas 3 y tienes 12 en el banco."), both[1].detail)
+  -- En A tope no hay filas aparte: la de venta lo dice con el precio de Auctionator, el mismo que usa la fila.
+  local high = function(id) if id == 2772 then return 14000 end return PRICES[id] end
+  assert(#spikes({mode = "farm", bags = {[2772] = {count = 20, quality = 1}}}) == 0, "A tope: sin filas Vende ahora")
+  local farm = Engine.Suggest(specCtx({mode = "farm", price = high, bags = {[2772] = {count = 20, quality = 1}}}, items))
+  local sell = find(farm.sections.now, function(x) return x.kind == "sell" end)
+  assert(has(sell.detail, "Hoy está un 40 % por encima de lo normal: buen momento para vender."), sell.detail)
+end)
+
+test("Si no tienes prisa, espera: nota en las filas de venta (no en una bajada de nivel)", function()
+  local low = function(id) if id == 2772 or id == 4306 then return 7500 end return PRICES[id] end
+  local items = {[2772] = watched(WORKED, {cat = "metal"}), [4306] = watched(WORKED)}
+  local bags = {[2772] = {count = 20, quality = 1}, [4306] = {count = 15, quality = 1}}
+  local farm = Engine.Suggest(specCtx({mode = "farm", price = low, bags = bags}, items))
+  local iron = find(farm.sections.now, function(x) return x.kind == "sell" and x.icon == 2772 end)
+  eq(iron.detail, "≈ 14o 25p en la subasta, ya descontada la comisión. Hoy está un 25 % por debajo de lo normal: si no tienes prisa, espera.")
+  local lazy = Engine.Suggest(specCtx({mode = "lazy", price = low, bags = bags}, items))
+  local grouped = find(lazy.sections.now, function(x) return x.kind == "sell" end)
+  assert(has(grouped.detail, "Acepta el precio que proponga Auctionator. Hoy Hierro y Paño de seda están por debajo de lo normal: si no tienes prisa, espera."),
+    grouped.detail)
+  -- Bajada de nivel (dos días seguidos muy por debajo): no es un mal día, esperar no lo arregla.
+  local shifted = {[2772] = watched({10000, 10000, 10000, 10000, 8000, 10000, 8000, 8000, 10000, 7000, false, 10000, 8000, 8000})}
+  local r = Engine.Suggest(specCtx({mode = "farm", price = low, bags = {[2772] = {count = 20, quality = 1}}}, shifted))
+  local sell = find(r.sections.now, function(x) return x.kind == "sell" end)
+  assert(not has(sell.detail, "espera"), sell.detail)
+  -- Con el precio de hace días no se dice nada de hoy.
+  local stale = Engine.Suggest(specCtx({mode = "farm", price = low, age = function(id) if PRICES[id] or id == 4306 then return 4 end end,
+    bags = {[2772] = {count = 20, quality = 1}}}, items))
+  assert(not has(find(stale.sections.now, function(x) return x.kind == "sell" end).detail, "Hoy"), "precio viejo")
+end)
+
+test("Balance de la semana: solo en Especular y solo con confianza orientativa o fiable", function()
+  local up = {10000, 10000, 10000, 10000, 10000, 10000, 10000, 11200, 11200, 11200, 11200, 11200, 11200, 11200}
+  local down = {10000, 10000, 10000, 10000, 10000, 10000, 10000, 9000, 9000, 9000, 9000, 9000, 9000, 9000}
+  local shaky = {false, 6000, 14000, 6000, 14000, false, false, false, 6000, 14000, 6000, 14000, 10000, 6000} -- variación ±37 %: poco fiable
+  local items = {[14047] = watched(up), [4306] = watched(down), [2589] = watched(shaky)}
+  local r = Engine.Suggest(specCtx({mode = "spec"}, items))
+  eq(#r.balance, 2)
+  eq(r.balance[1].kind, "rise"); eq(r.balance[1].title, "Paño rúnico sube un 12 % en 7 días")
+  eq(r.balance[1].detail, "Normal (14 d): 1o 6p. Fiable · 14 días · variación ±8,4 %.")
+  eq(r.balance[2].kind, "fall"); eq(r.balance[2].title, "Paño de seda baja un 10 % en 7 días")
+  eq(r.balanceText, "Por categoría, en 7 días: Tela +1 %.")
+  -- Con el precio de hoy guardado, también sale.
+  items[14047] = watched(up, {today = 11500})
+  assert(has(Engine.Suggest(specCtx({mode = "spec"}, items)).balance[1].detail, "; hoy: 1o 15p."), "hoy")
+  -- Tranquilo y A tope no tienen balance.
+  eq(Engine.Suggest(specCtx({mode = "farm"}, items)).balance, nil)
+end)
+
+test("Presupuesto: entre todos los chollos no pasan de lo que tienes y, si no caben, se dice", function()
+  local items = {}
+  for i = 1, 12 do items[20000 + i] = watched(WORKED, {p = 6000}) end
+  local r = Engine.Suggest(specCtx({mode = "spec"}, items, {budget = 2000000}))
+  local total = 0
+  for _, row in ipairs(rowsOf(r, "flip")) do total = total + row.flip.cost end
+  assert(total <= 2000000, "gasto total " .. total)
+  eq(#rowsOf(r, "flip"), 8)
+  -- 8 enteros, el noveno recortado a lo que queda (se queda fuera por el límite) y 3 que ya no caben.
+  assert(has(r.spec.text, "3 chollos no caben en tu presupuesto (200o): súbelo con /oro especular presupuesto <oro>."), r.spec.text)
+  -- Con poco oro (25 % de 5 oros = 1o 25p) ninguno cabe: el estado lo explica.
+  local poor = Engine.Suggest(specCtx({mode = "spec"}, {[14047] = watched(WORKED, {p = 6000})}, {budget = 12500}))
+  eq(#rowsOf(poor, "flip"), 0)
+  assert(has(poor.spec.text, "1 chollo no cabe en tu presupuesto (1o 25p): súbelo con /oro especular presupuesto <oro>."), poor.spec.text)
+end)
+
+test("Especular apagado: Tranquilo y A tope quedan como sin historial; el modo Especular sigue", function()
+  local items = {[14047] = watched(WORKED, {p = 6000}), [2772] = watched(WORKED, {p = 7500})}
+  local bags = {[2772] = {count = 20, quality = 1}}
+  local low = function(id) if id == 2772 then return 7500 end return PRICES[id] end
+  for _, mode in ipairs({"lazy", "farm"}) do
+    local plain = Engine.Suggest(ctx({mode = mode, bags = bags, price = low}))
+    local off = Engine.Suggest(specCtx({mode = mode, bags = bags, price = low}, items, {hints = false}))
+    eq(serialize(off), serialize(plain), mode)
+    local on = Engine.Suggest(specCtx({mode = mode, bags = bags, price = low}, items))
+    assert(#on.sections.spec >= 1 and on.spec, mode .. ": encendido sí")
+  end
+  eq(#rowsOf(Engine.Suggest(specCtx({mode = "spec"}, items, {hints = false})), "flip"), 2)
+end)
+
+test("Descripción de los objetos: precio normal, el de hoy y el chollo", function()
+  local items = {[14047] = watched(WORKED), [2772] = watched(WORKED, {p = 14000}), [4306] = watched({10000, 10000, 10000})}
+  local c = specCtx({mode = "lazy"}, items, {books = {[14047] = {at = NOW - 60, lots = BOOK}}})
+  local lines = Engine.SpecLines(c, 14047)
+  eq(lines[1].left, "Normal (14 d)"); eq(lines[1].right, "1o · hoy -42 %")
+  eq(lines[2].left, "Chollo: compra hasta 82 a 82p 16c como máximo; no revendas por debajo de 64p 73c")
+  local high = Engine.SpecLines(c, 2772)
+  eq(high[2].left, "Precio alto: 40 % por encima de lo normal")
+  -- Un chollo solo orientativo: en Tranquilo la descripción no propone comprarlo (la ventana tampoco); en A tope, sí.
+  c.spec.items[4338] = watched({false, false, false, 10200, 10400, 9900, 10100, 9700, 10300, 10000, 9900, 10100, 10000, 10000}, {p = 6000})
+  eq(Engine.SpecLines(c, 4338)[2].left, "Precio bajo (40 % por debajo de lo normal): en Tranquilo solo se avisa de los chollos fiables")
+  c.mode = "farm"
+  assert(has(Engine.SpecLines(c, 4338)[2].left, "Chollo: compra hasta"), "A tope")
+  c.mode = "lazy"
+  eq(Engine.SpecLines(c, 4306), nil, "aprendiendo: fuera de Especular no se dice nada")
+  c.mode = "spec"
+  eq(Engine.SpecLines(c, 4306)[1].left, "Especular · Aprendiendo precios: 3 de 7 días")
+  eq(Engine.SpecLines(c, 99999), nil, "no vigilado")
+  c.mode, c.spec.hints = "farm", false
+  eq(Engine.SpecLines(c, 14047), nil, "apagado")
+end)
+
+test("Subasta sin cobre: se rebaja 1 plata y el depósito se estima si no se conoce", function()
+  local items = {[14047] = watched(WORKED, {p = 6000, dep = false, vendor = 1000})}
+  local r = Engine.Suggest(specCtx({mode = "spec"}, items, {copperValues = false}))
+  local row = rowsOf(r, "flip")[1]
+  eq(row.flip.D, 600); eq(row.flip.netUnit, math.floor((10000 - 100) * 9500 / 10000))
+  assert(has(row.detail, "(depósito estimado)"), row.detail)
+end)
+
+test("Escaneo de resumen (no dice cuántas hay cerca del mínimo): posible chollo, no «No compensa» por suponer 1", function()
+  -- qty5 = 0: el punto viene del escaneo de resumen de Auctionator (el de su botón por defecto).
+  local items = {[14047] = watched(WORKED, {p = 6000, q5 = 0})}
+  for _, mode in ipairs(Engine.MODE_ORDER) do
+    local c = specCtx({mode = mode}, items)
+    local r = Engine.Suggest(c)
+    eq(#rowsOf(r, "flip"), 0, mode .. ": sin chollo calculado")
+    local checks = rowsOf(r, "check")
+    eq(#checks, 1, mode)
+    eq(checks[1].title, "Posible chollo: Paño rúnico a 60p (40 % por debajo de lo normal)")
+    eq(checks[1].detail, "Tu escaneo no dice cuántas hay a ese precio: ábrelo en la pestaña Comprar de la subasta y el addon "
+      .. "calculará la compra con lo que hay a la venta. Precio de hace 10 min. Fiable · 14 días · variación ±3 %.")
+    eq(checks[1].icon, 14047); eq(checks[1].value, 0)
+    eq(#checks[1].shopping, 1); eq(checks[1].shopping[1].id, 14047); eq(checks[1].shopping[1].count, 1, "1: solo para buscarlo")
+    local lines = Engine.SpecLines(c, 14047)
+    eq(lines[2].left, "Posible chollo: tu escaneo no dice cuántas hay a ese precio; ábrelo en la pestaña Comprar para calcular la compra")
+    for _, line in ipairs(lines) do assert(not has(line.left, "No compensa"), mode .. ": " .. line.left) end
+  end
+  -- Al abrirlo en la subasta (300 a 60p) sale el chollo de verdad y la fila de posible chollo desaparece.
+  local opened = Engine.Suggest(specCtx({mode = "spec"}, items, {books = {[14047] = {at = NOW - 60, lots = {{6000, 300}}}}}))
+  eq(#rowsOf(opened, "check"), 0); eq(#rowsOf(opened, "flip"), 1)
+  -- Con un chollo calculado al lado: va primero, y en Tranquilo (1 fila) es el que queda.
+  local both = {[14047] = watched(WORKED, {p = 6000, q5 = 0}), [4306] = watched(WORKED, {p = 6000, q5 = 40})}
+  local spec = Engine.Suggest(specCtx({mode = "spec"}, both))
+  eq(#spec.sections.spec, 2); eq(spec.sections.spec[1].kind, "flip"); eq(spec.sections.spec[2].kind, "check")
+  local lazy = Engine.Suggest(specCtx({mode = "lazy"}, both))
+  eq(#lazy.sections.spec, 1); eq(lazy.sections.spec[1].kind, "flip"); eq(lazy.sections.spec[1].icon, 4306)
+  -- Posible chollo, pero no gasta presupuesto: el chollo de al lado cabe igual.
+  eq(lazy.sections.spec[1].flip.units, 40)
+  -- Si el escaneo completo dice que solo hay 1 cerca del mínimo, sí es «No compensa».
+  local one = {[14047] = watched(WORKED, {p = 6000, q5 = 1})}
+  eq(#rowsOf(Engine.Suggest(specCtx({mode = "spec"}, one)), "check"), 0)
+  eq(Engine.SpecLines(specCtx({mode = "spec"}, one), 14047)[2].left, "No compensa: ganarías solo 34p 49c (menos de 1 oro)")
+  -- Material muy barato: ni con todas las unidades que admitiría (100) llega a 1 oro. Ni posible chollo ni la cuenta de
+  -- 1 unidad: la descripción da la mejor posible.
+  local penny = {}
+  for i = 1, 14 do penny[i] = 300 end
+  local tiny = {[2589] = watched(penny, {p = 180, q5 = 0})}
+  local r = Engine.Suggest(specCtx({mode = "spec"}, tiny))
+  eq(#r.sections.spec, 0)
+  eq(Engine.SpecLines(specCtx({mode = "spec"}, tiny), 2589)[2].left, "No compensa: ganarías solo 54p (menos de 1 oro)")
+end)
+
+test("La descripción no llama «Chollo» a lo que la ventana no enseña (Tranquilo con un orientativo, precio sin hora)", function()
+  local medium = {false, false, false, 10200, 10400, 9900, 10100, 9700, 10300, 10000, 9900, 10100, 10000, 10000}
+  local cheap = function(id) if id == 14047 then return 6000 end return PRICES[id] end
+  local cases = {
+    {mode = "lazy", item = watched(medium, {p = 6000}),
+     text = "Precio bajo (40 % por debajo de lo normal): en Tranquilo solo se avisa de los chollos fiables"},
+    -- Escaneo propio de hace 3 h y el precio de hoy de Auctionator: se sabe el precio, no su hora (en todos los modos).
+    {mode = "lazy", item = watched(WORKED, {p = 6000, ago = 3 * 3600}), price = cheap,
+     text = "Precio bajo (40 % por debajo de lo normal): escanea la subasta para confirmarlo"},
+    {mode = "farm", item = watched(WORKED, {p = 6000, ago = 3 * 3600}), price = cheap,
+     text = "Precio bajo (40 % por debajo de lo normal): escanea la subasta para confirmarlo"},
+    {mode = "spec", item = watched(WORKED, {p = 6000, ago = 3 * 3600}), price = cheap,
+     text = "Precio bajo (40 % por debajo de lo normal): escanea la subasta para confirmarlo"},
+  }
+  for i, case in ipairs(cases) do
+    local c = specCtx({mode = case.mode, price = case.price}, {[14047] = case.item})
+    eq(#Engine.Suggest(c).sections.spec, 0, i .. ": la ventana no enseña nada")
+    local lines = Engine.SpecLines(c, 14047)
+    eq(lines[1].right, "1o · hoy -40 %", i)
+    eq(lines[2].left, case.text, i)
+    for _, line in ipairs(lines) do assert(not has(line.left, "Chollo"), i .. ": " .. line.left) end
+  end
+  -- Cuando la ventana sí lo enseña (A tope, el mismo orientativo), la descripción también.
+  local farm = specCtx({mode = "farm"}, {[14047] = watched(medium, {p = 6000})})
+  eq(#rowsOf(Engine.Suggest(farm), "flip"), 1)
+  assert(has(Engine.SpecLines(farm, 14047)[2].left, "Chollo: compra hasta"), "A tope")
+end)
+
+test("Días para los chollos: 7 para el precio normal, 10 para un chollo (12 en Tranquilo), y se dice mientras tanto", function()
+  local function flat(n) local out = {} for i = 1, n do out[i] = 10000 end return out end
+  local function status(mode, n) return Engine.Suggest(specCtx({mode = mode}, {[14047] = watched(flat(n), {p = 6000})})) end
+  for _, n in ipairs({7, 8, 9}) do
+    local r = status("spec", n)
+    eq(#rowsOf(r, "flip"), 0, n .. " días")
+    assert(has(r.spec.text, "Con precio normal: 1 de 1 objeto vigilado (0 fiables). Los chollos necesitan 10 días con precio (ahora hay "
+      .. n .. ")."), r.spec.text)
+  end
+  local ten = status("spec", 10)
+  eq(#rowsOf(ten, "flip"), 1, "10 días: orientativo")
+  assert(not has(ten.spec.text, "Los chollos necesitan"), ten.spec.text)
+  -- Tranquilo pide confianza alta: 12 días.
+  local lazy11 = status("lazy", 11)
+  eq(#rowsOf(lazy11, "flip"), 0)
+  assert(has(lazy11.spec.text, "Los chollos necesitan 12 días con precio (ahora hay 11)."), lazy11.spec.text)
+  local lazy12 = status("lazy", 12)
+  eq(#rowsOf(lazy12, "flip"), 1, "12 días en Tranquilo")
+  assert(not has(lazy12.spec.text, "Los chollos necesitan"), lazy12.spec.text)
+  assert(has(status("farm", 9).spec.text, "Los chollos necesitan 10 días con precio (ahora hay 9)."), "A tope")
+  -- Antes de los 7 días solo sale la línea de aprendizaje (con los dos números).
+  local six = status("spec", 6)
+  eq(six.spec.text, "Aprendiendo precios: día 7 de 7. Haz un escaneo completo cada día: el precio normal necesita 7 días y los chollos, 10.")
 end)
 
 print(string.format("motor: %d pruebas correctas, %d fallidas", passed, failed))

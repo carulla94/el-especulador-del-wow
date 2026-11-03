@@ -19,17 +19,19 @@ local function itemIDFromData(data)
   return Items.IDFromLink(link)
 end
 
--- linesFor(itemID) -> { {left = texto, right = texto opcional}, ... }
+-- linesFor(itemID) -> { {left = texto, right = texto opcional, color = {r, g, b} opcional para left}, ... }
+local GOLD = {0.9, 0.76, 0.35}
 function Tooltip.Install(linesFor)
   if installed then return installed end
   local function add(tooltip, itemID)
     local ok, lines = pcall(linesFor, itemID)
     if not ok or type(lines) ~= "table" then return end
     for _, line in ipairs(lines) do
+      local c = type(line.color) == "table" and line.color or GOLD
       if line.right then
-        tooltip:AddDoubleLine(line.left, line.right, 0.9, 0.76, 0.35, 1, 1, 1)
+        tooltip:AddDoubleLine(line.left, line.right, c[1], c[2], c[3], 1, 1, 1)
       else
-        tooltip:AddLine(line.left, 0.9, 0.76, 0.35, true)
+        tooltip:AddLine(line.left, c[1], c[2], c[3], true)
       end
     end
   end

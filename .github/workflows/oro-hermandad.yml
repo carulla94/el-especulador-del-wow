@@ -5,12 +5,14 @@ on:
     paths:
       - 'addon/OroHermandad/**'
       - 'test-lua/**'
+      - 'test-vectors/**'
       - 'scripts/build-oro-hermandad.mjs'
       - '.github/workflows/oro-hermandad.yml'
   pull_request:
     paths:
       - 'addon/OroHermandad/**'
       - 'test-lua/**'
+      - 'test-vectors/**'
       - 'scripts/build-oro-hermandad.mjs'
       - '.github/workflows/oro-hermandad.yml'
   workflow_dispatch:

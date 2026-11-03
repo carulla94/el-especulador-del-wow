@@ -141,14 +141,40 @@ function Extras.RegisterSettings(core)
       function(value) Extras.SetMinimapShown(value) end)
     checkbox(db, "tooltip", "OroHermandad_Tooltip", "Información en los objetos",
       "Añade a la descripción de cada objeto su precio, quién de tu hermandad lo usa y cuántos tienes en el banco.", true)
+    -- Un modo por entrada, en el orden de los botones de la ventana (Engine.MODE_ORDER).
+    local Engine = ns.Engine
     local modeSetting = Settings.RegisterProxySetting(category, "OroHermandad_Mode", Settings.VarType.String,
       "Modo", "lazy", function() return db.mode end, function(value) core.SetMode(value, true) end)
     Settings.CreateDropdown(category, modeSetting, function()
       local container = Settings.CreateControlTextContainer()
-      container:Add("lazy", "Tranquilo")
-      container:Add("farm", "A tope")
+      for _, key in ipairs(Engine.MODE_ORDER) do container:Add(key, Engine.MODES[key].label) end
       return container:GetData()
-    end, "Tranquilo: sugerencias sin desviarte. A tope: sesión solo para hacer oro.")
+    end, "Tranquilo: sugerencias sin desviarte. A tope: sesión solo para hacer oro. Especular: chollos para comprar y "
+      .. "revender, qué vender caro ahora y el balance de la semana.")
+    checkbox(db.spec, "on", "OroHermandad_SpecOn", "Chollos en todos los modos",
+      "Tranquilo enseña como mucho 1 chollo muy fiable y A tope, 2; la descripción de los objetos dice su precio normal. "
+        .. "El modo Especular funciona igual aunque lo apagues.", true, function() if core.Refresh then core.Refresh() end end)
+    -- Presupuesto para chollos, en oro (0 = el 25 % del oro que llevas). Con /oro especular presupuesto se puede fijar
+    -- cualquier cantidad; aquí, hasta 5000 de 50 en 50. Si falla (cliente sin deslizadores), el resto del panel sigue.
+    pcall(function()
+      local MAX = 5000
+      local budgetSetting = Settings.RegisterProxySetting(category, "OroHermandad_SpecBudget", Settings.VarType.Number,
+        "Presupuesto para chollos", 0,
+        function() return math.min(MAX, math.floor((db.spec.budget or 0) / 10000)) end,
+        function(value)
+          value = math.floor((tonumber(value) or 0) + 0.5)
+          db.spec.budget = value > 0 and value * 10000 or nil
+          if core.Refresh then core.Refresh() end
+        end)
+      local options = Settings.CreateSliderOptions(0, MAX, 50)
+      if options.SetLabelFormatter and MinimalSliderWithSteppersMixin and MinimalSliderWithSteppersMixin.Label then
+        options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right, function(value)
+          return value <= 0 and "25 % de tu oro" or (math.floor(value) .. "o")
+        end)
+      end
+      Settings.CreateSlider(category, budgetSetting, options,
+        "Oro máximo para comprar chollos (cada uno usa como mucho la cuarta parte). En 0, el 25 % del oro que llevas.")
+    end)
     Settings.RegisterAddOnCategory(category)
     state.categoryID = category:GetID()
   end)
