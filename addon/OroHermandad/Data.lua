@@ -258,20 +258,26 @@ Data.BASKET = {2770, 2771, 2772, 3858, 10620, 2589, 2592, 4306, 4338, 14047, 231
                2447, 785, 2453, 3356, 3818, 8831, 8838, 13464, 2835, 2836, 2838, 7912, 12365}
 
 ---------------------------------------------------------------------------
--- Lista vigilada del historial de precios (History.lua): 80 materiales y consumibles comunes
+-- Lista vigilada del historial de precios (History.lua): 114 materiales y consumibles comunes
 ---------------------------------------------------------------------------
 -- Las claves son las categorías de OroHermandadHist (el contrato con el subidor de la hermandad); el orden es el
--- de Data.CATEGORY_ORDER. Incluye toda la cesta de arriba. Son IDs de Classic que Forever debería mantener: el addon
--- solo vigila los que el cliente reconoce (C_Item.GetItemInfoInstant), y /oro sondeo lista los que no.
+-- de Data.CATEGORY_ORDER. Incluye toda la cesta de arriba, todo lo que da la recolección (Data.GATHER) y lo que hace
+-- falta para valorar la fundición (Data.SMELT), salvo lo que vende un mercader. Son IDs de Classic que Forever debería
+-- mantener: el addon solo vigila los que el cliente reconoce (C_Item.GetItemInfoInstant), y /oro sondeo lista los que no.
 -- Sin confirmar todavía en Forever (marcados con «?»): 15417, 13931, 18254.
 Data.WATCH = {
-  metal     = {2770, 2771, 2772, 3858, 10620,                                -- minerales: cobre, estaño, hierro, mitril, torio
-               2840, 2841, 3575, 3859, 3860, 6037, 12359, 12360},          -- lingotes: cobre, bronce, hierro, acero, mitril, veraplata, torio, arcanita
+  metal     = {2770, 2771, 2775, 2772, 2776, 3858, 7911, 10620,              -- minerales: cobre, estaño, plata, hierro, oro, mitril, veraplata, torio
+               2840, 3576, 2841, 2842, 3575, 3577,                           -- lingotes: cobre, estaño, bronce, plata, hierro, oro,
+               3859, 3860, 6037, 12359, 12360},                              -- acero, mitril, veraplata, torio, arcanita
   piedra    = {2835, 2836, 2838, 7912, 12365},                             -- basta, burda, pesada, sólida, densa
-  gema      = {7910, 12361, 12363, 12364, 12800},                          -- rubí estrella, zafiro azul, cristal arcano, esmeralda enorme, diamante de Azeroth
-  hierba    = {2447, 785, 2453, 3356, 3357, 3818, 8831, 8838, 8846,         -- flor de paz … gromsanguina
-               13463, 13464, 13465, 13466, 13467, 13468},                  -- hojasueño, sansam, salviargenta, flor de peste, setelo, loto negro
-  piel      = {2318, 2319, 4234, 4304, 8170, 15417},                       -- cuero ligero, medio, pesado, grueso, basto; demosaurio (?)
+  gema      = {774, 818, 1210, 1206, 1705, 1529, 3864, 7909,                 -- malaquita, ojo de tigre, gema de las Sombras, ágata musgosa, piedra lunar inferior, jade, citrino, aguamarina
+               7910, 12361, 12363, 12364, 12799, 12800},                     -- rubí estrella, zafiro azul, cristal arcano, esmeralda enorme, ópalo grande, diamante de Azeroth
+  hierba    = {2447, 765, 2449, 785, 2450, 3820, 2453, 3355, 3356, 3369,     -- flor de paz, hojaplata, raíz terrenal, marregal, brezospina, alga estranguladora, hierba cardenal, acérita, sangrerregia, musgo de tumba
+               3357, 3818, 3821, 3358, 3819, 4625, 8831, 8836, 8838, 8839,   -- vidarraíz, pálida, espina de oro, mostacho de Khadgar, ivernalia, flor de fuego, loto morado, lágrimas de Arthas, solea, ciegamala
+               8845, 8846,                                                   -- champiñón fantasma, gromsanguina
+               13463, 13464, 13465, 13466, 13467, 13468},                    -- hojasueño, sansam, salviargenta, flor de peste, setelo, loto negro
+  piel      = {2934, 2318, 783, 2319, 4232, 4234,                            -- restos de cuero; cuero ligero, pellejo ligero, cuero medio, pellejo fino, cuero pesado,
+               4235, 4304, 8169, 8170, 8171, 15417},                         -- pellejo pesado, cuero grueso, pellejo grueso, cuero basto, pellejo basto; demosaurio (?)
   tela      = {2589, 2592, 4306, 4338, 14047, 14256, 14342},               -- lino, lana, seda, paño mágico, rúnico, tela de inferi, tela lunar
   pocion    = {3928, 13446, 13444, 13442, 5634},                           -- sanación superior y mayor, maná mayor, ira poderosa, acción libre
   elixir    = {13452, 9187, 9206, 13454},                                  -- mangosta, agilidad superior, gigantes, arcano superior

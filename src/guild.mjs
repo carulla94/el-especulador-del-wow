@@ -39,14 +39,15 @@ export const LIMITS = Object.freeze({
 export const RESALE_DURATION = 3;
 const SUMMARY_VERSION = VERSION + ":resumen-1";
 
-/** The fixed guild watchlist, the same 80 IDs as Data.WATCH in the addon (addon/OroHermandad/Data.lua). Its items
+/** The fixed guild watchlist, the same 114 IDs as Data.WATCH in the addon (addon/OroHermandad/Data.lua). Its items
  * always have room in a market and are the only ones where weekday patterns are looked for. */
 export const WATCHLIST = Object.freeze({
-  metal: [2770, 2771, 2772, 3858, 10620, 2840, 2841, 3575, 3859, 3860, 6037, 12359, 12360],
+  metal: [2770, 2771, 2775, 2772, 2776, 3858, 7911, 10620, 2840, 3576, 2841, 2842, 3575, 3577, 3859, 3860, 6037, 12359, 12360],
   piedra: [2835, 2836, 2838, 7912, 12365],
-  gema: [7910, 12361, 12363, 12364, 12800],
-  hierba: [2447, 785, 2453, 3356, 3357, 3818, 8831, 8838, 8846, 13463, 13464, 13465, 13466, 13467, 13468],
-  piel: [2318, 2319, 4234, 4304, 8170, 15417],
+  gema: [774, 818, 1210, 1206, 1705, 1529, 3864, 7909, 7910, 12361, 12363, 12364, 12799, 12800],
+  hierba: [2447, 765, 2449, 785, 2450, 3820, 2453, 3355, 3356, 3369, 3357, 3818, 3821, 3358, 3819, 4625, 8831, 8836, 8838, 8839, 8845, 8846,
+    13463, 13464, 13465, 13466, 13467, 13468],
+  piel: [2934, 2318, 783, 2319, 4232, 4234, 4235, 4304, 8169, 8170, 8171, 15417],
   tela: [2589, 2592, 4306, 4338, 14047, 14256, 14342],
   pocion: [3928, 13446, 13444, 13442, 5634],
   elixir: [13452, 9187, 9206, 13454],
@@ -567,8 +568,9 @@ export class GuildStore {
       } else {
         // The first non-empty name wins, watchlist categories are fixed and an extra only leaves "otro" for a real
         // category: one member cannot rename an item for everyone, and clients in other languages do not flip it.
-        const name = prior.name || item.name, cat = watchCat ?? (prior.category === "otro" ? item.cat : prior.category);
-        if (name !== prior.name || cat !== prior.category) plan.updates.push({id: item.id, name, cat, nameBy: name !== prior.name ? member.memberId : prior.name_by});
+        // An extra that has since joined the watchlist becomes a watchlist item here.
+        const name = prior.name || item.name, cat = watchCat ?? (prior.category === "otro" ? item.cat : prior.category), watch = watchCat ? 1 : 0;
+        if (name !== prior.name || cat !== prior.category || watch !== prior.watch) plan.updates.push({id: item.id, name, cat, watch, nameBy: name !== prior.name ? member.memberId : prior.name_by});
       }
       // Each member's vendor price is kept (0 is unknown); the shared one is their lower median (shareVendor).
       if (item.vendor > 0 && vendors.get(item.id) !== item.vendor) plan.vendors.push({id: item.id, vendor: item.vendor});
@@ -622,7 +624,7 @@ export class GuildStore {
       this.run("INSERT INTO guild_items(market,item_id,name,category,vendor,watch,first_seen,name_by) VALUES (?,?,?,?,?,?,?,?)",
         market, x.id, x.name, x.cat, x.vendor, x.watch, nowSec, x.name ? member.memberId : null);
     }
-    for (const x of plan.updates) this.run("UPDATE guild_items SET name=?,category=?,name_by=? WHERE market=? AND item_id=?", x.name, x.cat, x.nameBy, market, x.id);
+    for (const x of plan.updates) this.run("UPDATE guild_items SET name=?,category=?,watch=?,name_by=? WHERE market=? AND item_id=?", x.name, x.cat, x.watch, x.nameBy, market, x.id);
     for (const x of plan.vendors) {
       this.run(`INSERT INTO guild_item_vendor(market,member_id,item_id,vendor) VALUES (?,?,?,?)
         ON CONFLICT(market,member_id,item_id) DO UPDATE SET vendor=excluded.vendor`, market, member.memberId, x.id, x.vendor);

@@ -87,7 +87,7 @@ Stub.fire("PLAYER_LOGIN")
 Stub.fire("PLAYER_ENTERING_WORLD", true, false)
 Stub.runTimers(30)
 
-test("TOC: versión 0.3.0, OroHermandadHist guardado y Spec/History en su sitio", function()
+test("TOC: versión 0.3.1, OroHermandadHist guardado y Spec/History en su sitio", function()
   local files, sv, versionLine = {}, nil, nil
   for line in io.lines(DIR .. "OroHermandad.toc") do
     if line:match("%.lua$") then files[#files + 1] = line end
@@ -96,7 +96,7 @@ test("TOC: versión 0.3.0, OroHermandadHist guardado y Spec/History en su sitio"
   end
   local pos = {}
   for i, f in ipairs(files) do pos[f] = i end
-  eq(versionLine, "0.3.0", "versión"); eq(ns.Core.VERSION, "0.3.0", "Core.VERSION")
+  eq(versionLine, "0.3.1", "versión"); eq(ns.Core.VERSION, "0.3.1", "Core.VERSION")
   eq(sv, "OroHermandadDB, OroHermandadHist", "SavedVariables de la cuenta")
   eq(pos["Spec.lua"], pos["Items.lua"] + 1, "Spec después de Items")
   eq(pos["History.lua"], pos["Prices.lua"] + 1, "History después de Prices")
@@ -105,7 +105,7 @@ end)
 
 test("Al cargar: poda, salta lo corrupto y deja solo mercados y objetos válidos", function()
   local h = OroHermandadHist
-  eq(h.schema, 1); eq(h.addon, "0.3.0")
+  eq(h.schema, 1); eq(h.addon, "0.3.1")
   local keys = {}
   for k in pairs(h.markets) do keys[#keys + 1] = tostring(k) end
   eq(table.concat(keys, ","), KEY, "solo el mercado válido")
@@ -131,7 +131,7 @@ test("Entrada: importa una vez al día del historial de Auctionator (texto, deci
   eq(History.Import(), "done", "no se repite el mismo día")
 end)
 
-test("Lista vigilada: 80 fijos con categorías del contrato, la cesta dentro, extras válidos", function()
+test("Lista vigilada: 114 fijos con categorías del contrato, la cesta dentro, extras válidos", function()
   local seenIDs, n = {}, 0
   for cat, ids in pairs(Data.WATCH) do
     assert(Spec.IsCategory(cat), "categoría " .. tostring(cat))
@@ -142,13 +142,25 @@ test("Lista vigilada: 80 fijos con categorías del contrato, la cesta dentro, ex
       seenIDs[id], n = true, n + 1
     end
   end
-  eq(n, 80, "objetos fijos")
+  eq(n, 114, "objetos fijos")
   for _, id in ipairs(Data.BASKET) do assert(seenIDs[id], "falta de la cesta " .. id) end
+  -- Lo que da la recolección y lo que usa la fundición se puede valorar (lo que vende un mercader no hace falta).
+  for prof, nodes in pairs(Data.GATHER) do
+    for _, node in ipairs(nodes) do
+      for _, item in ipairs(node.items) do assert(seenIDs[item[1]], "falta de " .. prof .. ": " .. item[1]) end
+    end
+  end
+  for _, smelt in ipairs(Data.SMELT) do
+    assert(seenIDs[smelt.product], "falta el lingote " .. smelt.product)
+    for _, reagent in ipairs(smelt.reagents) do
+      assert(seenIDs[reagent[1]] or Data.VENDOR_BUY[reagent[1]], "falta el material " .. reagent[1])
+    end
+  end
   eq(#Data.CATEGORY_ORDER, #Spec.CATEGORIES)
   for i, cat in ipairs(Spec.CATEGORIES) do eq(Data.CATEGORY_ORDER[i], cat, "orden") end
   local list = History.WatchList()
-  eq(#list, 81, "80 fijos y un extra")
-  eq(list[1].cat, "metal"); eq(list[81].id, 19019); eq(list[81].cat, "pocion", "categoría del extra por su clase")
+  eq(#list, 115, "114 fijos y un extra")
+  eq(list[1].cat, "metal"); eq(list[115].id, 19019); eq(list[115].cat, "pocion", "categoría del extra por su clase")
   -- Un ID que el cliente no conoce no se vigila y el sondeo lo lista.
   Stub.unknownItems[15417] = true
   local H = freshHistory(ns)
@@ -295,12 +307,12 @@ test("Escaneo enorme (100 000 filas): por tandas con C_Timer, sin trabar el jueg
   local total = os.clock() - t0
   eq(History.Pending(), 0, "terminado")
   local r = History.lastResult
-  eq(r.rows, 100000); eq(r.read, 100000); eq(r.items, 80)
+  eq(r.rows, 100000); eq(r.read, 100000); eq(r.items, 114)
   assert(r.ticks >= math.ceil(100000 / History.ROWS_PER_TICK), "lectura en tandas: " .. r.ticks)
-  assert(ticks >= r.ticks + math.ceil(80 / History.ITEMS_PER_TICK), "escritura en tandas: " .. ticks)
+  assert(ticks >= r.ticks + math.ceil(114 / History.ITEMS_PER_TICK), "escritura en tandas: " .. ticks)
   assert(maxTick < 0.1, "tanda más larga " .. maxTick)
   realPrint(string.format("  100 000 filas: %d tandas, la más larga %.1f ms, total %.0f ms", ticks, maxTick * 1000, total * 1000))
-  eq(dayOf(13468, TODAY).lo, 1000 + 38, "loto negro (posición 38)")
+  eq(dayOf(13468, TODAY).lo, 1000 + 66, "loto negro (posición 66)")
   eq(points(2770)[#points(2770)].qty5, 15)
 end)
 
@@ -387,7 +399,7 @@ test("Depósitos: con la subasta abierta, 1 unidad por duración; lo que no es m
   eq(m.dep[2770], "1:1,2:1,3:1")
   eq(m.dep[2840], nil, "no es mercancía")
   for _, qty in ipairs(calls) do eq(qty, 1, "cantidad 1") end
-  eq(#calls, 81 * 3, "todos los vigilados, tres duraciones")
+  eq(#calls, 115 * 3, "todos los vigilados, tres duraciones")
   calls = {}
   Stub.notCommodity[2840] = nil
   Stub.fire("AUCTION_HOUSE_CLOSED"); _G.AuctionHouseFrame:Show(); Stub.fire("AUCTION_HOUSE_SHOW")
@@ -497,7 +509,7 @@ test("/oro sondeo: todo lo que hay que comprobar en el juego, sin nombres de per
   assert(_G.OroHermandadTextFrame.edit.__highlighted, "seleccionado para copiar")
   local chat = table.concat(Stub.printed, "\n")
   for _, want in ipairs({
-    "Oro de Hermandad 0.3.0 · sondeo ", "cliente 1.60.1.70707 (interfaz 16001)",
+    "Oro de Hermandad 0.3.1 · sondeo ", "cliente 1.60.1.70707 (interfaz 16001)",
     "Auctionator 11.0.9-forever · __dbversion 8", "escaneos oídos sí", "SCAN_DAY_0 de Auctionator: 1577833200 (igual",
     "Escaneo completo (", "replicateInfo: 1 texto, 2 número, 3 número", "[3] cantidad ", "[17] itemID ",
     "Escaneo de resumen (", "itemKey {battlePetSpeciesID=número, itemID=número",
@@ -505,8 +517,8 @@ test("/oro sondeo: todo lo que hay que comprobar en el juego, sin nombres de per
     "Depósito de 1 unidad de Mineral de cobre (2770): duración 1: 1c · duración 2: 1c · duración 3: 1c",
     "Depósito de 1 unidad de Paño rúnico (14047)", "(13446)",
     "Duraciones: 1 = 12 horas · 2 = 24 horas · 3 = 48 horas", "SupportsCopperValues: sí",
-    "Mercancía o pieza: Hierro mercancía", "Mercado: Forever-Alliance", "Lista vigilada: 80 de 80 fijos reconocidos, 1 extra",
-    "KB de 512 KB como máximo", "¿OroHermandadHist sobrevivió al último /reload? sí:",
+    "Mercancía o pieza: Hierro mercancía", "Mercado: Forever-Alliance", "Lista vigilada: 114 de 114 fijos reconocidos, 1 extra",
+    "KB de 768 KB como máximo", "¿OroHermandadHist sobrevivió al último /reload? sí:",
   }) do
     assert(has(text, want), "falta en la ventana: " .. want .. "\n" .. text)
     assert(has(chat, want), "falta en el chat: " .. want)
@@ -598,7 +610,7 @@ test("¿Sobrevivió al /reload?: los cuatro casos y un esquema más nuevo que no
   eq(H.Import(true), "off")
 end)
 
-test("Tamaño: 80 objetos x 120 días caben en 512 KB; con 40 extras y 120 puntos, se recorta al cargar y al salir", function()
+test("Tamaño: 114 objetos x 120 días caben en 768 KB; con 40 extras y 120 puntos, se recorta al cargar y al salir", function()
   local now = Stub.now
   local today = Spec.DayIndex(now)
   local function build(ids, pointsPerDay, keepPoints)
@@ -628,10 +640,10 @@ test("Tamaño: 80 objetos x 120 días caben en 512 KB; con 40 extras y 120 punto
   local loaded = H.Load(hist, {db = {}, market = function() return KEY end})
   local size = #("OroHermandadHist = " .. wowSerialize(loaded) .. "\n")
   eq(H.LoadInfo().shrinkStep, 0, "cabe sin recortar")
-  assert(size <= Spec.MAX_BYTES, "80 x 120 días: " .. size)
+  assert(size <= Spec.MAX_BYTES, "114 x 120 días: " .. size)
   local item = loaded.markets[KEY].items[fixed[1]]
   eq(#Spec.DecodeDays(item.d), 120); eq(#Spec.DecodePoints(item.p), 56)
-  -- 120 objetos con 120 puntos cada uno: se quitan puntos, no días.
+  -- 154 objetos con 120 puntos cada uno: se quitan puntos, no días.
   local all = {}
   for _, id in ipairs(fixed) do all[#all + 1] = id end
   for id = 40001, 40040 do all[#all + 1] = id end
@@ -642,7 +654,7 @@ test("Tamaño: 80 objetos x 120 días caben en 512 KB; con 40 extras y 120 punto
   local step = H.LoadInfo().shrinkStep
   assert(heavyRaw > Spec.MAX_BYTES and step >= 1 and step <= 2 and heavySize <= Spec.MAX_BYTES, heavyRaw .. " " .. step .. " " .. heavySize)
   eq(#Spec.DecodeDays(loadedHeavy.markets[KEY].items[40040].d), 120, "los días se quedan")
-  realPrint(string.format("  tamaño: 80 x 120 días %.0f KB · 120 objetos y 120 puntos %.0f KB -> paso %d, %.0f KB",
+  realPrint(string.format("  tamaño: 114 x 120 días %.0f KB · 154 objetos y 120 puntos %.0f KB -> paso %d, %.0f KB",
     size / 1024, heavyRaw / 1024, step, heavySize / 1024))
   -- Al salir: si la sesión lo hizo crecer, se recorta antes de guardar.
   local session = build(all, 10, 120)
@@ -656,7 +668,7 @@ end)
 test("PLAYER_LOGOUT deja el historial listo para guardar", function()
   OroHermandadHist.addon = "otra"
   Stub.fire("PLAYER_LOGOUT")
-  eq(OroHermandadHist.addon, "0.3.0")
+  eq(OroHermandadHist.addon, "0.3.1")
   assert(Spec.EstimateSize(OroHermandadHist) <= Spec.MAX_BYTES)
 end)
 

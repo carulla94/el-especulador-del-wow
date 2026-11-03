@@ -17,7 +17,7 @@ Spec.KEEP_DAYS = 120          -- días guardados por objeto
 Spec.KEEP_POINT_SECONDS = 14 * 86400
 Spec.MAX_POINTS = 120         -- puntos por objeto
 Spec.POINT_MERGE_SECONDS = 1800
-Spec.MAX_BYTES = 512 * 1024   -- techo de OroHermandadHist en el archivo de SavedVariables
+Spec.MAX_BYTES = 768 * 1024   -- techo de OroHermandadHist en el archivo de SavedVariables
 
 Spec.PRICE_MAX = 1000000000
 Spec.QTY_MAX = 1000000

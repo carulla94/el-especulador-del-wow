@@ -650,7 +650,7 @@ test("Descripción de objetos con Especular: precio normal y chollo, con caché 
 end)
 
 test("Escaneo grande con la ventana abierta: se repinta cuando el historial termina de escribirlo (y la descripción)", function()
-  -- Sin escaneo de hoy no hay chollo; el escaneo trae el Paño rúnico a 60p (300) y los 80 vigilados entre 60 000 filas.
+  -- Sin escaneo de hoy no hay chollo; el escaneo trae el Paño rúnico a 60p (300) y los 114 vigilados entre 60 000 filas.
   ns.History.Hist().markets[KEY].items[14047].p = ""
   assert(Stub.prices[14047] == nil, "sin precio de Auctionator: el chollo solo puede venir del escaneo")
   slash("especular")
