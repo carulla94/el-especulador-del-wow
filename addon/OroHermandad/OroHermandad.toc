@@ -1,0 +1,27 @@
+## Interface: 16001
+## Title: Oro de Hermandad
+## Notes: Te sugiere qué hacer para ganar oro según tus profesiones, las de tu hermandad y los precios de Auctionator.
+## Author: Oro de Hermandad
+## Version: 0.3.0
+## IconTexture: Interface\Icons\INV_Misc_Coin_01
+## Category: Profesiones
+## AddonCompartmentFunc: OroHermandad_OnCompartmentClick
+## AddonCompartmentFuncOnEnter: OroHermandad_OnCompartmentEnter
+## AddonCompartmentFuncOnLeave: OroHermandad_OnCompartmentLeave
+## OptionalDeps: Auctionator
+## SavedVariables: OroHermandadDB, OroHermandadHist
+## SavedVariablesPerCharacter: OroHermandadCharDB
+
+Data.lua
+Items.lua
+Spec.lua
+Engine.lua
+Prices.lua
+History.lua
+Scan.lua
+Money.lua
+Guild.lua
+UI.lua
+Tooltip.lua
+Extras.lua
+Core.lua

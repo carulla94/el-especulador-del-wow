@@ -1,0 +1,50 @@
+name: Comprobar addon Oro de Hermandad
+
+on:
+  push:
+    paths:
+      - 'addon/OroHermandad/**'
+      - 'test-lua/**'
+      - 'test-vectors/**'
+      - 'scripts/build-oro-hermandad.mjs'
+      - '.github/workflows/oro-hermandad.yml'
+  pull_request:
+    paths:
+      - 'addon/OroHermandad/**'
+      - 'test-lua/**'
+      - 'test-vectors/**'
+      - 'scripts/build-oro-hermandad.mjs'
+      - '.github/workflows/oro-hermandad.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lua:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Instalar Lua 5.1 (la versión de WoW)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lua5.1
+      - name: Pruebas del addon
+        run: sh test-lua/run.sh
+      - name: Preparar Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24.16.0'
+          package-manager-cache: false
+      # El zip no se guarda en Git: se construye aquí y queda en la ejecución (artefacto OroHermandad.zip)
+      # para que los colaboradores lo descarguen desde la pestaña Actions.
+      - name: Construir el zip del addon
+        run: node scripts/build-oro-hermandad.mjs "$RUNNER_TEMP/OroHermandad.zip"
+      - name: Guardar el zip en la ejecución
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          path: ${{ runner.temp }}/OroHermandad.zip
+          archive: false
+          if-no-files-found: error
