@@ -8,7 +8,7 @@ Pone los precios. Con la app de CurseForge: busca **Auctionator** en WoW Forever
 
 ## 2. Descarga OroHermandad.zip
 
-Descárgalo de la [versión 0.3.0](https://github.com/carulla94/el-especulador-del-wow/releases/download/oro-hermandad-v0.3.0/OroHermandad.zip) (todas las versiones, en [Releases](https://github.com/carulla94/el-especulador-del-wow/releases)). Si no puedes abrir el enlace, pídeselo a quien te pasó esta guía.
+Descárgalo de la [versión 0.3.1](https://github.com/carulla94/el-especulador-del-wow/releases/download/oro-hermandad-v0.3.1/OroHermandad.zip) (todas las versiones, en [Releases](https://github.com/carulla94/el-especulador-del-wow/releases)). Si no puedes abrir el enlace, pídeselo a quien te pasó esta guía.
 
 ## 3. Descomprímelo en la carpeta AddOns
 
