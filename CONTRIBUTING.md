@@ -15,7 +15,7 @@ git switch -c mejora/nombre-del-cambio
 npm install
 ```
 
-Usa una rama por cambio y abre una pull request con el problema, la solución y las comprobaciones realizadas. Revisa el diff antes de fusionar. **Un cambio en `main` ejecuta el flujo de Cloudflare y puede actualizar la app real**, incluidos sus cambios de almacenamiento. No renombres `Portfolio`, el Worker o sus migraciones para pruebas. El flujo de GitHub Pages se ejecuta manualmente desde Actions.
+`carulla94` y `yjaviy` pueden subir directamente a `main` y publicar sin pedir autorización, con o sin pull request. El resto usa una rama por cambio y abre una pull request con el problema, la solución y las comprobaciones realizadas, y revisa el diff antes de fusionar. **Un cambio en `main` ejecuta el flujo de Cloudflare y puede actualizar la app real**, incluidos sus cambios de almacenamiento. No renombres `Portfolio`, el Worker o sus migraciones para pruebas. El flujo de GitHub Pages se ejecuta manualmente desde Actions.
 
 ## Entorno
 
@@ -48,7 +48,7 @@ npm run check:deploy
 
 Para entrar en desarrollo, configura una contraseña de prueba de al menos 16 caracteres mediante `.dev.vars`, usando la clave `OWNER_PASSWORD`. Ese archivo está excluido de Git. Usa exclusivamente credenciales de prueba locales. Wrangler indica la URL del servidor de desarrollo. La base de desarrollo local es independiente de producción; no ejecutes operaciones remotas sobre la cartera real para probar una interfaz.
 
-No publiques con `npm run deploy` sin revisar destino, bindings, migraciones y autorización del propietario. No escribas la contraseña de producción en el repositorio, una captura, un issue o un log. No entregues la clave `CLOUDFLARE_API_TOKEN` a pasos de instalación, pruebas o código procedente de una pull request no revisada.
+No publiques con `npm run deploy` sin revisar destino, bindings y migraciones; salvo `carulla94` y `yjaviy`, hace falta además la autorización del propietario. No escribas la contraseña de producción en el repositorio, una captura, un issue o un log. No entregues la clave `CLOUDFLARE_API_TOKEN` a pasos de instalación, pruebas o código procedente de una pull request no revisada.
 
 ## Directorios
 
@@ -75,5 +75,5 @@ No publiques con `npm run deploy` sin revisar destino, bindings, migraciones y a
 1. Ejecuta las pruebas que correspondan al comportamiento modificado.
 2. Si toca la interfaz o Pages, construye `dist-pages` y comprueba navegación, importación, movimientos, recarga y copia JSON.
 3. Si cambia la estructura de datos, verifica que las copias existentes siguen restaurándose y que un fallo de escritura no borra el estado anterior.
-4. No subas bases de datos, SavedVariables personales, copias de cartera, archivos `.env`/`.dev.vars`, ZIP generados ni claves. Los cambios de permisos, publicación del repositorio y migraciones de producción requieren revisión explícita.
+4. No subas bases de datos, SavedVariables personales, copias de cartera, archivos `.env`/`.dev.vars`, ZIP generados ni claves. Los cambios de permisos, publicación del repositorio y migraciones de producción requieren revisión explícita de `carulla94` o `yjaviy`.
 5. Documenta las limitaciones reales: los precios ofertados no son ventas confirmadas, y el puente necesita validación dentro del juego.
