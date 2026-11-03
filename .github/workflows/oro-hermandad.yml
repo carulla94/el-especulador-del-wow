@@ -1,0 +1,47 @@
+name: Comprobar addon Oro de Hermandad
+
+on:
+  push:
+    paths:
+      - 'addon/OroHermandad/**'
+      - 'test-lua/**'
+      - 'scripts/build-oro-hermandad.mjs'
+      - 'descargas/**'
+      - '.github/workflows/oro-hermandad.yml'
+  pull_request:
+    paths:
+      - 'addon/OroHermandad/**'
+      - 'test-lua/**'
+      - 'scripts/build-oro-hermandad.mjs'
+      - 'descargas/**'
+      - '.github/workflows/oro-hermandad.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lua:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Instalar Lua 5.1 (la versión de WoW)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lua5.1
+      - name: Pruebas del addon
+        run: sh test-lua/run.sh
+      - name: Preparar Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24.16.0'
+          package-manager-cache: false
+      - name: El zip de descargas está al día
+        run: |
+          node scripts/build-oro-hermandad.mjs "$RUNNER_TEMP/nuevo.zip"
+          mkdir -p "$RUNNER_TEMP/subido" "$RUNNER_TEMP/nuevo"
+          unzip -q descargas/OroHermandad.zip -d "$RUNNER_TEMP/subido"
+          unzip -q "$RUNNER_TEMP/nuevo.zip" -d "$RUNNER_TEMP/nuevo"
+          diff -r "$RUNNER_TEMP/subido" "$RUNNER_TEMP/nuevo" || { echo "Ejecuta: node scripts/build-oro-hermandad.mjs"; exit 1; }
