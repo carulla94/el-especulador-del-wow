@@ -38,6 +38,8 @@ html = html.replace(entry, '<script type="module" src="./pages/bootstrap.mjs"></
   .replace('href="/api/addon"', 'href="./downloads/EspeculadorBridge.zip"')
   .replace('href="/api/export"', 'href="#copia-json" data-pages-export')
   .replace('href="/api/connector"', 'href="#cuenta-en-la-nube" data-pages-connector hidden')
+  // The guild panel lives only in the Cloudflare edition: Pages is public and never holds guild data.
+  .replace('href="/hermandad"', 'href="#hermandad-en-la-nube" data-pages-guild hidden')
   .replace('<html lang="es">', '<html lang="es" data-storage-mode="pages-local">')
   .replace('<meta name="viewport"', '<meta name="robots" content="noindex, nofollow">\n  <meta name="especulador-mode" content="pages-local">\n  <meta name="viewport"')
   .replace(/<title>([^<]+)<\/title>/, '<title>El Especulador del WoW · Datos en este navegador</title>');

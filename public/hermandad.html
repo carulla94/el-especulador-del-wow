@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#171714">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Panel de la hermandad · El Especulador del WoW</title>
+  <meta name="description" content="Precios de la subasta que sube toda la hermandad: chollos, tabla de materiales y consumibles, balance semanal y calculadora de reventa.">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/hermandad.css">
+  <script type="module" src="/hermandad.js"></script>
+</head>
+<body>
+<div id="hermandad" class="shell">
+  <a class="skip" href="#main">Ir al contenido</a>
+  <header class="top">
+    <a class="brand" href="/hermandad" aria-label="Panel de la hermandad, inicio">
+      <svg viewBox="0 0 80 92" aria-hidden="true"><path d="M40 3 72 17v30c0 17-18 31-32 40C26 78 8 64 8 47V17Z" fill="#17344f" stroke="#ceaa64" stroke-width="3"/><path d="m25 51 15-29 15 29M31 43h18M28 59h24M40 58v11" fill="none" stroke="#e8c77f" stroke-width="3"/></svg>
+      <span><strong>Hermandad</strong><small>El Especulador del WoW</small></span>
+    </a>
+    <nav id="tabs" class="tabs" aria-label="Secciones del panel" hidden>
+      <a href="#mercado" data-tab="mercado">Mercado</a>
+      <a href="#balance" data-tab="balance">Balance<span class="wide"> semanal</span></a>
+      <a href="#miembros" data-tab="miembros" id="tab-members" hidden>Miembros</a>
+      <a href="#unirse" data-tab="unirse">Unirse<span class="wide"> y descargas</span></a>
+    </nav>
+    <div id="account" class="account" hidden>
+      <span id="who" class="who"></span>
+      <a id="owner-back" class="button subtle small" href="/" hidden>Mi cuenta</a>
+      <button id="logout" class="button subtle small" type="button">Salir</button>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <div id="market-bar" class="market-bar" hidden>
+      <label id="market-wrap" class="market-select"><span>Mercado</span><select id="market"></select></label>
+      <p id="freshness" class="freshness" aria-live="polite"></p>
+    </div>
+
+    <section id="screen-loading" data-screen class="screen narrow" aria-live="polite">
+      <p class="empty-line">Cargando el panel de la hermandad…</p>
+      <noscript><p class="feedback">El panel necesita JavaScript activado.</p></noscript>
+    </section>
+
+    <section id="screen-login" data-screen class="screen narrow" hidden aria-labelledby="login-title">
+      <div class="card login-card">
+        <p class="eyebrow">WOW FOREVER · PRECIOS DE TODA LA HERMANDAD</p>
+        <h1 id="login-title">Panel de la hermandad</h1>
+        <p class="lead">Entra con tu clave personal de la hermandad. Empieza por <code>gld_</code> y te la da quien administra el panel; es la misma que usa el sincronizador de tu PC.</p>
+        <form id="login-form" autocomplete="off">
+          <label for="login-key">Tu clave de la hermandad</label>
+          <input id="login-key" name="key" type="password" required maxlength="80" spellcheck="false" autocapitalize="off" autocomplete="off">
+          <label class="check"><input id="login-show" type="checkbox"> Mostrar la clave</label>
+          <button id="login-submit" class="button primary" type="submit">Entrar en el panel</button>
+          <p id="login-feedback" class="feedback" role="alert" aria-live="polite"></p>
+        </form>
+        <p class="muted small-print">¿Eres el propietario de la app? <a href="/login">Entra con tu contraseña</a> y vuelve desde «Hermandad».</p>
+      </div>
+    </section>
+
+    <section id="screen-fatal" data-screen class="screen narrow" hidden aria-labelledby="fatal-title">
+      <div class="card">
+        <h1 id="fatal-title">El panel no está disponible</h1>
+        <p id="fatal-message" class="lead"></p>
+        <p class="muted">Si el problema sigue, avisa a quien mantiene el panel.</p>
+      </div>
+    </section>
+
+    <section id="screen-mercado" data-screen class="screen" hidden aria-labelledby="mercado-title">
+      <h1 id="mercado-title" class="sr-only">Mercado de la hermandad</h1>
+      <div id="banners" class="banners"></div>
+      <div id="market-empty" class="card empty" hidden>
+        <h2>Aún no hay precios</h2>
+        <p id="market-empty-text"></p>
+        <p class="row"><a class="button secondary" href="#unirse">Cómo subir precios</a><a id="market-empty-admin" class="button subtle" href="#miembros" hidden>Añadir miembros y claves</a></p>
+      </div>
+      <div id="market-content" hidden>
+        <section class="chollos" aria-labelledby="chollos-title">
+          <div class="section-head">
+            <h2 id="chollos-title">Chollos de hoy <span id="chollos-count" class="count">0</span></h2>
+            <p class="muted hint">El precio más bajo que ha visto hoy la hermandad, muy por debajo de lo normal.</p>
+          </div>
+          <p id="chollos-empty" class="empty-line"></p>
+          <ul id="chollos-list" class="chollo-list"></ul>
+        </section>
+
+        <section class="market" aria-labelledby="table-title">
+          <div class="section-head">
+            <h2 id="table-title">Mercado <span id="table-count" class="muted count-text"></span></h2>
+            <div class="exports">
+              <a id="csv-summary" class="button subtle small" href="#" download>Resumen CSV</a>
+              <a id="csv-daily" class="button subtle small" href="#" download>Diario 60 d CSV</a>
+              <button id="csv-view" class="button subtle small" type="button">Esta vista CSV</button>
+            </div>
+          </div>
+          <div class="filters" role="search">
+            <label class="search"><span class="sr-only">Buscar objeto</span><input id="filter-q" type="search" placeholder="Buscar por nombre o ID" autocomplete="off"></label>
+            <label><span class="sr-only">Categoría</span><select id="filter-cat"></select></label>
+            <label><span class="sr-only">Mostrar</span><select id="filter-show">
+              <option value="">Todos los objetos</option>
+              <option value="chollos">Solo chollos</option>
+              <option value="caros">Solo caros</option>
+              <option value="precio">Con precio de hoy</option>
+            </select></label>
+            <label><span class="sr-only">Confianza</span><select id="filter-conf">
+              <option value="">Cualquier confianza</option>
+              <option value="media">Orientativo o fiable</option>
+              <option value="alta">Solo fiable</option>
+            </select></label>
+          </div>
+          <div class="table-scroll">
+            <table id="market-table" class="market-table">
+              <caption class="sr-only">Precios de la hermandad por objeto. Pulsa un objeto para ver su detalle y la calculadora.</caption>
+              <thead><tr>
+                <th scope="col" data-sort="name" class="name-col"><button type="button">Objeto <span class="sort-mark" aria-hidden="true"></span></button></th>
+                <th scope="col" data-sort="hoy" class="num"><button type="button" title="El precio más bajo visto hoy por la hermandad">Hoy <span class="sort-mark" aria-hidden="true"></span></button></th>
+                <th scope="col" data-sort="N" class="num"><button type="button" title="Mediana de los 14 días anteriores">Normal 14 d <span class="sort-mark" aria-hidden="true"></span></button></th>
+                <th scope="col" data-sort="d1" class="num"><button type="button" title="Hoy frente a ayer">Δ1d <span class="sort-mark" aria-hidden="true"></span></button></th>
+                <th scope="col" data-sort="d7" class="num"><button type="button" title="Esta semana frente a la anterior">Δ7d <span class="sort-mark" aria-hidden="true"></span></button></th>
+                <th scope="col" data-sort="range" class="num"><button type="button">Mín – máx 14 d <span class="sort-mark" aria-hidden="true"></span></button></th>
+                <th scope="col">28 días</th>
+                <th scope="col" data-sort="Q" class="num"><button type="button" title="Unidades a la venta en un día normal">Oferta típica <span class="sort-mark" aria-hidden="true"></span></button></th>
+                <th scope="col" data-sort="members" class="num"><button type="button" title="Miembros con datos en los últimos 14 días">Miembros <span class="sort-mark" aria-hidden="true"></span></button></th>
+                <th scope="col" data-sort="conf"><button type="button">Confianza <span class="sort-mark" aria-hidden="true"></span></button></th>
+                <th scope="col" data-sort="verdict"><button type="button">Estado <span class="sort-mark" aria-hidden="true"></span></button></th>
+              </tr></thead>
+              <tbody id="market-body"></tbody>
+            </table>
+          </div>
+          <p id="table-empty" class="empty-line" hidden>Ningún objeto cumple estos filtros.</p>
+        </section>
+        <p id="caveat" class="caveat muted"></p>
+      </div>
+    </section>
+
+    <section id="screen-balance" data-screen class="screen" hidden aria-labelledby="balance-title">
+      <div class="section-head">
+        <h1 id="balance-title">Balance semanal</h1>
+        <p class="muted hint">Δ7d: la mediana de esta semana frente a la de la semana anterior.</p>
+      </div>
+      <div id="balance-empty" class="card empty" hidden><p>Aún no hay precios de este mercado.</p></div>
+      <div id="balance-content" hidden>
+        <p id="balance-none" class="empty-line">El balance necesita al menos 4 días con precio en cada una de las dos últimas semanas.</p>
+        <div id="balance-grid" class="balance-grid">
+          <section class="card" aria-labelledby="cats-title">
+            <h2 id="cats-title">Por categoría</h2>
+            <p class="muted small-print">Mediana del Δ7d de sus objetos. Azul: más barato que la semana pasada; rojo: más caro.</p>
+            <ul id="balance-cats" class="cat-bars"></ul>
+          </section>
+          <section class="card" aria-labelledby="risers-title">
+            <h2 id="risers-title">Los que más suben</h2>
+            <p class="muted small-print">Solo objetos con confianza orientativa o fiable.</p>
+            <ol id="risers" class="movers"></ol>
+            <h2 id="fallers-title">Los que más bajan</h2>
+            <ol id="fallers" class="movers"></ol>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section id="screen-miembros" data-screen class="screen" hidden aria-labelledby="members-title">
+      <div class="section-head">
+        <h1 id="members-title">Miembros</h1>
+        <p id="members-count" class="muted hint"></p>
+      </div>
+      <div class="members-layout">
+        <form id="member-form" class="card" autocomplete="off">
+          <h2>Añadir un miembro</h2>
+          <p class="muted small-print">Usa el nombre que quieras mostrar en el panel; no hace falta que sea su personaje. Se crea también su primera clave.</p>
+          <label>Nombre en el panel<input name="label" type="text" maxlength="40" required></label>
+          <label id="member-role-wrap">Rol<select name="role"><option value="member">Miembro</option><option value="admin">Administra (crea y revoca claves)</option></select></label>
+          <button class="button primary" type="submit">Añadir y crear su clave</button>
+          <p id="member-feedback" class="feedback" role="alert"></p>
+        </form>
+        <div id="key-panel" class="card key-panel" hidden role="alert">
+          <h2>Clave de <span id="key-label"></span></h2>
+          <p id="key-warning" class="warning"></p>
+          <label>Clave personal<input id="key-value" type="text" readonly spellcheck="false" autocomplete="off"></label>
+          <div class="row">
+            <button id="key-copy" class="button primary small" type="button">Copiar clave</button>
+            <button id="key-done" class="button subtle small" type="button">Ya la he copiado</button>
+          </div>
+          <p class="muted small-print">Envíasela por privado. Con ella sube sus precios desde el PC y entra en este panel. Si se pierde o se filtra, revócala y crea otra.</p>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table class="members-table">
+          <caption class="sr-only">Miembros de la hermandad y sus claves</caption>
+          <thead><tr><th scope="col">Nombre</th><th scope="col">Rol</th><th scope="col">Estado</th><th scope="col">Último envío</th><th scope="col">Claves</th><th scope="col">Acciones</th></tr></thead>
+          <tbody id="members-body"></tbody>
+        </table>
+      </div>
+      <p id="members-empty" class="empty-line" hidden>Todavía no hay miembros. Añade al primero con el formulario.</p>
+    </section>
+
+    <section id="screen-unirse" data-screen class="screen" hidden aria-labelledby="join-title">
+      <div class="section-head"><h1 id="join-title">Unirse y descargas</h1></div>
+      <ol class="steps">
+        <li class="card"><h2>Instala el addon Oro de Hermandad</h2><p>Descarga la última versión y descomprímela en <code>_forever_/Interface/AddOns</code>. Necesitas también Auctionator.</p><p><a class="button secondary" href="https://github.com/carulla94/el-especulador-del-wow/releases" target="_blank" rel="noopener noreferrer">Descargar el addon ↗</a></p></li>
+        <li class="card"><h2>Pide tu clave personal</h2><p>Quien administra el panel te la crea. Empieza por <code>gld_</code>, es solo tuya y no se puede volver a mostrar: guárdala.</p></li>
+        <li class="card"><h2>Instala el sincronizador en tu PC</h2><p>Descomprime el ZIP y haz doble clic en <code>HERMANDAD.cmd</code> (Windows, Python 3.10 o superior). La primera vez te pide esta dirección, tu carpeta de WoW y tu clave; luego sube los precios solo.</p>
+          <label class="url-field">Dirección del panel<input id="panel-url" type="text" readonly></label>
+          <p class="row"><a class="button secondary" href="/api/guild/download/sincronizador" download>Descargar el sincronizador</a><button id="url-copy" class="button subtle small" type="button">Copiar la dirección</button></p></li>
+        <li class="card"><h2>Juega y escanea</h2><p>Escanea la subasta con Auctionator. Al salir del juego o con <code>/reload</code>, WoW guarda los precios y el sincronizador los envía. El panel se actualiza con cada envío.</p></li>
+      </ol>
+      <section class="card privacy" aria-labelledby="privacy-title">
+        <h2 id="privacy-title">Qué se comparte</h2>
+        <ul>
+          <li><strong>Sí:</strong> los precios, cantidades y escaneos de los objetos vigilados, su nombre, su precio de vendedor y su categoría, los depósitos que aprende el addon y el mercado (reino y facción). Es lo que guarda <code>OroHermandadHist</code>.</li>
+          <li><strong>Nunca:</strong> tus personajes, la lista de la hermandad ni tus profesiones (<code>OroHermandadDB</code> y <code>OroHermandadCharDB</code>), ni la base de datos de Auctionator.</li>
+          <li>En el panel se ve el nombre que te puso quien administra, nunca el de tu personaje.</li>
+        </ul>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="detail" class="detail" aria-labelledby="detail-title">
+    <div class="detail-head">
+      <h2 id="detail-title">Objeto</h2>
+      <button id="detail-close" class="icon-button" type="button" aria-label="Cerrar el detalle">×</button>
+    </div>
+    <div id="detail-body" class="detail-body"></div>
+  </dialog>
+
+  <dialog id="confirm" class="confirm" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-text"></p>
+      <label id="confirm-purge-wrap" class="check" hidden><input id="confirm-purge" type="checkbox"> Borrar también sus precios subidos</label>
+      <div class="row end">
+        <button class="button subtle" value="cancel">Cancelar</button>
+        <button class="button danger" value="ok">Revocar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+</div>
+</body>
+</html>

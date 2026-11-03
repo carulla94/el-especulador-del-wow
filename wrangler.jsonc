@@ -13,7 +13,7 @@
     "html_handling": "none",
     "not_found_handling": "none"
   },
-  "durable_objects": {"bindings": [{"name": "PORTFOLIO", "class_name": "Portfolio"}]},
-  "migrations": [{"tag": "v1", "new_sqlite_classes": ["Portfolio"]}],
+  "durable_objects": {"bindings": [{"name": "PORTFOLIO", "class_name": "Portfolio"}, {"name": "GUILD", "class_name": "GuildMarket"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["Portfolio"]}, {"tag": "v2", "new_sqlite_classes": ["GuildMarket"]}],
   "observability": {"enabled": false}
 }

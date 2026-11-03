@@ -7,6 +7,7 @@ dist-pages/
 playwright-report/
 test-results/
 public/downloads/*.zip
+public/especular.js
 __pycache__/
 *.pyc
 *.sqlite3

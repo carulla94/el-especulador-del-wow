@@ -37,6 +37,8 @@ test("Pages entry and local assets resolve beneath a project subpath", () => {
   assert.match(html, /<script type="module" src="\.\/pages\/bootstrap\.mjs"><\/script>/);
   assert.match(html, /href="#copia-json" data-pages-export/);
   assert.match(html, /href="#cuenta-en-la-nube" data-pages-connector hidden/);
+  assert.match(html, /href="#hermandad-en-la-nube" data-pages-guild hidden/);
+  assert.doesNotMatch(html, /hermandad\.(?:html|js|css)|\/api\/guild/);
   assert.doesNotMatch(html, /(?:href|src)=["']\//);
   for (const [, reference] of html.matchAll(/(?:href|src)="([^"]+)"/g)) {
     if (reference.startsWith("#") || /^https?:/.test(reference)) continue;

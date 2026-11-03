@@ -107,11 +107,15 @@ def validate_folder(value):
     return folder
 
 
-def stable_read(path):
-    """Read a complete, stable UTF-8 file without changing it or its timestamps."""
+def stable_read(path, allowed=None):
+    """Read a complete, stable UTF-8 file without changing it or its timestamps.
+
+    allowed: the file names another uploader may read (default: the two FILES of this connector).
+    """
     path = Path(path)
-    if path.name not in FILES:
-        raise SyncError("Solo se admiten los dos archivos SavedVariables del conector.")
+    if path.name not in (FILES if allowed is None else allowed):
+        raise SyncError("Solo se admiten los dos archivos SavedVariables del conector." if allowed is None
+                        else "Solo se admiten los archivos SavedVariables previstos.")
     try:
         before = path.stat()
         if not path.is_file() or before.st_size > MAX_FILE_BYTES:
