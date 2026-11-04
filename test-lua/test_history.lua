@@ -87,7 +87,7 @@ Stub.fire("PLAYER_LOGIN")
 Stub.fire("PLAYER_ENTERING_WORLD", true, false)
 Stub.runTimers(30)
 
-test("TOC: versión 0.3.1, OroHermandadHist guardado y Spec/History en su sitio", function()
+test("TOC: versión 0.4.0, OroHermandadHist guardado y Spec/History/Relay en su sitio", function()
   local files, sv, versionLine = {}, nil, nil
   for line in io.lines(DIR .. "OroHermandad.toc") do
     if line:match("%.lua$") then files[#files + 1] = line end
@@ -96,16 +96,17 @@ test("TOC: versión 0.3.1, OroHermandadHist guardado y Spec/History en su sitio"
   end
   local pos = {}
   for i, f in ipairs(files) do pos[f] = i end
-  eq(versionLine, "0.3.1", "versión"); eq(ns.Core.VERSION, "0.3.1", "Core.VERSION")
+  eq(versionLine, "0.4.0", "versión"); eq(ns.Core.VERSION, "0.4.0", "Core.VERSION")
   eq(sv, "OroHermandadDB, OroHermandadHist", "SavedVariables de la cuenta")
   eq(pos["Spec.lua"], pos["Items.lua"] + 1, "Spec después de Items")
   eq(pos["History.lua"], pos["Prices.lua"] + 1, "History después de Prices")
+  eq(pos["Relay.lua"], pos["Guild.lua"] + 1, "Relay después de Guild")
   assert(pos["Core.lua"] == #files, "Core al final")
 end)
 
 test("Al cargar: poda, salta lo corrupto y deja solo mercados y objetos válidos", function()
   local h = OroHermandadHist
-  eq(h.schema, 1); eq(h.addon, "0.3.1")
+  eq(h.schema, 2); eq(h.addon, "0.4.0")
   local keys = {}
   for k in pairs(h.markets) do keys[#keys + 1] = tostring(k) end
   eq(table.concat(keys, ","), KEY, "solo el mercado válido")
@@ -509,7 +510,7 @@ test("/oro sondeo: todo lo que hay que comprobar en el juego, sin nombres de per
   assert(_G.OroHermandadTextFrame.edit.__highlighted, "seleccionado para copiar")
   local chat = table.concat(Stub.printed, "\n")
   for _, want in ipairs({
-    "Oro de Hermandad 0.3.1 · sondeo ", "cliente 1.60.1.70707 (interfaz 16001)",
+    "Oro de Hermandad 0.4.0 · sondeo ", "cliente 1.60.1.70707 (interfaz 16001)",
     "Auctionator 11.0.9-forever · __dbversion 8", "escaneos oídos sí", "SCAN_DAY_0 de Auctionator: 1577833200 (igual",
     "Escaneo completo (", "replicateInfo: 1 texto, 2 número, 3 número", "[3] cantidad ", "[17] itemID ",
     "Escaneo de resumen (", "itemKey {battlePetSpeciesID=número, itemID=número",
@@ -601,10 +602,10 @@ test("¿Sobrevivió al /reload?: los cuatro casos y un esquema más nuevo que no
   assert(has(survival(nil, {histSince = 1}, true), "NO: OroHermandadDB se cargó, pero OroHermandadHist no"), "solo falla Hist")
   assert(has(survival(nil, {}, true), "primera sesión con historial"), "primera vez con la 0.3.0")
   assert(has(survival(nil, {}, false), "no se cargó nada guardado (ni OroHermandadDB)"), "nada cargado")
-  local future = {schema = 2, markets = {x = 1}}
+  local future = {schema = 3, markets = {x = 1}}
   local db = {}
   eq(H.Load(future, {db = db, market = function() return KEY end}), future, "la misma tabla")
-  eq(future.schema, 2); eq(future.markets.x, 1, "intacta")
+  eq(future.schema, 3); eq(future.markets.x, 1, "intacta")
   assert(has(H.SurvivalText(), "versión más nueva"), "lo explica")
   eq(H.Record("full", {}, true), false, "no graba")
   eq(H.Import(true), "off")
@@ -668,7 +669,7 @@ end)
 test("PLAYER_LOGOUT deja el historial listo para guardar", function()
   OroHermandadHist.addon = "otra"
   Stub.fire("PLAYER_LOGOUT")
-  eq(OroHermandadHist.addon, "0.3.1")
+  eq(OroHermandadHist.addon, "0.4.0")
   assert(Spec.EstimateSize(OroHermandadHist) <= Spec.MAX_BYTES)
 end)
 
@@ -691,7 +692,10 @@ test("Privacidad: OroHermandadHist no lleva personajes, hermandad, profesiones n
   end
   for key in pairs(OroHermandadHist) do assert(key == "schema" or key == "addon" or key == "markets", "clave " .. key) end
   for _, m in pairs(OroHermandadHist.markets) do
-    for key in pairs(m) do assert(({updated = 1, cut = 1, items = 1, dep = 1})[key], "clave de mercado " .. key) end
+    -- 0.4.0: self y obs solo llevan códigos de 8 cifras (seudónimos), nunca nombres.
+    for key in pairs(m) do assert(({updated = 1, cut = 1, items = 1, dep = 1, self = 1, obs = 1})[key], "clave de mercado " .. key) end
+    if m.self then assert(m.self:match("^%x%x%x%x%x%x%x%x[,%x]*$"), "self: " .. m.self) end
+    for h in pairs(m.obs or {}) do assert(History.IsHash(h), "código " .. tostring(h)) end
     for _, item in pairs(m.items) do
       for key in pairs(item) do assert(({n = 1, c = 1, v = 1, d = 1, p = 1})[key], "clave de objeto " .. key) end
     end

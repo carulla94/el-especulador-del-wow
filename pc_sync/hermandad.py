@@ -1,16 +1,25 @@
 """PC uploader for the guild panel ("Hermandad") of El Especulador del WoW.
 
 It reads <WoW>/_forever_/WTF/Account/<ACCOUNT>/SavedVariables/OroHermandad.lua for every account, keeps ONLY the
-OroHermandadHist global (watched-item prices written by the Oro de Hermandad addon) and sends it as the upload JSON of
-contract 3 to <panel>/api/guild/sync with the member's personal key (Authorization: Bearer gld_...).
+OroHermandadHist global (watched-item prices written by the Oro de Hermandad addon: this account's own scans and,
+from 0.4.0 on, the scans that guild mates' addons share over the hidden addon channel) and sends it as upload JSON
+schema 2 to <panel>/api/guild/sync with the member's personal key (Authorization: Bearer gld_...). Files of the 0.3.x
+addon (OroHermandadHist schema 1) are still read. One or two members of a guild running this is enough: everybody
+else only plays with the addon.
 
 Privacy and safety:
 - The file is parsed locally by a literal-only reader (no Lua is ever executed) with size, depth and node limits.
   OroHermandadDB (guild roster, professions, recipes) and OroHermandadCharDB are skipped without being decoded or
   kept, and Auctionator.lua is never opened.
+- Character names never leave the game: each observer (this account's characters and every guild mate whose scans
+  the addon collected) is sent only as the 8-hex code the addon stores, a hash of the guild and the character name.
+  That code is pseudonymous, not anonymous: whoever knows the guild roster can recompute it.
 - The key is stored with Windows DPAPI (CryptProtectData), never as plain text, an argument or an environment
   variable. Without DPAPI (other systems) it is only kept in memory.
 - HTTPS only, no redirects, bounded responses; a file is only sent again when its content changes (sha256).
+- The only thing ever written in the WoW folder is the marker addon Interface/AddOns/OroHermandad_Subidor (two fixed
+  files, and only when Oro de Hermandad is installed there): it tells the addon that this PC uploads, so it asks guild
+  mates for the scans it missed. --quitar-aviso and --reset remove it.
 """
 from __future__ import annotations
 
@@ -22,6 +31,7 @@ if sys.version_info < (3, 10):
 
 import argparse
 import base64
+import calendar
 import contextlib
 import ctypes
 import getpass
@@ -45,11 +55,12 @@ from xml.sax.saxutils import escape as xml_text
 import sincronizar as sync
 from sincronizar import AuthenticationError, ReadPendingError, RetryableSyncError, SyncError
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 SOURCE_NAME = "OroHermandad.lua"
 ALLOWED = frozenset({SOURCE_NAME})
 HIST_GLOBAL = "OroHermandadHist"
-SCHEMA = 1
+SCHEMA = 2                   # what is sent (upload JSON schema 2)
+HIST_SCHEMAS = (1, 2)        # OroHermandadHist formats read: 0.3.x (own prices) and 0.4.0 (also guild mates' scans)
 
 # Especular v1 (addon/OroHermandad/Spec.lua and src/especular.mjs): day 0, ranges and what the addon keeps.
 DAY0 = 1577833200
@@ -69,8 +80,15 @@ CATEGORIES = ("metal", "piedra", "gema", "hierba", "piel", "tela", "pocion", "el
 ITEM_ID_MAX = 2**31 - 1
 NAME_MAX = 100
 MAX_MARKETS = 8
-MAX_ITEMS = 300
+MAX_ITEMS = 300              # item metadata per market: every ID that any observer's series or a deposit names
 MAX_DEPOSITS = MAX_ITEMS * 9
+MAX_RELAYED = 60             # guild mates per market (the self observer comes on top: 61 observers)
+MAX_ALIASES = 9              # this account's other characters next to the first self hash
+MAX_SERIES = 8000            # series (one observer x one item) per upload
+SELF_DAYS, SELF_POINTS = 130, 130
+RELAY_DAYS = 14              # a mate's days from today - 14 (the baseline window) to tomorrow
+RELAY_MAX_DAYS, RELAY_MAX_POINTS = 20, 150
+MAX_OBS_PROGRESS = 200       # mates whose upload progress is remembered per market (the newest ones)
 MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024
 REQUEST_TIMEOUT = 30
@@ -82,6 +100,7 @@ PARSER_LIMITS = {"chars": 10 * 1024 * 1024, "depth": 30, "nodes": 500_000, "stri
 KEY_PATTERN = re.compile(r"gld_[A-Za-z0-9_-]{43}")
 ADDON_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}")
 MARKET_PATTERN = re.compile(r"([^|\x00-\x1f\x7f]+)-(?:Alliance|Horde)")
+OBSERVER_PATTERN = re.compile(r"[0-9a-f]{8}")   # relay-v1 observer hash (computed by the addon, never here)
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 TASK_NAME = "Oro de Hermandad - subidor de precios"
 TASK_COMMAND_MAX = 261
@@ -94,7 +113,7 @@ class LuaFormatError(SyncError):
 
 
 class SchemaError(SyncError):
-    """OroHermandadHist exists but is not schema 1."""
+    """OroHermandadHist exists but is not schema 1 or 2."""
 
 
 class RejectedUploadError(SyncError):
@@ -556,11 +575,10 @@ def clean_name(value):
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# OroHermandadHist -> upload JSON (contract 3)
+# OroHermandadHist -> upload JSON schema 2
 # ---------------------------------------------------------------------------------------------------------------
-def _progress(sent, key):
-    """(day, t, items) of what the panel already accepted for one market of this account, or None (send it all)."""
-    entry = sent.get(key) if isinstance(sent, dict) else None
+def _progress_entry(entry):
+    """(day, t, items) of one observer's progress entry {"day", "t", "items"}, or None."""
     if not isinstance(entry, dict):
         return None
     day, t, items = entry.get("day"), entry.get("t"), entry.get("items")
@@ -569,73 +587,150 @@ def _progress(sent, key):
     return day, t, {i for i in items if _is_int(i, 1, ITEM_ID_MAX)}
 
 
+def _progress(sent, key, observer=None):
+    """(day, t, items) of what the panel already accepted for one market of this account: from its own characters
+    (observer None, the format of 0.3.0) or from one guild mate (observer = hash, kept under "obs"). None: send all."""
+    entry = sent.get(key) if isinstance(sent, dict) else None
+    if observer is not None:
+        mates = entry.get("obs") if isinstance(entry, dict) else None
+        entry = mates.get(observer) if isinstance(mates, dict) else None
+    return _progress_entry(entry)
+
+
+def _series(item_id, days, points, progress):
+    """{"id", "days", "points"} of one observer and item, or None when nothing is left. An item the panel already has
+    from this observer only sends its days from the newest accepted day minus RESEND_DAYS and its points newer than
+    the newest accepted time minus 30 min (a later scan can still merge into them)."""
+    if progress and item_id in progress[2]:
+        days = [r for r in days if r[0] >= progress[0] - RESEND_DAYS]
+        points = [p for p in points if p[0] > progress[1] - POINT_MERGE_SECONDS]
+    if not days and not points:
+        return None
+    return {"id": item_id, "days": days, "points": points}
+
+
+def self_hashes(market):
+    """This account's character codes in a market (markets[m].self, newest first): at most 1 + MAX_ALIASES."""
+    hashes = []
+    raw = market.get("self")
+    if isinstance(raw, str):
+        for code in raw.split(","):
+            if OBSERVER_PATTERN.fullmatch(code) and code not in hashes and len(hashes) < 1 + MAX_ALIASES:
+                hashes.append(code)
+    return hashes
+
+
 def build_upload(hist, now, sent=None):
-    """(upload, notes). upload follows contract 3; only the fields listed there are copied, so nothing else that
-    might be inside the table can leave the PC. notes are short Spanish warnings about data that was left out.
-    sent: {market: {"day", "t", "items"}} that the panel already accepted from this account (accepted_progress). An
-    item it has only sends its days from that day minus RESEND_DAYS and its points newer than that time minus 30 min
-    (a later scan can still merge into them); every other item goes complete. Each upload then writes a few hundred
-    rows instead of the whole history again. A market with nothing new is left out."""
+    """(upload, notes). upload follows upload JSON schema 2: per market the item metadata once, the deposits and the
+    observers, first this account (self: true, its first character code as obs and the others as aliases) and then
+    every guild mate whose scans the addon collected (self: false), only by their 8-hex codes. Only the fields listed
+    there are copied, so nothing else that might be inside the table (names above all) can leave the PC. notes are
+    short Spanish warnings about data that was left out. OroHermandadHist schema 1 (addon 0.3.x) gives the same
+    upload with only the self observer and obs null.
+    sent: {market: {"day", "t", "items", "obs": {hash: {"day", "t", "items"}}}} that the panel already accepted from
+    this account (accepted_progress). An item it has from an observer only sends that observer's recent days and
+    points (_series); everything else goes complete. A market with nothing new is left out."""
     if not isinstance(hist, dict):
         raise SchemaError(f"{HIST_GLOBAL} no tiene el formato esperado.")
     schema = hist.get("schema")
-    if type(schema) is not int or schema != SCHEMA:
+    if type(schema) is not int or schema not in HIST_SCHEMAS:
         shown = str(schema) if type(schema) is int else "desconocido"
-        raise SchemaError(f"{HIST_GLOBAL} usa el formato {shown} y este subidor solo entiende el formato {SCHEMA}. "
+        raise SchemaError(f"{HIST_GLOBAL} usa el formato {shown} y este subidor solo entiende el formato 1 o 2. "
                           "Descarga la última versión del subidor desde el panel de la hermandad.")
     addon = hist.get("addon")
     if not isinstance(addon, str) or not ADDON_PATTERN.fullmatch(addon):
         raise SchemaError(f"{HIST_GLOBAL} no indica una versión válida del addon Oro de Hermandad.")
     now = int(now)
-    max_day, oldest_point, newest_point = day_index(now) + 1, max(DAY0, now - POINT_SECONDS), now + 86400
+    today = day_index(now)
+    max_day, oldest_point, newest_point = today + 1, max(DAY0, now - POINT_SECONDS), now + 86400
     notes, markets = [], []
     source = hist.get("markets") if isinstance(hist.get("markets"), dict) else {}
     for key, market in source.items():
         if not valid_market_key(key) or not isinstance(market, dict):
             notes.append("se ha saltado un mercado con un nombre no válido")
             continue
-        raw_items = market.get("items") if isinstance(market.get("items"), dict) else {}
         progress = _progress(sent, key)
-        known, items, bad = set(), [], 0
+        # This account's own prices (all its characters): items {id: {n, c, v, d, p}}.
+        meta, own, bad = {}, [], 0
+        raw_items = market.get("items") if isinstance(market.get("items"), dict) else {}
         for item_id, item in raw_items.items():
             if not _is_int(item_id, 1, ITEM_ID_MAX) or not isinstance(item, dict):
                 bad += 1
                 continue
-            known.add(item_id)
-            days = [list(r) for r in decode_days(item.get("d")) if r[0] <= max_day]
-            points = [list(p) for p in decode_points(item.get("p")) if oldest_point <= p[0] <= newest_point]
-            if progress and item_id in progress[2]:
-                days = [r for r in days if r[0] >= progress[0] - RESEND_DAYS]
-                points = [p for p in points if p[0] > progress[1] - POINT_MERGE_SECONDS]
-            if not days and not points:
-                continue
-            category = item.get("c") if item.get("c") in CATEGORIES else "otro"
-            vendor = item.get("v") if _is_int(item.get("v"), 0, PRICE_MAX) else 0
-            items.append({"id": item_id, "name": clean_name(item.get("n")), "cat": category, "vendor": vendor,
-                          "days": days, "points": points})
+            meta[item_id] = {"id": item_id, "name": clean_name(item.get("n")),
+                             "cat": item.get("c") if item.get("c") in CATEGORIES else "otro",
+                             "vendor": item.get("v") if _is_int(item.get("v"), 0, PRICE_MAX) else 0}
+            days = [list(r) for r in decode_days(item.get("d")) if r[0] <= max_day][-SELF_DAYS:]
+            points = [list(p) for p in decode_points(item.get("p")) if oldest_point <= p[0] <= newest_point][-SELF_POINTS:]
+            series = _series(item_id, days, points, progress)
+            if series:
+                own.append(series)
         if bad:
             notes.append(f"{key}: {plural(bad, 'objeto no válido se ha saltado', 'objetos no válidos se han saltado')}")
-        if len(items) > MAX_ITEMS:
-            recent = lambda i: (i["days"][-1][0] if i["days"] else -1, i["points"][-1][0] if i["points"] else -1)
-            items.sort(key=lambda i: (recent(i), -i["id"]), reverse=True)
-            dropped = items[MAX_ITEMS:]
-            items = items[:MAX_ITEMS]
-            known -= {i["id"] for i in dropped}
-            notes.append(f"{key}: {plural(len(dropped), 'objeto no cabe', 'objetos no caben')} en un envío "
-                         f"(máximo {MAX_ITEMS}); van los que tienen precios más recientes")
-        items.sort(key=lambda i: i["id"])
+        # Guild mates (schema 2): obs {hash: {seen, s, items: {id: {d, p}}}}; their days are always src "o".
+        hashes, relayed, broken = self_hashes(market), [], 0
+        raw_obs = market.get("obs") if isinstance(market.get("obs"), dict) else {}
+        for observer, entry in raw_obs.items():
+            if not isinstance(observer, str) or not OBSERVER_PATTERN.fullmatch(observer) or not isinstance(entry, dict):
+                broken += 1
+                continue
+            if observer in hashes:          # one of this account's characters: its scans are already own prices
+                continue
+            mate, series = _progress(sent, key, observer), []
+            mate_items = entry.get("items") if isinstance(entry.get("items"), dict) else {}
+            for item_id, item in mate_items.items():
+                if not _is_int(item_id, 1, ITEM_ID_MAX) or not isinstance(item, dict):
+                    continue
+                days = [list(r) for r in decode_days(item.get("d"))
+                        if today - RELAY_DAYS <= r[0] <= max_day and r[6] == "o"][-RELAY_MAX_DAYS:]
+                points = [list(p) for p in decode_points(item.get("p"))
+                          if oldest_point <= p[0] <= newest_point][-RELAY_MAX_POINTS:]
+                one = _series(item_id, days, points, mate)
+                if one:
+                    series.append(one)
+            if series:
+                seen = entry.get("seen") if _is_int(entry.get("seen"), 0, TIME_MAX) else 0
+                relayed.append((seen, observer, sorted(series, key=lambda s: s["id"])))
+        if broken:
+            notes.append(f"{key}: {plural(broken, 'compañero con datos no válidos se ha saltado', 'compañeros con datos no válidos se han saltado')}")
+        relayed.sort(key=lambda r: (-r[0], r[1]))
+        if len(relayed) > MAX_RELAYED:
+            notes.append(f"{key}: solo se envían los {MAX_RELAYED} compañeros con escaneos más recientes "
+                         f"({plural(len(relayed) - MAX_RELAYED, 'compañero se queda', 'compañeros se quedan')} fuera)")
+        relayed = sorted(relayed[:MAX_RELAYED], key=lambda r: r[1])
         deposits = []
         raw_deposits = market.get("dep") if isinstance(market.get("dep"), dict) else {}
         for item_id, text in raw_deposits.items():
-            if _is_int(item_id, 1, ITEM_ID_MAX) and item_id in known:
+            if _is_int(item_id, 1, ITEM_ID_MAX) and item_id in meta:
                 deposits.extend([item_id, dur, copper] for dur, copper in decode_deposits(text))
+        # The panel takes at most MAX_ITEMS item IDs per upload and market: the ones with the newest prices stay.
+        referenced = {s["id"] for s in own} | {s["id"] for _, _, ser in relayed for s in ser} | {d[0] for d in deposits}
+        if len(referenced) > MAX_ITEMS:
+            newest = {}
+            for s in own + [s for _, _, ser in relayed for s in ser]:
+                day, t = newest.get(s["id"], (-1, -1))
+                newest[s["id"]] = (max(day, s["days"][-1][0] if s["days"] else -1),
+                                   max(t, s["points"][-1][0] if s["points"] else -1))
+            keep = set(sorted(referenced, key=lambda i: (newest.get(i, (-1, -1)), -i), reverse=True)[:MAX_ITEMS])
+            own = [s for s in own if s["id"] in keep]
+            relayed = [(seen, o, kept) for seen, o, kept in
+                       ((seen, o, [s for s in ser if s["id"] in keep]) for seen, o, ser in relayed) if kept]
+            deposits = [d for d in deposits if d[0] in keep]
+            notes.append(f"{key}: {plural(len(referenced) - MAX_ITEMS, 'objeto no cabe', 'objetos no caben')} en un "
+                         f"envío (máximo {MAX_ITEMS}); van los que tienen precios más recientes")
         deposits.sort()
         deposits = deposits[:MAX_DEPOSITS]
-        if not items and (not deposits or progress):
+        if not own and not relayed and (not deposits or progress):
             continue
+        referenced = {s["id"] for s in own} | {s["id"] for _, _, ser in relayed for s in ser} | {d[0] for d in deposits}
+        items = [meta.get(i) or {"id": i, "name": "", "cat": "otro", "vendor": 0} for i in sorted(referenced)]
+        observers = [{"obs": hashes[0] if hashes else None, "self": True, "aliases": hashes[1:],
+                      "items": sorted(own, key=lambda s: s["id"])}]
+        observers += [{"obs": observer, "self": False, "items": series} for _, observer, series in relayed]
         cut = market.get("cut") if _is_int(market.get("cut"), 0, 9999) else None
         updated = market.get("updated") if _is_int(market.get("updated"), 0, TIME_MAX) else 0
-        markets.append((updated, key, {"market": key, "cut": cut, "items": items, "deposits": deposits}))
+        markets.append((updated, key, {"market": key, "cut": cut, "items": items, "deposits": deposits,
+                                       "observers": observers}))
     if len(markets) > MAX_MARKETS:
         markets.sort(key=lambda m: (m[0], m[1]), reverse=True)
         notes.append(f"solo se envían los {MAX_MARKETS} mercados usados más recientemente "
@@ -645,14 +740,37 @@ def build_upload(hist, now, sent=None):
     return {"schema": SCHEMA, "addon": addon, "markets": [m[2] for m in markets]}, notes
 
 
+def observer_seen(hist):
+    """{(market, hash): newest scan time} of the guild mates in OroHermandadHist; encode_payload leaves the mates
+    with the oldest scans for a later upload first."""
+    out = {}
+    source = hist.get("markets") if isinstance(hist, dict) and isinstance(hist.get("markets"), dict) else {}
+    for key, market in source.items():
+        raw = market.get("obs") if isinstance(market, dict) and isinstance(market.get("obs"), dict) else {}
+        for observer, entry in raw.items():
+            if isinstance(entry, dict) and _is_int(entry.get("seen"), 0, TIME_MAX):
+                out[(key, observer)] = entry["seen"]
+    return out
+
+
 def encode_json(data):
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
+def _advance(previous, series, refused_items):
+    """One observer's progress after the panel accepted these series of it."""
+    previous = previous or (0, 0, set())
+    return {"day": max([previous[0]] + [r[0] for s in series for r in s["days"]]),
+            "t": max([previous[1]] + [p[0] for s in series for p in s["points"]]),
+            "items": sorted((previous[2] | {s["id"] for s in series}) - refused_items)}
+
+
 def accepted_progress(sent, posted, result):
     """What to remember after the panel accepted posted (the upload as it was sent; result is the panel's answer):
-    per market the newest day and scan time sent and the items stored. A market or an item that the panel skipped is
-    left out, so it goes complete next time."""
+    per market and observer the newest day and scan time sent and the items stored, the own characters as in 0.3.0
+    ({"day", "t", "items"}) and each guild mate under "obs". A market the panel skipped is forgotten, an item it
+    skipped (skippedItems) is forgotten for every observer and a mate it skipped (skippedObservers) is forgotten, so
+    they go complete next time."""
     progress = {k: v for k, v in sent.items() if isinstance(k, str) and isinstance(v, dict)} if isinstance(sent, dict) else {}
     reports = result.get("markets") if isinstance(result.get("markets"), list) else []
     by_market = {r.get("market"): r for r in reports if isinstance(r, dict) and isinstance(r.get("market"), str)}
@@ -662,31 +780,107 @@ def accepted_progress(sent, posted, result):
             progress.pop(key, None)
             continue
         listed = report.get("skippedItems") if isinstance(report.get("skippedItems"), list) else []
-        previous = _progress(progress, key) or (0, 0, set())
-        day = max([previous[0]] + [r[0] for i in market["items"] for r in i["days"]])
-        t = max([previous[1]] + [p[0] for i in market["items"] for p in i["points"]])
-        items = (previous[2] | {i["id"] for i in market["items"]}) - {i for i in listed if _is_int(i, 1, ITEM_ID_MAX)}
-        progress[key] = {"day": day, "t": t, "items": sorted(items)}
+        listed = {i for i in listed if _is_int(i, 1, ITEM_ID_MAX)}
+        refused = report.get("skippedObservers") if isinstance(report.get("skippedObservers"), list) else []
+        refused = {o.get("obs") for o in refused if isinstance(o, dict) and isinstance(o.get("obs"), str)}
+        observers = market.get("observers") if isinstance(market.get("observers"), list) else []
+        own = next((o for o in observers if o.get("self") is True), {"items": []})
+        entry = _advance(_progress(progress, key), own["items"], listed)
+        mates, before = {}, progress.get(key, {}).get("obs") if isinstance(progress.get(key), dict) else None
+        for observer, value in (before.items() if isinstance(before, dict) else ()):
+            parsed = _progress_entry(value)
+            if isinstance(observer, str) and OBSERVER_PATTERN.fullmatch(observer) and parsed and observer not in refused:
+                mates[observer] = {"day": parsed[0], "t": parsed[1], "items": sorted(parsed[2] - listed)}
+        for observer in observers:
+            code = observer.get("obs")
+            if observer.get("self") is True or code in refused:
+                continue
+            mates[code] = _advance(_progress_entry(mates.get(code)), observer["items"], listed)
+        if len(mates) > MAX_OBS_PROGRESS:
+            newest = sorted(mates, key=lambda h: (mates[h]["day"], mates[h]["t"], h), reverse=True)[:MAX_OBS_PROGRESS]
+            mates = {h: mates[h] for h in newest}
+        if mates:
+            entry["obs"] = dict(sorted(mates.items()))
+        progress[key] = entry
     return progress
 
 
-def encode_payload(upload):
-    """Compact UTF-8 JSON of at most 2 MiB. If it is larger, the scan points are left out first."""
-    encode = encode_json
-    payload = encode(upload)
-    if len(payload) <= MAX_BODY_BYTES:
-        return payload, []
-    lighter = {**upload, "markets": [{**m, "items": [{**i, "points": []} for i in m["items"]]} for m in upload["markets"]]}
-    payload = encode(lighter)
+def _without_points(observer):
+    """The observer with its scan points left out (series left with nothing are dropped)."""
+    series = [{**s, "points": []} for s in observer["items"]]
+    return {**observer, "items": [s for s in series if s["days"]]}
+
+
+def encode_payload(upload, seen=None):
+    """(payload, notes): compact UTF-8 JSON of at most 2 MiB and MAX_SERIES series. What does not fit is left for a
+    later upload, and then notes is not empty (GuildUploader.handle does not record the file as sent, so the next
+    cycle sends the rest): guild mates beyond MAX_SERIES first; over 2 MiB the mates' scan points, then this
+    account's points (as before 0.4.0), then whole mates. Mates go in the order of seen ({(market, hash): newest scan
+    time}, observer_seen): the oldest scans are left out first."""
+    seen = seen or {}
+    mates = sorted(((seen.get((m["market"], o["obs"]), 0), o["obs"], m["market"], o)
+                    for m in upload["markets"] for o in m["observers"] if not o["self"]), key=lambda x: x[:3])
+    deferred, relayed_points, own_points = set(), True, True
+
+    def lighter():
+        markets = []
+        for m in upload["markets"]:
+            observers = []
+            for o in m["observers"]:
+                if o["self"]:
+                    observers.append(o if own_points else _without_points(o))
+                elif (m["market"], o["obs"]) not in deferred:
+                    o = o if relayed_points else _without_points(o)
+                    if o["items"]:
+                        observers.append(o)
+            markets.append({**m, "observers": observers})
+        return {**upload, "markets": markets}
+
+    total = sum(len(o["items"]) for m in upload["markets"] for o in m["observers"])
+    for _, code, market, observer in mates:
+        if total <= MAX_SERIES:
+            break
+        deferred.add((market, code))
+        total -= len(observer["items"])
+    payload = encode_json(lighter())
     if len(payload) > MAX_BODY_BYTES:
-        raise SyncError("Los precios de esta cuenta ocupan más de 2 MiB incluso sin los puntos de escaneo. "
-                        "No se ha enviado nada.")
-    return payload, ["el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo"]
+        relayed_points = False
+        payload = encode_json(lighter())
+    if len(payload) > MAX_BODY_BYTES:
+        own_points = False
+        payload = encode_json(lighter())
+    while len(payload) > MAX_BODY_BYTES:
+        excess, more = len(payload) - MAX_BODY_BYTES, False
+        for _, code, market, observer in mates:
+            if (market, code) in deferred:
+                continue
+            deferred.add((market, code))
+            more = True
+            excess -= len(encode_json(_without_points(observer))) + 1
+            if excess <= 0:
+                break
+        if not more:
+            raise SyncError("Los precios de esta cuenta ocupan más de 2 MiB incluso sin los puntos de escaneo ni los "
+                            "precios de los compañeros. No se ha enviado nada.")
+        payload = encode_json(lighter())
+    notes = []
+    if not own_points:
+        notes.append("el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo")
+    elif not relayed_points:
+        notes.append("el envío pasaba de 2 MiB: esta vez van sin los puntos de los compañeros")
+    if deferred:
+        notes.append(f"{plural(len(deferred), 'compañero no cabe', 'compañeros no caben')} en este envío: irán en el siguiente")
+    return payload, notes
 
 
 def summary(upload):
-    items = sum(len(m["items"]) for m in upload["markets"])
-    return f"{plural(len(upload['markets']), 'mercado', 'mercados')}, {plural(items, 'objeto', 'objetos')}"
+    """«N mercados, N objetos[, N compañeros]» of an upload: objects with prices of any observer, distinct mates."""
+    items, mates = 0, set()
+    for market in upload["markets"]:
+        items += len({s["id"] for o in market["observers"] for s in o["items"]})
+        mates |= {o["obs"] for o in market["observers"] if not o["self"]}
+    text = f"{plural(len(upload['markets']), 'mercado', 'mercados')}, {plural(items, 'objeto', 'objetos')}"
+    return text + (f", {plural(len(mates), 'compañero', 'compañeros')}" if mates else "")
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -808,6 +1002,186 @@ def detect_wow_folders(env=None):
 
 
 # ---------------------------------------------------------------------------------------------------------------
+# Marker addon <_forever_>/Interface/AddOns/OroHermandad_Subidor: tells Oro de Hermandad 0.4 that this PC uploads,
+# so it asks guild mates for the scans it missed. The only thing ever written in the WoW folder: two fixed ASCII
+# files whose only variable part is the Interface number copied from the addon's own TOC (digits and commas).
+# ---------------------------------------------------------------------------------------------------------------
+MARKER_FOLDER = "OroHermandad_Subidor"
+MARKER_SHOWN = "Interface\\AddOns\\OroHermandad_Subidor"
+MARKER_TOC = MARKER_FOLDER + ".toc"
+MARKER_LUA = MARKER_FOLDER + ".lua"
+MARKER_TOC_TEMPLATE = ("## Interface: {interface}\n"
+                       "## Title: Oro de Hermandad - subidor\n"
+                       "## Notes: Lo crea el subidor de precios del PC para que Oro de Hermandad sepa que este PC sube "
+                       "los precios de la hermandad. No hace nada mas.\n"
+                       "## Author: Oro de Hermandad\n"
+                       "## Version: 1\n"
+                       "## OptionalDeps: OroHermandad\n"
+                       "OroHermandad_Subidor.lua\n")
+MARKER_LUA_TEXT = ("-- Lo crea el subidor de precios de Oro de Hermandad (hermandad.py) y lo vuelve a escribir si cambia. "
+                   "No lo edites.\n"
+                   "OroHermandadSubidor = {formato = 1}\n")
+MARKER_DEFAULT_INTERFACE = "16001"
+MARKER_INTERFACE = re.compile(r"[0-9]{5,6}(?: *, *[0-9]{5,6})*")
+_TOC_INTERFACE = re.compile(r"##[ \t]*Interface[ \t]*:(.*)")
+MARKER_READ_BYTES = 64 * 1024
+MARKER_POLLS = 240           # the watch loop checks the marker again every 240 polls of 15 s (one hour)
+MARKER_LINES = {
+    "created": f"He creado el aviso {MARKER_SHOWN} para que Oro de Hermandad 0.4 sepa que este PC sube los precios de "
+               "la hermandad y pida a tus compañeros los que te perdiste. Si el juego está abierto, sal del todo y "
+               "vuelve a entrar una vez (un /reload no basta).",
+    "updated": f"He actualizado el aviso {MARKER_SHOWN} para el addon; vale desde la próxima vez que entres en el juego "
+               "o uses /reload.",
+    "denied": "No he podido crear el aviso para el addon (sin permiso en la carpeta de WoW). En el juego escribe una "
+              "vez /oro subidor on.",
+    "error": "No he podido crear el aviso para el addon (no se puede escribir en la carpeta de WoW). En el juego "
+             "escribe una vez /oro subidor on.",
+    "unsafe": f"No he creado el aviso para el addon: {MARKER_SHOWN} es un enlace que apunta fuera de la carpeta de "
+              "addons de WoW. En el juego escribe una vez /oro subidor on.",
+    "unknown": "No sé dónde está la carpeta _forever_ de WoW a partir de la carpeta elegida, así que no he creado el "
+               "aviso para el addon. En el juego escribe una vez /oro subidor on.",
+}
+
+
+def forever_folder(folder):
+    """The _forever_ folder of the configured WoW folder (the WoW folder, _forever_, WTF, Account or one account's
+    SavedVariables folder), or None."""
+    if folder is None:
+        return None
+    folder = Path(folder)
+    if folder.name.lower() == "_forever_" and folder.is_dir():
+        return folder
+    wtf = _wtf_folder(folder)
+    if wtf is None and len(folder.parents) >= 3:
+        # <_forever_>/WTF/Account/<ACCOUNT>/SavedVariables (or the folder that holds OroHermandad.lua)
+        account_list, wtf_folder = folder.parent.parent, folder.parent.parent.parent
+        if account_list.name.lower() == "account" and wtf_folder.name.lower() == "wtf":
+            wtf = wtf_folder
+    return wtf.parent if wtf is not None else None
+
+
+def marker_interface(addon_toc):
+    """The '## Interface:' value of Oro de Hermandad's own TOC (same Interface: the marker is never «No actualizado»),
+    or 16001 when it is missing or not only 5-6 digit numbers."""
+    try:
+        with open(addon_toc, "rb") as stream:
+            raw = stream.read(MARKER_READ_BYTES)
+    except OSError:
+        return MARKER_DEFAULT_INTERFACE
+    for line in raw.decode("utf-8", "replace").lstrip("﻿").splitlines():
+        match = _TOC_INTERFACE.match(line)
+        if match:
+            value = match.group(1).strip()
+            return value if MARKER_INTERFACE.fullmatch(value) else MARKER_DEFAULT_INTERFACE
+    return MARKER_DEFAULT_INTERFACE
+
+
+def marker_files(interface=MARKER_DEFAULT_INTERFACE):
+    """{file name: exact bytes} of the marker addon (ASCII, LF)."""
+    if not MARKER_INTERFACE.fullmatch(interface):
+        interface = MARKER_DEFAULT_INTERFACE
+    return {MARKER_TOC: MARKER_TOC_TEMPLATE.format(interface=interface).encode("ascii"),
+            MARKER_LUA: MARKER_LUA_TEXT.encode("ascii")}
+
+
+def _same_path(path, expected):
+    return os.path.normcase(os.path.realpath(path)) == os.path.normcase(expected)
+
+
+def _marker_target(forever):
+    """(AddOns folder, marker folder, real marker folder): the marker must resolve to <real AddOns>/OroHermandad_Subidor."""
+    addons = Path(forever) / "Interface" / "AddOns"
+    return addons, addons / MARKER_FOLDER, os.path.join(os.path.realpath(addons), MARKER_FOLDER)
+
+
+def _read_small(path):
+    try:
+        with open(path, "rb") as stream:
+            return stream.read(MARKER_READ_BYTES + 1)
+    except OSError:
+        return None
+
+
+def _replace_file(path, data):
+    """Writes path through a fresh temporary file next to it and os.replace (never through an existing link)."""
+    temporary = path.with_name(path.name + ".tmp")
+    if os.path.lexists(temporary):
+        os.unlink(temporary)
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
+def ensure_marker(folder):
+    """Writes the marker addon when Oro de Hermandad is installed in the client of folder, only if its bytes differ.
+    Returns created (a new addon for the game: it needs a full restart of the client), updated, ok (already right),
+    no-addon (Oro de Hermandad is not in that client's AddOns: nothing is written), unknown (no _forever_ folder),
+    unsafe (the marker folder or a file of it resolves outside AddOns), denied or error (it could not be written)."""
+    forever = forever_folder(folder)
+    if forever is None:
+        return "unknown"
+    addons, target, real_target = _marker_target(forever)
+    addon_toc = addons / "OroHermandad" / "OroHermandad.toc"
+    try:
+        if not addon_toc.is_file():
+            return "no-addon"
+        files = marker_files(marker_interface(addon_toc))
+        if not _same_path(target, real_target) or any(not _same_path(target / name, os.path.join(real_target, name))
+                                                      for name in files):
+            return "unsafe"
+        created = not (target / MARKER_TOC).is_file()
+        target.mkdir(exist_ok=True)
+        if not _same_path(target, real_target):
+            return "unsafe"
+        changed = False
+        for name, data in files.items():
+            if _read_small(target / name) != data:
+                _replace_file(target / name, data)
+                changed = True
+    except PermissionError:
+        return "denied"
+    except OSError:
+        return "error"
+    return "created" if created else "updated" if changed else "ok"
+
+
+def remove_marker(folder):
+    """Removes only the two marker files (and a temporary file of an interrupted write), then the folder if it is left
+    empty. Returns removed, absent, unknown, unsafe, denied or error."""
+    forever = forever_folder(folder)
+    if forever is None:
+        return "unknown"
+    _, target, real_target = _marker_target(forever)
+    if not os.path.lexists(target):
+        return "absent"
+    if not _same_path(target, real_target) or not target.is_dir():
+        return "unsafe"
+    removed = False
+    try:
+        for name in (MARKER_TOC, MARKER_LUA, MARKER_TOC + ".tmp", MARKER_LUA + ".tmp"):
+            path = target / name
+            if path.is_symlink() or path.is_file():
+                os.unlink(path)       # a link itself, never what it points to
+                removed = True
+        with contextlib.suppress(OSError):
+            target.rmdir()            # only when nothing else is left in it
+            removed = True
+    except PermissionError:
+        return "denied"
+    except OSError:
+        return "error"
+    return "removed" if removed else "absent"
+
+
+# ---------------------------------------------------------------------------------------------------------------
 # Panel address, member key and upload
 # ---------------------------------------------------------------------------------------------------------------
 def validate_panel_url(value, env=None):
@@ -918,13 +1292,20 @@ class Event:
     result: dict | None = None
     upload: dict | None = None
     notes: tuple = ()
+    partial: bool = False   # something did not fit (encode_payload, or mates the panel left for another upload:
+                            # ENVIO): the file is read again next cycle
+    retry: int | None = None  # mates waiting for the panel's next daily quota (CUOTA): sent again from this time
 
 
 class GuildUploader:
-    """state: {str(path): {"file": sha256, "payload": sha256, "at": unix, "markets": progress}} of accepted uploads;
-    save() persists it. "payload" is the hash of the complete upload the file gives (unchanged content is never sent
-    again), "markets" what the panel already has (accepted_progress), so only what is new is sent. Both are only
-    recorded after the panel answers accepted: true; a rejected upload forgets "markets", so the next one is complete."""
+    """state: {str(path): {"file": sha256, "payload": sha256, "at": unix, "markets": progress, "retry": unix}} of
+    accepted uploads; save() persists it. "payload" is the hash of the complete upload the file gives (unchanged
+    content is never sent again), "markets" what the panel already has from each observer (accepted_progress), so only
+    what is new is sent. Both are only recorded after the panel answers accepted: true; a rejected upload forgets
+    "markets", so the next one is complete. A partial upload (it did not fit in one body, or the panel left guild
+    mates for another upload: ENVIO) records "markets" but not the hashes, so the next cycle sends the rest. Mates
+    left for the panel's next daily quota (CUOTA) set "retry" (the next 00:00 UTC and a few minutes): from then the
+    same file is read and sent again even if it did not change."""
 
     def __init__(self, url, key, folder, state=None, save=None, poster=post_guild, clock=time.time):
         self.url = validate_panel_url(url)
@@ -937,10 +1318,12 @@ class GuildUploader:
         self.ignored = {}   # path -> sha256 of a file that was invalid, empty or rejected (until it changes)
         self.settled = {}   # path -> stat signature already handled in this run: not read again until it changes
 
-    def remember(self, path, file_sha, payload_sha, now, markets=None):
+    def remember(self, path, file_sha, payload_sha, now, markets=None, retry=None):
         self.state[str(path)] = {"file": file_sha, "payload": payload_sha, "at": int(now)}
         if markets:
             self.state[str(path)]["markets"] = markets
+        if _is_int(retry, 0, TIME_MAX):
+            self.state[str(path)]["retry"] = retry
         while len(self.state) > MAX_ACCOUNTS:
             self.state.pop(min(self.state, key=lambda k: self.state[k].get("at", 0)))
         try:
@@ -966,9 +1349,14 @@ class GuildUploader:
                 raise
         return {"status": "missing" if present == 0 else "ok", "events": events}
 
+    def retry_due(self, key, now):
+        """True when mates left for the panel's daily quota (CUOTA) may be sent again."""
+        retry = (self.state.get(key) or {}).get("retry")
+        return _is_int(retry, 0, TIME_MAX) and now >= retry
+
     def check(self, source, stat, now):
         key, signature = str(source.path), (stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_ctime_ns)
-        if self.settled.get(key) == signature:
+        if self.settled.get(key) == signature and not self.retry_due(key, now):
             return Event(source, "unchanged")
         # WoW writes the file at /reload or logout: wait until it has not changed for a few seconds.
         if 0 <= now - stat.st_mtime < SETTLE_SECONDS:
@@ -981,35 +1369,39 @@ class GuildUploader:
             self.settled[key] = signature
             return Event(source, "invalid", str(error))
         event = self.handle(source, observation, now)
-        self.settled[key] = signature
+        if not event.partial:
+            self.settled[key] = signature
         return event
 
     def handle(self, source, observation, now):
         path, key = source.path, str(source.path)
         saved = self.state.get(key) or {}
-        if observation.sha256 == saved.get("file") or observation.sha256 == self.ignored.get(key):
+        due = self.retry_due(key, now)
+        keep = None if due else saved.get("retry")
+        if observation.sha256 == self.ignored.get(key) or (observation.sha256 == saved.get("file") and not due):
             return Event(source, "unchanged")
         try:
             hist = extract_hist(observation.text)
             if hist is None:
                 self.ignored[key] = observation.sha256
                 return Event(source, "empty", f"{SOURCE_NAME} todavía no tiene el historial de precios ({HIST_GLOBAL}). "
-                             "Instala Oro de Hermandad 0.3.0 o posterior, entra en el juego y sal (o usa /reload).")
+                             "Instala Oro de Hermandad 0.4.0, entra en el juego y sal (o usa /reload).")
             complete, notes = build_upload(hist, now)
             if not complete["markets"]:
                 self.ignored[key] = observation.sha256
                 return Event(source, "empty", "todavía no hay precios para enviar. Abre la casa de subastas con "
-                             "Auctionator, haz un escaneo y sal del juego (o usa /reload).")
+                             "Auctionator y haz un escaneo completo (o juega mientras lo hace un compañero con el addon), "
+                             "y sal del juego (o usa /reload).")
             digest = hashlib.sha256(encode_json(complete)).hexdigest()
             sent = saved.get("markets")
-            if digest == saved.get("payload"):
-                self.remember(path, observation.sha256, digest, now, sent)
+            if digest == saved.get("payload") and not due:
+                self.remember(path, observation.sha256, digest, now, sent, keep)
                 return Event(source, "unchanged")
             upload, notes = build_upload(hist, now, sent) if sent else (complete, notes)
             if not upload["markets"]:                   # the panel already has everything new in the file
-                self.remember(path, observation.sha256, digest, now, sent)
+                self.remember(path, observation.sha256, digest, now, sent, keep)
                 return Event(source, "unchanged")
-            payload, more = encode_payload(upload)
+            payload, more = encode_payload(upload, observer_seen(hist))
         except SyncError as error:
             self.ignored[key] = observation.sha256
             return Event(source, "invalid", str(error))
@@ -1025,13 +1417,64 @@ class GuildUploader:
         if not isinstance(result, dict) or result.get("accepted") is not True:
             raise RetryableSyncError("El panel no ha confirmado el envío. Se volverá a intentar.")
         # A duplicate answer means the panel had this exact body already: what it has did not change.
-        progress = sent if result.get("duplicate") is True else accepted_progress(sent, json.loads(payload), result)
-        self.remember(path, observation.sha256, digest, now, progress)
+        posted = json.loads(payload)
+        progress = sent if result.get("duplicate") is True else accepted_progress(sent, posted, result)
+        # Something did not fit (more, or mates the panel left for another upload: ENVIO): the rest goes next cycle,
+        # unless this upload moved nothing forward (then it would only repeat itself, so the content counts as sent
+        # until the file changes, as before 0.4.0). Mates left for the next daily quota (CUOTA) go again from the next
+        # 00:00 UTC (and a few minutes), even if the file has not changed by then.
+        reasons = skipped_reasons(result)
+        partial = (bool(more) or "ENVIO" in reasons) and progress != sent
+        retry = next_quota(now) if "CUOTA" in reasons else None
+        self.remember(path, None if partial else observation.sha256, None if partial else digest, now, progress, retry)
         kind = "duplicate" if result.get("duplicate") is True else "uploaded"
-        return Event(source, kind, result=result, upload=upload, notes=tuple(notes + more))
+        return Event(source, kind, result=result, upload=posted, notes=tuple(notes + more), partial=partial, retry=retry)
+
+
+QUOTA_MARGIN = 300   # after the panel's daily write quota resets (00:00 UTC), mates left as CUOTA go 5 min later
+
+
+def skipped_reasons(result):
+    """The reasons of the mates the panel did not store in any market (skippedObservers), as a set."""
+    out = set()
+    markets = result.get("markets") if isinstance(result, dict) and isinstance(result.get("markets"), list) else []
+    for market in markets:
+        refused = market.get("skippedObservers") if isinstance(market, dict) else None
+        for entry in refused if isinstance(refused, list) else []:
+            if isinstance(entry, dict) and isinstance(entry.get("reason"), str):
+                out.add(entry["reason"])
+    return out
+
+
+def next_quota(now):
+    """When mates left as CUOTA are sent again: the next 00:00 UTC (Cloudflare's daily limits reset then) plus 5 min."""
+    return (int(now) // 86400 + 1) * 86400 + QUOTA_MARGIN
+
+
+def spain_clock(t):
+    """HH:MM in Spain (peninsular) of a unix time, with the EU summer time rule (last Sunday of March to the last
+    Sunday of October, at 01:00 UTC), without tz data (not every Windows Python has it)."""
+    t = int(t)
+
+    def last_sunday(year, month):     # 01:00 UTC of the last Sunday of the month
+        days = calendar.monthrange(year, month)[1]
+        return calendar.timegm((year, month, days - (calendar.weekday(year, month, days) + 1) % 7, 1, 0, 0))
+    year = time.gmtime(t).tm_year
+    local = time.gmtime(t + (7200 if last_sunday(year, 3) <= t < last_sunday(year, 10) else 3600))
+    return f"{local.tm_hour:02d}:{local.tm_min:02d}"
 
 
 SKIPPED = {"LIMITE_DE_MERCADOS": "el panel ya tiene el máximo de mercados"}
+SKIPPED_OBSERVERS = {"LIMITE_DE_OBSERVADORES": "el panel ya tiene el máximo de compañeros",
+                     "ENVIO": "no caben en un solo envío: van en el siguiente, enseguida",
+                     "CUOTA": "se ha acabado por hoy la parte de la cuota de escritura del panel para compañeros: "
+                              "irán mañana"}
+
+
+def _reason(value, known):
+    if not isinstance(value, str) or not value:
+        return "motivo desconocido"
+    return known.get(value) or CONTROL.sub(" ", value).strip()[:80]
 
 
 def describe(event):
@@ -1051,11 +1494,29 @@ def describe(event):
             name = market.get("market") if isinstance(market.get("market"), str) else "?"
             skipped = market.get("skipped")
             if isinstance(skipped, str) and skipped:
-                lines.append(f"{who}: el panel no ha guardado {name}: {SKIPPED.get(skipped, skipped)}.")
+                lines.append(f"{who}: el panel no ha guardado {name}: {_reason(skipped, SKIPPED)}.")
             items = market.get("skippedItems")
             if isinstance(items, list) and items:
                 lines.append(f"{who}: en {name}, {plural(len(items), 'objeto no cabe', 'objetos no caben')} en el panel "
                              "(límite de objetos por mercado).")
+            refused = market.get("skippedObservers")
+            reasons = {}
+            for entry in refused if isinstance(refused, list) else []:
+                code = entry.get("reason") if isinstance(entry, dict) else None
+                reason = _reason(code, SKIPPED_OBSERVERS)
+                if code == "CUOTA" and _is_int(event.retry, 0, TIME_MAX):
+                    clock = spain_clock(event.retry)
+                    reason = ("se ha acabado por hoy la parte de la cuota de escritura del panel para compañeros: irán "
+                              f"a partir de {'la' if clock.startswith('01:') else 'las'} {clock} (hora de España)")
+                reasons[reason] = reasons.get(reason, 0) + 1
+            for reason, count in reasons.items():
+                lines.append(f"{who}: en {name}, {plural(count, 'compañero no se ha guardado', 'compañeros no se han guardado')}"
+                             f": {reason}.")
+            conflicts = market.get("selfConflicts")
+            if isinstance(conflicts, list) and conflicts:
+                lines.append(f"{who}: en {name}, " + ("un personaje de esta cuenta ya está vinculado" if len(conflicts) == 1
+                             else f"{len(conflicts)} personajes de esta cuenta ya están vinculados")
+                             + " a otro miembro del panel.")
         lines += [f"{who}: aviso: {note}." for note in event.notes]
         return lines
     if event.kind == "duplicate":
@@ -1069,11 +1530,30 @@ def describe(event):
     return []
 
 
-def run(uploader, once=False, sleep=time.sleep):
+def run(uploader, once=False, sleep=time.sleep, marker=None):
     """Watch loop: checks every 15 s; on errors waits 60 s doubling up to 5 min (or what the panel asks).
-    Returns 0 when stopped normally, 1 after an error in --once and 2 if the key was refused."""
-    backoff, last_status, pending, problems, tries = 60, None, set(), False, 0
+    marker: called at the start and then every MARKER_POLLS polls (ensure_marker of the WoW folder); its line, if
+    any, is said (a problem only once per run). Returns 0 when stopped normally, 1 after an error in --once and 2 if
+    the key was refused."""
+    backoff, last_status, pending, problems, tries, polls, told = 60, None, set(), False, 0, 0, set()
+
+    def check_marker():
+        if marker is None:
+            return
+        try:
+            status = marker()
+        except Exception:
+            status = "error"
+        line = MARKER_LINES.get(status)
+        if line and (status in ("created", "updated") or status not in told):
+            told.add(status)
+            say(line)
+
+    check_marker()
     while True:
+        if polls and polls % MARKER_POLLS == 0:
+            check_marker()
+        polls += 1
         try:
             result = uploader.cycle()
         except AuthenticationError as error:
@@ -1114,7 +1594,7 @@ def run(uploader, once=False, sleep=time.sleep):
             say("Sin cambios pendientes.")
         last_status = "quiet" if status == "ok" and quiet else status
         if once:
-            if pending and tries < 10:
+            if (pending or any(e.partial for e in result["events"])) and tries < 10:
                 tries += 1
                 sleep(SETTLE_SECONDS)
                 continue
@@ -1343,6 +1823,9 @@ def ensure_settings(config, protector, interactive, ask=input, ask_secret=getpas
         raise SyncError("Falta la configuración del subidor o ya no es válida. Abre HERMANDAD.cmd una vez para "
                         "guardar la dirección del panel, la carpeta de WoW y tu clave.")
     if not config.get("url"):
+        say("Basta con que una o dos personas de la hermandad tengan este subidor: el addon de los demás comparte sus "
+            "escaneos por el canal oculto de los addons (no se ve en el chat), el tuyo los recoge mientras juegas y "
+            "este programa los sube junto con los tuyos. Ni tú ni ellos tenéis que hacer nada en el juego.", stamp=False)
         say("Primera vez: necesito tres datos. Se guardan en este PC y no se vuelven a pedir.", stamp=False)
     if not url:
         url = _ask_until_valid(ask, "Dirección HTTPS del panel de la hermandad (te la da quien la administra): ",
@@ -1350,7 +1833,7 @@ def ensure_settings(config, protector, interactive, ask=input, ask_secret=getpas
     if not folder:
         folder = ask_folder(ask, detect)
         if not any(source.path.is_file() for source in find_sources(folder)):
-            say(f"Todavía no hay ningún {SOURCE_NAME} ahí. Se creará cuando juegues con Oro de Hermandad 0.3.0 y "
+            say(f"Todavía no hay ningún {SOURCE_NAME} ahí. Se creará cuando juegues con Oro de Hermandad 0.4.0 y "
                 "salgas del juego (o uses /reload).", stamp=False)
     if not key:
         key = _ask_until_valid(ask_secret, "Pega tu clave personal de la hermandad (gld_..., no se verá al pegarla): ",
@@ -1489,6 +1972,24 @@ def uninstall_startup(runner=subprocess.run):
 _DEFAULT = object()
 
 
+def _say_marker_removal(status):
+    """--quitar-aviso: what happened, in Spanish. 0 unless the marker is still there."""
+    if status == "removed":
+        say(f"He quitado el aviso {MARKER_SHOWN}. Si vuelves a abrir el subidor (o arranca con Windows), lo volverá a "
+            "crear. Para que este PC deje de pedir a la hermandad los precios que se perdió sin quitar el subidor, "
+            "escribe en el juego /oro subidor off.", stamp=False)
+    elif status == "absent":
+        say(f"No había ningún aviso {MARKER_SHOWN} que quitar.", stamp=False)
+    elif status == "unknown":
+        say("No sé dónde está WoW: no hay ninguna carpeta guardada. Si existe, borra a mano la carpeta "
+            f"{MARKER_SHOWN} de _forever_.", stamp=False)
+    else:
+        say(f"No he podido quitar el aviso {MARKER_SHOWN} (sin permiso, o es un enlace a otra carpeta). Bórralo a mano.",
+            stamp=False)
+        return 1
+    return 0
+
+
 def main(argv=None, *, protector=_DEFAULT, home=None, ask=input, ask_secret=getpass.getpass, detect=detect_wow_folders,
          poster=post_guild, runner=subprocess.run, sleep=time.sleep, clock=time.time):
     parser = argparse.ArgumentParser(prog="hermandad.py",
@@ -1498,6 +1999,8 @@ def main(argv=None, *, protector=_DEFAULT, home=None, ask=input, ask_secret=getp
     group.add_argument("--instalar-inicio", action="store_true", help="arranca el subidor sin ventana al iniciar sesión en Windows")
     group.add_argument("--quitar-inicio", action="store_true", help="quita el arranque con Windows")
     group.add_argument("--reset", action="store_true", help="borra la dirección, la carpeta y la clave guardadas")
+    group.add_argument("--quitar-aviso", action="store_true",
+                       help="quita la carpeta Interface\\AddOns\\OroHermandad_Subidor que el subidor crea para el addon")
     group.add_argument("--segundo-plano", action="store_true", help="lo usa la tarea de inicio: sin ventana ni preguntas")
     args = parser.parse_args(argv)
     home = Path(home) if home else config_dir()
@@ -1509,10 +2012,25 @@ def main(argv=None, *, protector=_DEFAULT, home=None, ask=input, ask_secret=getp
     try:
         if not args.segundo_plano:
             say("Oro de Hermandad · subidor de precios para el panel de la hermandad", stamp=False)
-            say(f"Solo envía {HIST_GLOBAL}: precios de los objetos vigilados (nombre, precio de mercader, categoría y "
-                "depósitos) por reino y facción. Nunca envía personajes, la hermandad, profesiones, oro ni nada de "
-                "Auctionator. No modifica WoW.", stamp=False)
-        if args.reset:
+            say(f"Solo envía {HIST_GLOBAL}: los precios de los objetos vigilados (nombre, precio de mercader, categoría "
+                "y depósitos) por reino y facción, los tuyos y los que tu addon recoge de los escaneos que tus "
+                "compañeros comparten por el canal oculto de los addons. Cada personaje va solo con un código de 8 "
+                "cifras (un hash del nombre del personaje y de la hermandad): los nombres de los personajes nunca salen "
+                "del juego. Ese código es seudónimo, no anónimo: quien conozca la lista de la hermandad podría "
+                "calcularlo. Nunca envía la hermandad, profesiones, oro ni nada de Auctionator. Solo crea la carpeta "
+                f"{MARKER_SHOWN} (un aviso de dos archivos para el addon); no toca nada más de WoW.", stamp=False)
+        if args.reset or args.quitar_aviso:
+            stored = load_config(home)
+            folder = None
+            with contextlib.suppress(SyncError):
+                folder = validate_wow_folder(stored.get("wow"))
+            removal = remove_marker(folder) if folder else "unknown"
+            if args.quitar_aviso:
+                return _say_marker_removal(removal)
+            if removal == "removed":
+                say(f"También he quitado el aviso {MARKER_SHOWN} para el addon.", stamp=False)
+            elif removal in ("unsafe", "denied", "error"):
+                say(f"No he podido quitar el aviso {MARKER_SHOWN}; bórralo a mano si quieres.", stamp=False)
             with contextlib.suppress(FileNotFoundError):
                 (home / "config.json").unlink()
             say("Se ha borrado la configuración guardada (dirección, carpeta, clave cifrada y registro de envíos). "
@@ -1549,7 +2067,7 @@ def main(argv=None, *, protector=_DEFAULT, home=None, ask=input, ask_secret=getp
             elif not args.once:
                 say(f"Vigilando {folder}. Mantén esta ventana abierta mientras juegas: WoW guarda {SOURCE_NAME} al usar "
                     "/reload o al salir. Ctrl+C para cerrar.", stamp=False)
-            return run(uploader, once=args.once, sleep=sleep)
+            return run(uploader, once=args.once, sleep=sleep, marker=lambda: ensure_marker(folder))
     except (SyncError, EOFError) as error:
         say(str(error) if isinstance(error, SyncError) else "Entrada cancelada. No se ha guardado nada nuevo.")
         return 1

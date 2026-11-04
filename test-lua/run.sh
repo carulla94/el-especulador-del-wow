@@ -16,7 +16,7 @@ if [ -n "$unexpected" ]; then echo "Globales no esperados: $unexpected"; exit 1;
 echo "Archivos del TOC..."
 grep '\.lua$' "$ADDON/OroHermandad.toc" | while read -r file; do test -f "$ADDON/$file" || { echo "Falta $file"; exit 1; }; done
 
-for suite in engine scan guild load spec history; do
+for suite in engine scan guild load spec history relay; do
   lua5.1 "test-lua/test_$suite.lua"
 done
 echo "Todo correcto."

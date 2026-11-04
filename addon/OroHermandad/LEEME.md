@@ -2,14 +2,14 @@
 
 Addon para WoW Forever que te dice qué hacer para ganar oro. Lee los precios de Auctionator, tus bolsas y tu banco, tus profesiones y las de tu hermandad, y te da una lista corta de acciones. También te avisa cuando los precios de la subasta están viejos y, con el modo **Especular**, te señala chollos para comprar y revender.
 
-Versión 0.3.1, para el cliente 1.60 de Forever (Interface 16001). **Todavía no se ha probado dentro del juego** (ver «Límites conocidos»). La instalación está explicada paso a paso en la guía `INSTALAR_ORO_DE_HERMANDAD.md`; pídela a quien te pasó el addon.
+Versión 0.4.0, para el cliente 1.60 de Forever (Interface 16001). **Todavía no se ha probado dentro del juego** (ver «Límites conocidos»). La instalación está explicada paso a paso en la guía `INSTALAR_ORO_DE_HERMANDAD.md`; pídela a quien te pasó el addon.
 
 ## Cómo se usa
 
 - Para abrir la ventana: **botón de la moneda** junto al minimapa, `/oro`, o el menú de addons (o accesorios) del minimapa.
 - Se abre sola, pegada a la subasta, cuando hablas con un subastador. Se cierra con ella.
 - **Abre cada profesión una vez** (y cuando aprendas recetas nuevas) para que el addon las conozca.
-- **Haz un escaneo completo en Auctionator** de vez en cuando, o activa en sus opciones **escanear al abrir la subasta**.
+- **Haz un escaneo completo en Auctionator** de vez en cuando o, mejor, activa en sus opciones **escanear al abrir la subasta**: así cada visita a la subasta apunta precios para ti y para tu hermandad (ver «Precios compartidos con la hermandad»).
 
 ## Modos
 
@@ -61,9 +61,9 @@ Desde la versión 0.3.0 el addon apunta los precios de una lista de materiales y
 - **Cuándo apunta:** con cada escaneo terminado de Auctionator. Por cada día guarda el precio mínimo más bajo y el más alto, el último, cuántas unidades había a la venta y cuántos escaneos hubo. De los últimos 14 días guarda además cada escaneo con su hora. Una búsqueda que corta el escaneo de Auctionator solo apunta ese momento: no cuenta para el día. Tus propias subastas no cuentan como precio del mercado (en el escaneo completo).
 - **Días que faltan:** al entrar, una vez al día, los rellena con el historial de Auctionator (sus últimos 21 días). Nunca sustituye lo que el addon vio por sí mismo.
 - **Depósitos:** con la subasta abierta apunta cuánto cuesta publicar una unidad de cada objeto, según la duración.
-- **Tamaño:** como mucho 768 KB. Guarda 120 días por objeto; si hiciera falta, recorta primero los escaneos sueltos más viejos.
+- **Tamaño:** lo tuyo, como mucho 768 KB. Guarda 120 días por objeto; si hiciera falta, recorta primero los escaneos sueltos más viejos. Lo que comparten tus compañeros va aparte, con su propio tope de 2 MB (ver «Precios compartidos con la hermandad»).
 - **`/oro tabla`:** abre una ventana con una tabla lista para pegar en Excel (columnas separadas por `;` y coma decimal). Tiene, por objeto, el precio de hoy, el normal de los últimos 14 días, el cambio en 1 y en 7 días (en %), el mínimo y el máximo de esos 14 días, la oferta de hoy, los días con precio y la confianza. Los precios van en oro: `0,0082` son 82 cobres. Ya sale seleccionada: pulsa Ctrl+C y pégala en Excel.
-- **Privacidad:** todo se queda en tu PC, en el archivo `WTF\Account\<cuenta>\SavedVariables\OroHermandad.lua`, en el bloque `OroHermandadHist`. Ahí solo hay precios de objetos (con su nombre, su precio de mercader, su categoría y los depósitos) por reino y facción. No hay personajes, ni oro, ni profesiones. El addon no lo envía a nadie. Solo si instalas el subidor de la hermandad, cuando esté listo, se enviará ese bloque, y nada más de ese archivo.
+- **Privacidad:** se guarda en tu PC, en el archivo `WTF\Account\<cuenta>\SavedVariables\OroHermandad.lua`, en el bloque `OroHermandadHist`. Ahí solo hay precios de objetos (con su nombre, su precio de mercader, su categoría y los depósitos) por reino y facción, y los precios que han compartido tus compañeros, cada uno con un código de 8 cifras en vez de su nombre. No hay nombres de personajes, ni oro, ni profesiones. Desde la 0.4.0 el addon comparte con tu hermandad los precios de tus escaneos completos (lo explica «Precios compartidos con la hermandad»). El subidor de la hermandad, si lo usas en tu PC, envía al panel ese bloque y nada más de ese archivo.
 - **`/oro sondeo`:** comprueba lo que el addon necesita saber del juego: la versión de Auctionator y la forma de sus escaneos, su historial, los depósitos y las duraciones de la subasta, y si el historial se guardó bien tras el último `/reload`. Cópialo de la ventana y pégalo en una incidencia: no lleva nombres de personajes ni tu oro. Hazlo una vez el primer día, con la subasta abierta, y repítelo tras un `/reload`.
 
 ## Modo Especular
@@ -96,9 +96,33 @@ Compra barato lo que alguien ha tirado de precio y revéndelo a su precio normal
 - **Datos necesarios:** sin 7 días de precios no hay precio normal; los chollos piden 10 días, y los de Tranquilo, 12 y poca variación. Si un objeto baja más de un 10 % en unos días (o sube mucho), no da chollos. Si eso pasa a la mitad o más de los objetos que ya tienen tendencia (hacen falta al menos 3), la sección dice «Mercado bajando: 4 de 6 objetos han caído más de un 10 % en unos días. Vende pronto lo que farmees y no compres para revender.» (en Tranquilo y A tope, solo si la sección tiene alguna fila). Si el precio lleva dos días por debajo de lo normal, es un precio nuevo y no un chollo.
 - **La reventa cuesta:** con un 5 % de comisión el precio tiene que subir un 5,3 % solo para no perder, y cada subasta que caduca se queda con su depósito.
 - **Todo son reglas probadas con datos simulados:** se ajustarán con los precios reales de las primeras semanas.
-- **Nada sale de tu PC** salvo que instales el subidor de la hermandad, que solo envía el bloque `OroHermandadHist` (precios de los objetos vigilados).
+- **Lo que sale de tu PC:** los precios de tus escaneos completos, a tu hermandad (ver «Precios compartidos con la hermandad»; se apaga con `/oro compartir off`), y, si usas el subidor de la hermandad, el bloque `OroHermandadHist` (precios de los objetos vigilados) al panel.
 
 Los patrones por día de la semana no salen en el juego: un solo jugador no junta datos suficientes. Los dará el panel de la hermandad, fuera del juego.
+
+## Precios compartidos con la hermandad
+
+Desde la 0.4.0, cada addon de la hermandad comparte lo que ve en la subasta, sin que nadie tenga que hacer nada. Así el panel de la hermandad se alimenta con los escaneos de todos aunque solo una o dos personas tengan el subidor en su PC, y en el juego cada uno tiene antes precio normal y precios más recientes.
+
+**Qué se comparte.** Al terminar un escaneo completo de la subasta, Oro de Hermandad comparte con tu hermandad, por el canal oculto de los addons (no se ve en el chat), el precio más bajo y las unidades de los objetos de la lista fija, la hora del escaneo y el reino y la facción. Nada más: ni tu oro, ni tus bolsas, ni tus subastas, ni tus objetos extra de `/oro vigilar`. Los PC con el subidor envían esos precios al panel identificados solo con un código de 8 cifras por personaje (un hash del nombre del personaje y de la hermandad): los nombres de los personajes nunca salen del juego. Ese código es seudónimo, no anónimo: quien conozca la lista de la hermandad podría calcularlo. Si no quieres compartir tus escaneos, escribe `/oro compartir off`: desde ese momento no sale ninguno más, tampoco los que aún esperaban en la cola (por ejemplo, porque estabas en una mazmorra).
+
+**Invisible.** No sale nada en el chat, no suena nada, no se abre ninguna ventana y no hay que pulsar nada. No toca Auctionator ni la subasta: usa lo que el addon ya apuntó de tu escaneo. Nunca envía nada en combate, en mazmorras, bandas, campos de batalla o arenas, ni cuando el juego restringe los mensajes de addon: lo deja en cola y sale después. Va detrás de los mensajes de profesiones de la hermandad, respeta el ritmo que admite el servidor y lo pesado lo hace por tandas cortas, para que el juego no se trabe. Cada personaje comparte como mucho un escaneo cada 15 minutos; los que tengan la 0.3 o la 0.2 simplemente ignoran estos mensajes.
+
+**Quién lo recibe y para qué.**
+- Todos los que tienen la 0.4.0 guardan lo que comparten sus compañeros conectados (15 días de precios, 72 h de escaneos, 40 compañeros por reino y facción como mucho, con su propio tope de 2 MB: si no cupiera, se recortan antes los días más viejos de cada uno que a ningún compañero) y lo usan en Especular: el precio normal sale antes porque junta tus días y los suyos, y si un compañero escaneó hace poco se ve su precio: «Un compañero lo vio hace 10 min.». Nunca se dice quién.
+- Lo de los compañeros se compara con lo tuyo: si alguien da precios de menos de la mitad o más del doble que tú, no se usa. Con datos de compañeros, «Fiable» pide precios de al menos 2 personas, como en el panel.
+- Un chollo con el precio de un compañero sale siempre como **Posible chollo**: ábrelo en la pestaña Comprar de la subasta y el addon hace la cuenta con lo que de verdad hay a la venta.
+- **El subidor (1 o 2 PC bastan):** quien tenga el subidor de precios en su PC envía al panel lo suyo y lo que han compartido los demás, cada uno como una persona distinta. Además pide a la hermandad los escaneos que se perdió mientras no estaba (de las últimas 72 h): al entrar en el juego (si entras en una mazmorra o en combate, en cuanto sales), y por susurro a cada compañero que entra después. Esas respuestas también van por el canal oculto; si un compañero tiene muchos escaneos guardados, llegan del más viejo al más nuevo, unos pocos cada 11 minutos, sin que nadie haga nada.
+- El subidor crea en tu PC la carpeta `Interface\AddOns\OroHermandad_Subidor` (un aviso de dos archivos que no hace nada más) para que el addon sepa que ese PC sube los precios. **La primera vez, sal del juego del todo y vuelve a entrar**: un `/reload` no ve carpetas nuevas. Hasta entonces, o si el subidor no puede crearla, escribe una vez `/oro subidor on`. `/oro subidor off` lo apaga y `/oro subidor auto` vuelve a lo normal (activado si está el aviso).
+- `/oro estado` dice cuántos compañeros te han compartido precios en este reino y facción, y `/oro sondeo` añade cómo va (sin nombres ni códigos).
+
+**Límites.**
+- Lo que un compañero escaneó cuando no había nadie con el subidor conectado solo llega al panel si alguien con el subidor está en el juego a la vez que él en las 72 h siguientes.
+- Cada personaje cuenta como una persona: los alts de quien no usa el subidor cuentan como personas distintas (los de quien lo usa, no).
+- Si un compañero sale del juego justo cuando el addon le responde por susurro, el juego puede escribir una vez «No hay ningún jugador llamado…».
+- Si cambias de hermandad, tu código cambia; lo viejo se olvida en 15 días.
+- Si actualizas el addon y solo haces `/reload`, los precios compartidos no funcionan hasta que sales del juego del todo y vuelves a entrar (todo lo demás sí; `/oro sondeo` lo dice).
+- **Si vuelves a la 0.3.1:** verá el historial de la 0.4.0 como de una versión más nueva y no lo tocará (ni apuntará precios mientras tanto); al volver a la 0.4.0 está todo. El subidor también tiene que ser el nuevo: el antiguo avisa de que no entiende el formato 2 del historial.
 
 ## Descripción de los objetos
 
@@ -115,7 +139,8 @@ Se desactiva con `/oro info off` (las líneas de Especular, también con `/oro e
 - Lo que se comparte entre quienes tienen el addon:
   - tu nivel;
   - tus profesiones con su nivel;
-  - tus 8 recetas más rentables (producto, beneficio y materiales).
+  - tus 8 recetas más rentables (producto, beneficio y materiales);
+  - desde la 0.4.0, los precios de tus escaneos completos de la lista fija (ver «Precios compartidos con la hermandad»).
 - No se comparten ni bolsas ni oro.
 - Tus datos se envían al entrar y cuando cambian tus profesiones o tus recetas. Si no han cambiado, no se repiten antes de media hora; `/oro sync` los envía igualmente y pide los de los demás.
 - Si alguien no tiene el addon, el addon lee su profesión del roster de la hermandad cuando el juego la ofrece. También lo puedes añadir a mano con `/oro amigo Nombre profesión nivel`.
@@ -140,7 +165,9 @@ La sesión empieza al entrar con el personaje (un `/reload` no la reinicia). Pas
 /oro sesion [reset]        oro de la sesión
 /oro amigo Ana ingenieria 150   añade a alguien a mano
 /oro amigo borrar Ana      lo quita
-/oro sync                  envía tus datos a la hermandad y le pide los suyos
+/oro sync                  envía tus datos a la hermandad y le pide los suyos (con el subidor, también los precios que te perdiste)
+/oro compartir on | off    comparte con la hermandad los precios de tus escaneos completos (por defecto, sí)
+/oro subidor on | off | auto   este PC pide a la hermandad los precios que se perdió (auto: si está el aviso del subidor)
 /oro comision 5            porcentaje que se queda la subasta
 /oro tabla                 precios guardados de la lista vigilada, para copiarlos a Excel
 /oro vigilar [enlace]      guarda también los precios de ese objeto (Mayús+clic en él); sin enlace, lista tus extras
@@ -174,6 +201,7 @@ La sesión empieza al entrar con el personaje (un `/reload` no la reinicia). Pas
 
   El primer comando ejecuta las pruebas. El segundo crea `dist-addon/OroHermandad.zip`, con los saltos de línea normalizados para que salga igual en Windows y en Linux. Git ignora esa carpeta: los ZIP generados no se suben al repositorio. No va en `public/`, que es la carpeta de la web: lo que hay ahí se publica al desplegar.
 - `Engine.lua` y `Spec.lua` son lógica pura, sin API del juego. Cada modo de `Engine.MODES` define todas sus banderas (`Engine.MODE_KEYS`) y un límite para cada sección (también `spec`): el motor nunca pregunta por el nombre del modo, así que un modo nuevo no puede comportarse sin querer como otro. `Spec.lua` (Especular v1) debe dar los mismos enteros que `src/especular.mjs` del panel de la hermandad: el contrato es `test-vectors/especular-v1.json`.
-- `History.lua` es el lado del juego del historial: lee los escaneos de Auctionator por tandas, importa su historial, aprende los depósitos y escribe `OroHermandadHist` con el formato del contrato 2 (cadenas `d,lo,hi,last,qty,scans,src` por día y `t,lo,qty,qty5` por escaneo).
+- `History.lua` es el lado del juego del historial: lee los escaneos de Auctionator por tandas, importa su historial, aprende los depósitos y escribe `OroHermandadHist` con el formato del contrato 2 (cadenas `d,lo,hi,last,qty,scans,src` por día y `t,lo,qty,qty5` por escaneo). Desde la 0.4.0 es el esquema 2: cada mercado lleva además `self` (los códigos de tus personajes) y `obs` (lo de los compañeros, con su tope de 2 MB aparte); el esquema 1 se lee sin perder nada.
+- `Relay.lua` son los precios compartidos (relay-v1): mensajes `P3` (resumen de un escaneo entero, en partes de 250 bytes como mucho) y `Q3` (petición de la puesta al día), con el mismo prefijo `OroHerm` y la cola de `Guild.lua` (una subcola de menos prioridad que nunca envía en combate, instancias ni con restricciones). El código de cada personaje es FNV-1a de 32 bits de `reino de la hermandad/hermandad|nombre-reino` en minúsculas, calculado por quien recibe con el remitente que da el servidor. Las pruebas `test-lua/test_relay.lua` hacen hablar entre sí a varios clientes simulados (y a la 0.3.1 y la 0.2.0, que ignoran los mensajes nuevos) y usan los datos compartidos con el subidor y el panel de `test-lua/fixtures/relay/`.
 - `test-lua/wow_stub.lua` simula el cliente moderno de Forever: sin `GetItemInfo` global, con `C_TradeSkillUI`, bolsa de componentes, banco por pestañas, roster, escaneos de Auctionator con filas como las reales, su historial interno y los depósitos de `C_AuctionHouse`.
 - El flujo `.github/workflows/oro-hermandad.yml` ejecuta las pruebas, construye el zip y lo deja en la ejecución como artefacto `OroHermandad.zip` (pestaña **Actions**, «Comprobar addon Oro de Hermandad»). Cada versión se publica además en Releases con la etiqueta `oro-hermandad-vX.Y.Z` y el zip adjunto: al publicar una nueva, actualiza el enlace del paso 2 de `INSTALAR_ORO_DE_HERMANDAD.md`.

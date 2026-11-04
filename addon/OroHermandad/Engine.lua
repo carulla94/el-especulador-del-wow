@@ -414,7 +414,9 @@ end
 --   budget = presupuesto para chollos en cobre (cada compra usa como mucho el 25 %), copperValues = false si la
 --   subasta no admite cobre (se rebaja 1 plata en vez de 1 cobre), launch = día de lanzamiento (solo pruebas),
 --   items = {[id] = {records = días (History.RecentRecords), point = último escaneo propio {t, lo, qty, qty5},
---            vendor = precio de mercader, dep = depósito de 24 h por unidad (nil = se estima), cat, name}},
+--            vendor = precio de mercader, dep = depósito de 24 h por unidad (nil = se estima), cat, name,
+--            guild = precios de compañeros de la hermandad (Relay.lua): {{id = código, records, point}, ...} o nil,
+--            guildKey = tabla que cambia cuando cambian guild o records}},
 --   books = {[id] = {at = hora, lots = {{precio, cantidad}, ...}}}: lo que la subasta mostró al buscar el objeto.
 Engine.SPEC_STALE_SECONDS = 2 * 3600 -- precio actual: un escaneo propio de hace 2 h como mucho
 Engine.BOOK_SECONDS = 300            -- lo visto al buscar un objeto en la subasta vale 5 min
@@ -423,24 +425,83 @@ Engine.SPEC_DEPOSIT_DURATION = 2     -- depósito de la duración 2 (24 h), la d
 local CONF_RANK = {BAJA = 1, MEDIA = 2, ALTA = 3}
 local function isInt(x, lo, hi) return finite(x) and x >= lo and x <= hi and x == floor(x) end
 
+-- Compañeros que se aceptan para un objeto: en los días de T-14 a T en los que tú y él tenéis precio, la mediana del
+-- suyo (punto medio de lo y hi de cada día) debe estar entre la mitad y el doble de la tuya. Sin días en común, vale.
+local function acceptedMates(own, guild, T)
+  local mine = {}
+  for _, r in ipairs(own) do
+    if type(r) == "table" and isInt(r.d, T - Spec.WINDOW, T) then mine[r.d] = floor((r.lo + r.hi) / 2) end
+  end
+  local out = {}
+  for _, mate in ipairs(guild) do
+    if type(mate) == "table" and type(mate.records) == "table" then
+      local a, b = {}, {}
+      for _, r in ipairs(mate.records) do
+        local o = type(r) == "table" and mine[r.d]
+        if o then a[#a + 1] = o; b[#b + 1] = floor((r.lo + r.hi) / 2) end
+      end
+      local ok = true
+      if #a > 0 then
+        local m, o = Spec.Median(b), Spec.Median(a)
+        ok = m * 2 >= o and m <= o * 2
+      end
+      if ok then out[#out + 1] = mate end
+    end
+  end
+  return out
+end
+
 -- Días, precio normal y balances de un objeto: se recalculan solo si cambian sus días (Core reutiliza la misma
--- tabla de registros mientras no llegue otro escaneo) o el día de hoy.
+-- tabla de registros mientras no llegue otro escaneo) o el día de hoy. Con precios de compañeros aceptados, cada día
+-- junta tus registros y los suyos (Spec.BuildDays: un observador por persona, con la protección contra valores raros
+-- desde 3) y, si alguno cae en la ventana de 14 días, el precio normal sigue la regla del panel (Fiable pide 2
+-- personas). Sin compañeros aceptados, exactamente lo de siempre.
 local baseMemo = setmetatable({}, {__mode = "k"})
 local function specBase(entry, T)
   if type(entry) ~= "table" or type(entry.records) ~= "table" then return nil end
-  local memo = baseMemo[entry.records]
+  local guild = type(entry.guild) == "table" and #entry.guild > 0 and entry.guild or nil
+  local memoKey = entry.records
+  if guild then memoKey = type(entry.guildKey) == "table" and entry.guildKey or guild end
+  local memo = baseMemo[memoKey]
   if memo and memo.T == T then return memo end
-  local days = Spec.DaysFromRecords(entry.records)
-  memo = {T = T, days = days, b = Spec.Baseline(days, T), deltas = Spec.Deltas(days, T)}
-  baseMemo[entry.records] = memo
+  local mates = guild and isInt(T, 0, Spec.DAY_MAX) and acceptedMates(entry.records, guild, T) or {}
+  local days, b
+  if #mates == 0 then
+    days = Spec.DaysFromRecords(entry.records)
+    b = Spec.Baseline(days, T)
+  else
+    local byDay, usesGuild = {}, false
+    local function put(r, id)
+      if type(r) ~= "table" or not isInt(r.d, 0, Spec.DAY_MAX) then return end
+      byDay[r.d] = byDay[r.d] or {}
+      table.insert(byDay[r.d], {lo = r.lo, hi = r.hi, last = r.last, qty = r.qty, scans = r.scans, src = r.src, id = id})
+    end
+    for _, r in ipairs(entry.records) do put(r, "self") end
+    for _, mate in ipairs(mates) do
+      for _, r in ipairs(mate.records) do
+        put(r, tostring(mate.id))
+        if type(r) == "table" and isInt(r.d, T - Spec.WINDOW, T - 1) then usesGuild = true end
+      end
+    end
+    days = Spec.BuildDays(byDay)
+    b = Spec.Baseline(days, T, usesGuild and {cloud = true} or nil)
+  end
+  memo = {T = T, days = days, b = b, deltas = Spec.Deltas(days, T), mates = mates}
+  baseMemo[memoKey] = memo
   return memo
 end
 
 -- Precio actual para Especular y desde cuándo se sabe (nil si no se sabe la hora: así no hay chollo).
 -- 1. Lo que mostró la subasta al buscar el objeto hace 5 min o menos (precio confirmado, con sus lotes).
--- 2. El último escaneo propio de hace 2 h o menos (no cuenta tus subastas; trae las unidades cerca del mínimo).
+-- 2. El escaneo más nuevo de hace 2 h o menos, tuyo o de un compañero aceptado (a igual hora, el tuyo; no cuenta tus
+--    subastas; trae las unidades cerca del mínimo). El de un compañero devuelve src "guild".
 -- 3. El precio de hoy de Auctionator, sin hora.
-local function specPrice(ctx, spec, id, entry)
+local function freshPoint(point, t)
+  return type(point) == "table" and finite(t) and isInt(point.t, 1, Spec.TIME_MAX) and t - point.t <= Engine.SPEC_STALE_SECONDS
+    and point.t <= t + 300 and isInt(point.lo, 1, Spec.PRICE_MAX)
+end
+
+local function specPrice(ctx, spec, id, entry, mates)
   local t = spec.now
   local book = type(spec.books) == "table" and spec.books[id] or nil
   if type(book) == "table" and finite(t) and finite(book.at) and t - book.at <= Engine.BOOK_SECONDS and book.at <= t + 60
@@ -449,10 +510,13 @@ local function specPrice(ctx, spec, id, entry)
     if first == nil then return nil end -- la subasta no tiene nada a la venta
     if type(first) == "table" and isInt(first[1], 1, Spec.PRICE_MAX) then return first[1], book.at, nil, book.lots end
   end
-  local point = entry.point
-  if type(point) == "table" and finite(t) and isInt(point.t, 1, Spec.TIME_MAX) and t - point.t <= Engine.SPEC_STALE_SECONDS
-     and point.t <= t + 300 and isInt(point.lo, 1, Spec.PRICE_MAX) then
-    return point.lo, point.t, isInt(point.qty5, 0, Spec.QTY_MAX) and point.qty5 or nil
+  local point, src = nil, nil
+  if freshPoint(entry.point, t) then point, src = entry.point, "own" end
+  for _, mate in ipairs(mates or {}) do
+    if freshPoint(mate.point, t) and (not point or mate.point.t > point.t) then point, src = mate.point, "guild" end
+  end
+  if point then
+    return point.lo, point.t, isInt(point.qty5, 0, Spec.QTY_MAX) and point.qty5 or nil, nil, src
   end
   local price, age = quote(ctx, id)
   if price and age == 0 then
@@ -525,10 +589,10 @@ local function specItem(ctx, spec, id)
   local entry = type(spec.items) == "table" and spec.items[id] or nil
   local base = specBase(entry, spec.T)
   if not base then return nil end
-  local p, at, q5, lots = specPrice(ctx, spec, id, entry)
+  local p, at, q5, lots, src = specPrice(ctx, spec, id, entry, base.mates)
   local a = Spec.Assess(base.b, p, spec.T, {launch = spec.launch})
   return {id = id, entry = entry, b = base.b, a = a, p = p, at = at, q5 = q5, lots = lots, deltas = base.deltas,
-          days = base.days}
+          days = base.days, src = src, mates = base.mates}
 end
 
 local function useSpec(ctx, mode)
@@ -638,8 +702,17 @@ local function specStatus(stats, mode)
     parts[#parts + 1] = (stats.budgetShort == 1 and "1 chollo no cabe" or (stats.budgetShort .. " chollos no caben"))
       .. " en tu presupuesto (" .. Money(stats.budget) .. "): súbelo con /oro especular presupuesto <oro>."
   end
+  if (stats.mates or 0) > 0 then
+    parts[#parts + 1] = "Precios compartidos por la hermandad: " .. plural(stats.mates, "compañero", "compañeros") .. " en 14 días."
+  end
   if stats.ready > 0 then parts[#parts + 1] = "Recuerda: " .. Spec.Texts.CAVEAT .. "." end
   return {level = level, text = table.concat(parts, " ")}
+end
+
+-- «Precio de hace 10 min.» o, si el precio es de un compañero (nunca se dice quién), «Un compañero lo vio hace 10 min.».
+local function whenText(info, now)
+  if info.src == "guild" then return " Un compañero lo vio " .. agoText(now - info.at) .. "." end
+  return " Precio de " .. agoText(now - info.at) .. "."
 end
 
 -- Filas de la sección Especular (chollos y «Vende ahora»), estado y balance. available y bankLeft: lo que llevas y
@@ -650,9 +723,18 @@ local function specRows(ctx, mode, analysis, available, bankLeft, sellable, cut)
                            budgetShort = 0, budget = specBudget(spec)}
   stats.guard = isInt(spec.T, 0, Spec.DAY_MAX) and spec.T < (spec.launch or Spec.LAUNCH) + Spec.GUARD_DAYS
   local candidates, checks = {}, {}
+  local mateIDs, mateCount = {}, 0
   for _, info in ipairs(analysis.list) do
     local b, a = info.b, info.a
     stats.tracked = stats.tracked + 1
+    for _, mate in ipairs(info.mates or {}) do
+      local key = tostring(mate.id)
+      if not mateIDs[key] then
+        for _, r in ipairs(mate.records) do
+          if type(r) == "table" and isInt(r.d, spec.T - Spec.WINDOW, spec.T) then mateIDs[key] = true; mateCount = mateCount + 1; break end
+        end
+      end
+    end
     stats.maxN = max(stats.maxN, b.n or 0)
     if (b.n or 0) >= Spec.MIN_DAYS then
       stats.ready = stats.ready + 1
@@ -666,7 +748,11 @@ local function specRows(ctx, mode, analysis, available, bankLeft, sellable, cut)
     if a.verdict == "CHOLLO" and info.at and (CONF_RANK[b.conf] or 0) >= (CONF_RANK[mode.specMinConf] or 3) then
       info.flip = specFlip(ctx, spec, info.id, info, stats.budget)
       local best = unknownDepth(ctx, spec, info.id, info, info.flip, stats.budget)
-      if info.flip.accept then
+      if info.src == "guild" then
+        -- Con el precio de un compañero nunca se compra directamente: hay que mirarlo en la subasta (al abrir el
+        -- objeto, History.CaptureBook trae lo que hay a la venta y la cuenta se hace con eso).
+        if info.flip.accept or (best and best.accept) then checks[#checks + 1] = info end
+      elseif info.flip.accept then
         candidates[#candidates + 1] = info
       elseif best and best.accept then
         checks[#checks + 1] = info
@@ -676,6 +762,7 @@ local function specRows(ctx, mode, analysis, available, bankLeft, sellable, cut)
     end
   end
   stats.falling = stats.trendKnown >= 3 and stats.down * 2 >= stats.trendKnown
+  stats.mates = mateCount
 
   -- Chollos: de más a menos ganancia, sin pasar entre todos del presupuesto.
   table.sort(candidates, function(x, y)
@@ -690,7 +777,7 @@ local function specRows(ctx, mode, analysis, available, bankLeft, sellable, cut)
       left = left - flip.cost
       local name = specName(ctx, info.id, info.entry)
       local when = info.lots and (" Precio confirmado en la subasta " .. agoText(spec.now - info.at) .. ".")
-        or (" Precio de " .. agoText(spec.now - info.at) .. ".")
+        or whenText(info, spec.now)
       rows[#rows + 1] = {kind = "flip", icon = info.id, value = flip.profit,
         title = string.format("Chollo: %s a %s (%s %% por debajo de lo normal)", name, Money(info.p), Spec.Texts.Pct(info.a.dBp)),
         detail = Spec.Texts.Flip(flip, Money) .. "." .. when .. " " .. Spec.Texts.Conf(info.b) .. ".",
@@ -705,11 +792,17 @@ local function specRows(ctx, mode, analysis, available, bankLeft, sellable, cut)
   -- lista de la compra lleva 1 para que «Comprar lo que falta» lo busque.
   for _, info in ipairs(checks) do
     local name = specName(ctx, info.id, info.entry)
+    local detail
+    if info.src == "guild" then
+      detail = string.format("Un compañero lo vio a %s %s: ábrelo en la pestaña Comprar de la subasta y el addon calculará "
+        .. "la compra con lo que hay a la venta. ", Money(info.p), agoText(spec.now - info.at)) .. Spec.Texts.Conf(info.b) .. "."
+    else
+      detail = "Tu escaneo no dice cuántas hay a ese precio: ábrelo en la pestaña Comprar de la subasta y el addon calculará "
+        .. "la compra con lo que hay a la venta. Precio de " .. agoText(spec.now - info.at) .. ". " .. Spec.Texts.Conf(info.b) .. "."
+    end
     rows[#rows + 1] = {kind = "check", icon = info.id, value = 0,
       title = string.format("Posible chollo: %s a %s (%s %% por debajo de lo normal)", name, Money(info.p), Spec.Texts.Pct(info.a.dBp)),
-      detail = "Tu escaneo no dice cuántas hay a ese precio: ábrelo en la pestaña Comprar de la subasta y el addon calculará "
-        .. "la compra con lo que hay a la venta. Precio de " .. agoText(spec.now - info.at) .. ". " .. Spec.Texts.Conf(info.b) .. ".",
-      shopping = {{id = info.id, count = 1}}}
+      detail = detail, shopping = {{id = info.id, count = 1}}}
   end
 
   -- Vende ahora: precio alto y lo tienes (bolsas o banco, sin lo ligado ni lo que no se vende).
@@ -728,7 +821,7 @@ local function specRows(ctx, mode, analysis, available, bankLeft, sellable, cut)
           if inBank == 0 then where = ""
           elseif inBags == 0 then where = " Está todo en el banco: sácalo primero."
           else where = string.format(" Llevas %d y tienes %d en el banco.", inBags, inBank) end
-          local when = info.at and (" Precio de " .. agoText(spec.now - info.at) .. ".") or " Precio de hoy."
+          local when = info.at and whenText(info, spec.now) or " Precio de hoy."
           rows[#rows + 1] = {kind = "spike", icon = id, value = unitNet * count,
             title = string.format("Vende ahora %d× %s (%s %% por encima de lo normal)", count, name, Spec.Texts.Pct(info.a.dBp)),
             detail = string.format("≈ %s en la subasta, ya descontada la comisión (hoy %s; lo normal, %s).", Money(unitNet * count),
@@ -800,7 +893,12 @@ function Engine.SpecLines(ctx, id)
     local budget = specBudget(ctx.spec)
     local flip = specFlip(ctx, ctx.spec, id, info, budget)
     local best = unknownDepth(ctx, ctx.spec, id, info, flip, budget)
-    if flip.accept then
+    if info.src == "guild" and (flip.accept or (best and best.accept)) then
+      lines[#lines + 1] = {left = string.format("Posible chollo: un compañero lo vio a %s %s; ábrelo en la pestaña Comprar para confirmarlo",
+        Money(info.p), agoText(ctx.spec.now - info.at)), color = GREEN}
+    elseif info.src == "guild" then
+      lines[#lines + 1] = {left = Spec.Texts.Flip(best or flip, Money), color = GREY}
+    elseif flip.accept then
       lines[#lines + 1] = {left = string.format("Chollo: compra hasta %d a %s como máximo; no revendas por debajo de %s",
         flip.units, Money(flip.maxBuy), Money(flip.breakEven)), color = GREEN}
     elseif best and best.accept then

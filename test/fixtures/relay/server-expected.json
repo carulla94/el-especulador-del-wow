@@ -1,0 +1,695 @@
+{
+ "about": "Expected server state (SPEC.md section 6). Member ids: 1 = uploader of upload-schema1/upload-schema2 (account A), 2 = uploader of upload-schema2-second (account B). Relayed slots start at 1000000001 in the order new hashes appear (observers sorted by obs inside an upload). persons: canonical person ids kept by dayValue, ascending. Aggregates are guild_day_agg rows (v, obs = observers kept, lo/hi of kept persons, qty). membersToday: baseline(series, T, {cloud: true}).k per item of GritodeGuerra-Alliance. Scenario: upload-schema1 at nowLegacy by member 1 (with the 0.3 code, then the DO is migrated), upload-schema2 at now by member 1, upload-schema2-second at nowSecond by member 2. firstOnlyEqualsAfterFirst: a fresh database that only receives upload-schema2 gets exactly the aggregates of afterFirst.",
+ "steps": [
+  {
+   "upload": "upload-schema1.json",
+   "member": 1,
+   "at": 1796396400
+  },
+  {
+   "upload": "upload-schema2.json",
+   "member": 1,
+   "at": 1796479200
+  },
+  {
+   "upload": "upload-schema2-second.json",
+   "member": 2,
+   "at": 1796479800
+  }
+ ],
+ "freshnessText": {
+  "afterLegacy": "1 persona aporta (1 sube)",
+  "afterFirst": "4 personas aportan (1 sube)",
+  "afterSecond": "4 personas aportan (2 suben)"
+ },
+ "firstOnlyEqualsAfterFirst": true,
+ "afterLegacy": {
+  "T": 2529,
+  "now": 1796396400,
+  "bindings": {},
+  "freshness": {
+   "GritodeGuerra-Alliance": {
+    "observers": 1,
+    "contributors": 1
+   },
+   "GritodeGuerra-Horde": {
+    "observers": 1,
+    "contributors": 1
+   }
+  },
+  "membersToday": {
+   "2770": 1,
+   "2772": 1
+  },
+  "aggregates": {
+   "GritodeGuerra-Alliance": {
+    "2770": {
+     "2526": {
+      "v": 40,
+      "obs": 1,
+      "lo": 40,
+      "hi": 40,
+      "qty": 900,
+      "persons": [
+       1
+      ]
+     },
+     "2527": {
+      "v": 42,
+      "obs": 1,
+      "lo": 42,
+      "hi": 42,
+      "qty": 850,
+      "persons": [
+       1
+      ]
+     },
+     "2528": {
+      "v": 40,
+      "obs": 1,
+      "lo": 39,
+      "hi": 41,
+      "qty": 880,
+      "persons": [
+       1
+      ]
+     }
+    },
+    "2772": {
+     "2523": {
+      "v": 150,
+      "obs": 1,
+      "lo": 140,
+      "hi": 160,
+      "qty": 500,
+      "persons": [
+       1
+      ]
+     },
+     "2524": {
+      "v": 150,
+      "obs": 1,
+      "lo": 150,
+      "hi": 150,
+      "qty": 400,
+      "persons": [
+       1
+      ]
+     },
+     "2525": {
+      "v": 148,
+      "obs": 1,
+      "lo": 148,
+      "hi": 148,
+      "qty": 420,
+      "persons": [
+       1
+      ]
+     },
+     "2526": {
+      "v": 155,
+      "obs": 1,
+      "lo": 155,
+      "hi": 155,
+      "qty": 380,
+      "persons": [
+       1
+      ]
+     },
+     "2527": {
+      "v": 152,
+      "obs": 1,
+      "lo": 152,
+      "hi": 152,
+      "qty": 410,
+      "persons": [
+       1
+      ]
+     },
+     "2528": {
+      "v": 150,
+      "obs": 1,
+      "lo": 149,
+      "hi": 151,
+      "qty": 430,
+      "persons": [
+       1
+      ]
+     }
+    }
+   },
+   "GritodeGuerra-Horde": {
+    "2589": {
+     "2528": {
+      "v": 30,
+      "obs": 1,
+      "lo": 30,
+      "hi": 30,
+      "qty": 2000,
+      "persons": [
+       1
+      ]
+     }
+    }
+   }
+  }
+ },
+ "afterFirst": {
+  "T": 2530,
+  "now": 1796479200,
+  "bindings": {
+   "27e0ee58": {
+    "slot": 1,
+    "member": 1
+   },
+   "47da174e": {
+    "slot": 1000000001,
+    "member": null
+   },
+   "556e986d": {
+    "slot": 1000000002,
+    "member": null
+   },
+   "631b8919": {
+    "slot": 1000000003,
+    "member": null
+   },
+   "65c8ae44": {
+    "slot": 1,
+    "member": 1
+   }
+  },
+  "freshness": {
+   "GritodeGuerra-Alliance": {
+    "observers": 4,
+    "contributors": 1
+   },
+   "GritodeGuerra-Horde": {
+    "observers": 1,
+    "contributors": 1
+   }
+  },
+  "membersToday": {
+   "2770": 3,
+   "2772": 3,
+   "12365": 2,
+   "13446": 1
+  },
+  "aggregates": {
+   "GritodeGuerra-Alliance": {
+    "2770": {
+     "2526": {
+      "v": 40,
+      "obs": 1,
+      "lo": 40,
+      "hi": 40,
+      "qty": 900,
+      "persons": [
+       1
+      ]
+     },
+     "2527": {
+      "v": 41,
+      "obs": 2,
+      "lo": 41,
+      "hi": 42,
+      "qty": 825,
+      "persons": [
+       1,
+       1000000001
+      ]
+     },
+     "2528": {
+      "v": 42,
+      "obs": 2,
+      "lo": 39,
+      "hi": 43,
+      "qty": 790,
+      "persons": [
+       1,
+       1000000003
+      ]
+     },
+     "2529": {
+      "v": 40,
+      "obs": 1,
+      "lo": 40,
+      "hi": 40,
+      "qty": 860,
+      "persons": [
+       1
+      ]
+     },
+     "2530": {
+      "v": 39,
+      "obs": 2,
+      "lo": 38,
+      "hi": 40,
+      "qty": 860,
+      "persons": [
+       1,
+       1000000001
+      ]
+     }
+    },
+    "2772": {
+     "2523": {
+      "v": 150,
+      "obs": 1,
+      "lo": 140,
+      "hi": 160,
+      "qty": 500,
+      "persons": [
+       1
+      ]
+     },
+     "2524": {
+      "v": 150,
+      "obs": 1,
+      "lo": 150,
+      "hi": 150,
+      "qty": 400,
+      "persons": [
+       1
+      ]
+     },
+     "2525": {
+      "v": 148,
+      "obs": 1,
+      "lo": 148,
+      "hi": 148,
+      "qty": 420,
+      "persons": [
+       1
+      ]
+     },
+     "2526": {
+      "v": 155,
+      "obs": 1,
+      "lo": 155,
+      "hi": 155,
+      "qty": 380,
+      "persons": [
+       1
+      ]
+     },
+     "2527": {
+      "v": 152,
+      "obs": 2,
+      "lo": 152,
+      "hi": 153,
+      "qty": 405,
+      "persons": [
+       1,
+       1000000001
+      ]
+     },
+     "2528": {
+      "v": 150,
+      "obs": 1,
+      "lo": 149,
+      "hi": 151,
+      "qty": 430,
+      "persons": [
+       1
+      ]
+     },
+     "2529": {
+      "v": 147,
+      "obs": 3,
+      "lo": 147,
+      "hi": 148,
+      "qty": 430,
+      "persons": [
+       1,
+       1000000001,
+       1000000002
+      ]
+     },
+     "2530": {
+      "v": 148,
+      "obs": 3,
+      "lo": 146,
+      "hi": 150,
+      "qty": 425,
+      "persons": [
+       1,
+       1000000001,
+       1000000002
+      ]
+     }
+    },
+    "12365": {
+     "2529": {
+      "v": 299,
+      "obs": 2,
+      "lo": 298,
+      "hi": 300,
+      "qty": 122,
+      "persons": [
+       1,
+       1000000002
+      ]
+     },
+     "2530": {
+      "v": 302,
+      "obs": 2,
+      "lo": 300,
+      "hi": 310,
+      "qty": 116,
+      "persons": [
+       1,
+       1000000002
+      ]
+     }
+    },
+    "13446": {
+     "2527": {
+      "v": 2500,
+      "obs": 1,
+      "lo": 2500,
+      "hi": 2500,
+      "qty": 40,
+      "persons": [
+       1000000001
+      ]
+     },
+     "2529": {
+      "v": 2450,
+      "obs": 1,
+      "lo": 2450,
+      "hi": 2450,
+      "qty": 45,
+      "persons": [
+       1000000001
+      ]
+     },
+     "2530": {
+      "v": 2400,
+      "obs": 1,
+      "lo": 2400,
+      "hi": 2400,
+      "qty": 50,
+      "persons": [
+       1000000001
+      ]
+     }
+    }
+   },
+   "GritodeGuerra-Horde": {
+    "2589": {
+     "2528": {
+      "v": 30,
+      "obs": 1,
+      "lo": 30,
+      "hi": 30,
+      "qty": 2000,
+      "persons": [
+       1
+      ]
+     },
+     "2530": {
+      "v": 28,
+      "obs": 1,
+      "lo": 28,
+      "hi": 28,
+      "qty": 2100,
+      "persons": [
+       1
+      ]
+     }
+    }
+   }
+  }
+ },
+ "afterSecond": {
+  "T": 2530,
+  "now": 1796479800,
+  "bindings": {
+   "27e0ee58": {
+    "slot": 1,
+    "member": 1
+   },
+   "47da174e": {
+    "slot": 1000000001,
+    "member": null
+   },
+   "556e986d": {
+    "slot": 1000000002,
+    "member": 2
+   },
+   "631b8919": {
+    "slot": 1000000003,
+    "member": null
+   },
+   "65c8ae44": {
+    "slot": 1,
+    "member": 1
+   }
+  },
+  "freshness": {
+   "GritodeGuerra-Alliance": {
+    "observers": 4,
+    "contributors": 2
+   },
+   "GritodeGuerra-Horde": {
+    "observers": 1,
+    "contributors": 1
+   }
+  },
+  "membersToday": {
+   "2770": 3,
+   "2772": 3,
+   "12365": 2,
+   "13446": 1
+  },
+  "aggregates": {
+   "GritodeGuerra-Alliance": {
+    "2770": {
+     "2526": {
+      "v": 40,
+      "obs": 1,
+      "lo": 40,
+      "hi": 40,
+      "qty": 900,
+      "persons": [
+       1
+      ]
+     },
+     "2527": {
+      "v": 41,
+      "obs": 2,
+      "lo": 41,
+      "hi": 42,
+      "qty": 825,
+      "persons": [
+       1,
+       1000000001
+      ]
+     },
+     "2528": {
+      "v": 42,
+      "obs": 2,
+      "lo": 39,
+      "hi": 43,
+      "qty": 790,
+      "persons": [
+       1,
+       1000000003
+      ]
+     },
+     "2529": {
+      "v": 40,
+      "obs": 1,
+      "lo": 40,
+      "hi": 40,
+      "qty": 860,
+      "persons": [
+       1
+      ]
+     },
+     "2530": {
+      "v": 37,
+      "obs": 4,
+      "lo": 36,
+      "hi": 40,
+      "qty": 860,
+      "persons": [
+       1,
+       2,
+       1000000001,
+       1000000003
+      ]
+     }
+    },
+    "2772": {
+     "2523": {
+      "v": 150,
+      "obs": 1,
+      "lo": 140,
+      "hi": 160,
+      "qty": 500,
+      "persons": [
+       1
+      ]
+     },
+     "2524": {
+      "v": 150,
+      "obs": 1,
+      "lo": 150,
+      "hi": 150,
+      "qty": 400,
+      "persons": [
+       1
+      ]
+     },
+     "2525": {
+      "v": 148,
+      "obs": 1,
+      "lo": 148,
+      "hi": 148,
+      "qty": 420,
+      "persons": [
+       1
+      ]
+     },
+     "2526": {
+      "v": 155,
+      "obs": 1,
+      "lo": 155,
+      "hi": 155,
+      "qty": 380,
+      "persons": [
+       1
+      ]
+     },
+     "2527": {
+      "v": 152,
+      "obs": 2,
+      "lo": 152,
+      "hi": 153,
+      "qty": 405,
+      "persons": [
+       1,
+       1000000001
+      ]
+     },
+     "2528": {
+      "v": 150,
+      "obs": 1,
+      "lo": 149,
+      "hi": 151,
+      "qty": 430,
+      "persons": [
+       1
+      ]
+     },
+     "2529": {
+      "v": 147,
+      "obs": 3,
+      "lo": 147,
+      "hi": 148,
+      "qty": 430,
+      "persons": [
+       1,
+       2,
+       1000000001
+      ]
+     },
+     "2530": {
+      "v": 148,
+      "obs": 3,
+      "lo": 146,
+      "hi": 150,
+      "qty": 425,
+      "persons": [
+       1,
+       2,
+       1000000001
+      ]
+     }
+    },
+    "12365": {
+     "2529": {
+      "v": 299,
+      "obs": 2,
+      "lo": 298,
+      "hi": 300,
+      "qty": 122,
+      "persons": [
+       1,
+       2
+      ]
+     },
+     "2530": {
+      "v": 302,
+      "obs": 2,
+      "lo": 300,
+      "hi": 310,
+      "qty": 116,
+      "persons": [
+       1,
+       2
+      ]
+     }
+    },
+    "13446": {
+     "2527": {
+      "v": 2500,
+      "obs": 1,
+      "lo": 2500,
+      "hi": 2500,
+      "qty": 40,
+      "persons": [
+       1000000001
+      ]
+     },
+     "2529": {
+      "v": 2450,
+      "obs": 1,
+      "lo": 2450,
+      "hi": 2450,
+      "qty": 45,
+      "persons": [
+       1000000001
+      ]
+     },
+     "2530": {
+      "v": 2400,
+      "obs": 1,
+      "lo": 2400,
+      "hi": 2400,
+      "qty": 50,
+      "persons": [
+       1000000001
+      ]
+     }
+    }
+   },
+   "GritodeGuerra-Horde": {
+    "2589": {
+     "2528": {
+      "v": 30,
+      "obs": 1,
+      "lo": 30,
+      "hi": 30,
+      "qty": 2000,
+      "persons": [
+       1
+      ]
+     },
+     "2530": {
+      "v": 28,
+      "obs": 1,
+      "lo": 28,
+      "hi": 28,
+      "qty": 2100,
+      "persons": [
+       1
+      ]
+     }
+    }
+   }
+  }
+ }
+}

@@ -689,7 +689,8 @@ test("the market summary equals especular.mjs applied to the raw uploads of thre
   const summary = await response.json(), expected = expectedMarket(month, T0);
   assert.deepEqual([summary.market, summary.T, summary.date, summary.dayOfLaunch, summary.phase, summary.banner, summary.cutBp, summary.cutMembers, summary.rules],
     [MARKET, T0, "2026-12-05", 32, "normal", null, 550, 2, "especular-v1"]);
-  assert.deepEqual(summary.freshness, {lastUploadAt: new Date(f.nowSec * 1000).toISOString(), lastUploadBy: "Ana", contributors: 3, contributorsToday: 3});
+  assert.deepEqual(summary.freshness, {lastUploadAt: new Date(f.nowSec * 1000).toISOString(), lastUploadBy: "Ana", contributors: 3, contributorsToday: 3,
+    observers: 3, observersToday: 3}, "three members who upload are three persons");
   assert.deepEqual(summary.items.map(e => e.id), [2772, 2589, 2592, 14047, 13446, 200500], "category order, then id");
   for (const entry of summary.items) {
     const x = expected.get(entry.id), {b, a, d} = x;
@@ -852,7 +853,7 @@ test("CSV exports open in Spanish Excel: BOM, semicolons, decimal commas, CRLF a
   assert.equal(text[0], "\uFEFF");
   assert.ok(text.endsWith("\r\n") && !text.replace(/\r\n/g, "").includes("\n"));
   const lines = text.slice(1).split("\r\n").slice(0, -1);
-  assert.equal(lines[0], "Objeto;ID;Categoría;Hoy (oro);Más bajo hoy (oro);Visto por;Normal 14 d (oro);Δ1d (%);Δ7d (%);Mín 14 d (oro);Máx 14 d (oro);Oferta típica;Miembros;Días con datos;Confianza;Veredicto");
+  assert.equal(lines[0], "Objeto;ID;Categoría;Hoy (oro);Más bajo hoy (oro);Visto por;Normal 14 d (oro);Δ1d (%);Δ7d (%);Mín 14 d (oro);Máx 14 d (oro);Oferta típica;Personas;Días con datos;Confianza;Veredicto");
   assert.equal(lines.length, 1 + month.specs.length);
   const summary = await (await f.market(owner)).json(), lino = summary.items.find(e => e.id === 2589);
   const row = lines.find(line => line.startsWith("Paño de lino;")).split(";");
@@ -865,7 +866,7 @@ test("CSV exports open in Spanish Excel: BOM, semicolons, decimal commas, CRLF a
   const dailyText = new TextDecoder("utf-8", {ignoreBOM: true}).decode(await daily.arrayBuffer());
   assert.equal(dailyText[0], "\uFEFF");
   const dailyLines = dailyText.slice(1).split("\r\n").slice(0, -1);
-  assert.equal(dailyLines[0], "Fecha;Día;Objeto;ID;Categoría;Valor (oro);Mín (oro);Máx (oro);Cantidad;Miembros");
+  assert.equal(dailyLines[0], "Fecha;Día;Objeto;ID;Categoría;Valor (oro);Mín (oro);Máx (oro);Cantidad;Personas");
   const rows = f.gdb.prepare("SELECT count(*) AS n FROM guild_day_agg WHERE day>=?").get(T0 - 13).n;
   assert.equal(dailyLines.length, 1 + rows);
   const firstRow = dailyLines[1].split(";"), agg = f.gdb.prepare("SELECT * FROM guild_day_agg WHERE day=? AND item_id=2772").get(T0 - 13);

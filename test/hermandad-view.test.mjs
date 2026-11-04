@@ -666,7 +666,7 @@ test("against the real market: CSV of the view and of one item equal the server 
   assert.equal(H.weekdayBars(detail.weekday).shown, false);
   assert.match(H.weekdayBars(detail.weekday).text, /^Faltan \d semanas? de datos/);
   for (const e of summary.items) assert.doesNotMatch(svgText(H.sparklineSVG(e.spark)), /NaN/);
-  assert.equal(H.freshnessLine(summary.freshness, summary.dayOfLaunch, f.nowSec * 1000), "3 miembros · último envío hace un momento · día 28 desde el lanzamiento");
+  assert.equal(H.freshnessLine(summary.freshness, summary.dayOfLaunch, f.nowSec * 1000), "3 personas aportan (3 suben) · último envío hace un momento · día 28 desde el lanzamiento");
 });
 
 test("against the real market: 'Qué compensa' works from the summary alone and agrees with its chollo and its item", async t => {

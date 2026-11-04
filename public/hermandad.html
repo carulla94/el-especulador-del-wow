@@ -122,7 +122,7 @@
                 <th scope="col" data-sort="range" class="num"><button type="button">Mín – máx 14 d <span class="sort-mark" aria-hidden="true"></span></button></th>
                 <th scope="col">28 días</th>
                 <th scope="col" data-sort="Q" class="num"><button type="button" title="Unidades a la venta en un día normal">Oferta típica <span class="sort-mark" aria-hidden="true"></span></button></th>
-                <th scope="col" data-sort="members" class="num"><button type="button" title="Miembros con datos en los últimos 14 días">Miembros <span class="sort-mark" aria-hidden="true"></span></button></th>
+                <th scope="col" data-sort="members" class="num"><button type="button" title="Personas con datos en los últimos 14 días: miembros que suben precios y compañeros cuyo addon compartió sus escaneos">Personas <span class="sort-mark" aria-hidden="true"></span></button></th>
                 <th scope="col" data-sort="conf"><button type="button">Confianza <span class="sort-mark" aria-hidden="true"></span></button></th>
                 <th scope="col" data-sort="verdict"><button type="button">Estado <span class="sort-mark" aria-hidden="true"></span></button></th>
               </tr></thead>
@@ -298,19 +298,21 @@
     <section id="screen-unirse" data-screen class="screen" hidden aria-labelledby="join-title">
       <div class="section-head"><h1 id="join-title">Unirse y descargas</h1></div>
       <ol class="steps">
-        <li class="card"><h2>Instala el addon Oro de Hermandad</h2><p>Descarga la última versión y descomprímela en <code>_forever_/Interface/AddOns</code>. Necesitas también Auctionator.</p><p><a class="button secondary" href="https://github.com/carulla94/el-especulador-del-wow/releases" target="_blank" rel="noopener noreferrer">Descargar el addon ↗</a></p></li>
-        <li class="card"><h2>Pide tu clave personal</h2><p>Quien administra el panel te la crea. Empieza por <code>gld_</code>, es solo tuya y no se puede volver a mostrar: guárdala.</p></li>
-        <li class="card"><h2>Instala el sincronizador en tu PC</h2><p>Descomprime el ZIP y haz doble clic en <code>HERMANDAD.cmd</code> (Windows, Python 3.10 o superior). La primera vez te pide esta dirección, tu carpeta de WoW y tu clave; luego sube los precios solo.</p>
+        <li class="card"><h2>Instala el addon Oro de Hermandad</h2><p>Descarga la última versión y descomprímela en <code>_forever_/Interface/AddOns</code>. Necesitas también Auctionator. Es lo único que hace falta para aportar: desde la versión 0.4, cada escaneo completo de la subasta se comparte solo con la hermandad, sin mensajes en el chat ni clics de más.</p><p><a class="button secondary" href="https://github.com/carulla94/el-especulador-del-wow/releases" target="_blank" rel="noopener noreferrer">Descargar el addon ↗</a></p></li>
+        <li class="card"><h2>Pide tu clave personal</h2><p>Quien administra el panel te la crea. Empieza por <code>gld_</code>, es solo tuya y no se puede volver a mostrar: guárdala. Sirve para entrar en este panel y, si vas a subir precios, para el sincronizador.</p></li>
+        <li class="card"><h2>Sube los precios desde tu PC (basta con 1 o 2 personas)</h2><p>Con que 1 o 2 personas de la hermandad tengan el sincronizador en marcha, el panel recibe los escaneos de todos: su addon recoge lo que comparten los demás, también lo que escanearon mientras estaba desconectado (hasta 3 días), y el sincronizador lo envía. Si te toca, descomprime el ZIP y haz doble clic en <code>HERMANDAD.cmd</code> (Windows, Python 3.10 o superior). La primera vez te pide esta dirección, tu carpeta de WoW y tu clave; luego sube los precios solo. Después de instalarlo, sal del juego del todo una vez para que el addon lo note.</p>
           <label class="url-field">Dirección del panel<input id="panel-url" type="text" readonly></label>
           <p class="row"><a class="button secondary" href="/api/guild/download/sincronizador" download>Descargar el sincronizador</a><button id="url-copy" class="button subtle small" type="button">Copiar la dirección</button></p></li>
-        <li class="card"><h2>Juega y escanea</h2><p>Escanea la subasta con Auctionator. Al salir del juego o con <code>/reload</code>, WoW guarda los precios y el sincronizador los envía. El panel se actualiza con cada envío.</p></li>
+        <li class="card"><h2>Juega y escanea</h2><p>Escanea la subasta entera con Auctionator. Tu addon comparte el resultado con la hermandad (como mucho una vez cada 15 minutos, nunca en combate ni en mazmorras). Quien tiene el sincronizador lo envía al panel cuando WoW guarda los datos, al salir del juego o con <code>/reload</code>. El panel se actualiza con cada envío.</p></li>
       </ol>
       <section class="card privacy" aria-labelledby="privacy-title">
         <h2 id="privacy-title">Qué se comparte</h2>
         <ul>
-          <li><strong>Sí:</strong> los precios, cantidades y escaneos de los objetos vigilados, su nombre, su precio de vendedor y su categoría, los depósitos que aprende el addon y el mercado (reino y facción). Es lo que guarda <code>OroHermandadHist</code>.</li>
-          <li><strong>Nunca:</strong> tus personajes, la lista de la hermandad ni tus profesiones (<code>OroHermandadDB</code> y <code>OroHermandadCharDB</code>), ni la base de datos de Auctionator.</li>
-          <li>En el panel se ve el nombre que te puso quien administra, nunca el de tu personaje.</li>
+          <li><strong>Con la hermandad, desde el juego:</strong> al terminar un escaneo completo de la subasta, Oro de Hermandad comparte con tu hermandad, por el canal oculto de los addons (no se ve en el chat), el precio más bajo y las unidades de los objetos de la lista fija, la hora del escaneo y el reino y la facción. Nada más: ni tu oro, ni tus bolsas, ni tus subastas, ni tus objetos extra. Si no quieres compartir tus escaneos, escribe <code>/oro compartir off</code>.</li>
+          <li><strong>Con el panel, desde los PC con el sincronizador:</strong> los precios, cantidades y escaneos de los objetos vigilados, su nombre, su precio de vendedor y su categoría, los depósitos que aprende el addon y el mercado (reino y facción). Es lo que guarda <code>OroHermandadHist</code>, también los escaneos que compartieron los compañeros.</li>
+          <li><strong>Códigos, no nombres:</strong> cada personaje llega al panel identificado solo con un código de 8 cifras (un hash del nombre del personaje y de la hermandad): los nombres de los personajes nunca salen del juego. Ese código es seudónimo, no anónimo: quien conozca la lista de la hermandad podría calcularlo.</li>
+          <li><strong>Nunca:</strong> los nombres de tus personajes, la lista de la hermandad ni tus profesiones (<code>OroHermandadDB</code> y <code>OroHermandadCharDB</code>), ni la base de datos de Auctionator.</li>
+          <li>En el panel se ve el nombre que puso quien administra para quien sube precios; quien solo comparte desde el juego aparece como «un compañero», nunca con el nombre de su personaje.</li>
         </ul>
       </section>
     </section>
