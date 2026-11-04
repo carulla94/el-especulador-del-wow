@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#171714">
   <meta name="robots" content="noindex,nofollow">
   <title>Panel de la hermandad · El Especulador del WoW</title>
-  <meta name="description" content="Precios de la subasta que sube toda la hermandad: chollos, tabla de materiales y consumibles, balance semanal y calculadora de reventa.">
+  <meta name="description" content="Precios de la subasta que sube toda la hermandad: chollos, qué compensa farmear, revender o fundir, tabla de materiales y consumibles, balance semanal y calculadora de reventa.">
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/hermandad.css">
   <script type="module" src="/hermandad.js"></script>
@@ -21,6 +21,7 @@
     </a>
     <nav id="tabs" class="tabs" aria-label="Secciones del panel" hidden>
       <a href="#mercado" data-tab="mercado">Mercado</a>
+      <a href="#compensa" data-tab="compensa">Qué compensa</a>
       <a href="#balance" data-tab="balance">Balance<span class="wide"> semanal</span></a>
       <a href="#miembros" data-tab="miembros" id="tab-members" hidden>Miembros</a>
       <a href="#unirse" data-tab="unirse">Unirse<span class="wide"> y descargas</span></a>
@@ -131,6 +132,106 @@
           <p id="table-empty" class="empty-line" hidden>Ningún objeto cumple estos filtros.</p>
         </section>
         <p id="caveat" class="caveat muted"></p>
+      </div>
+    </section>
+
+    <section id="screen-compensa" data-screen class="screen" hidden aria-labelledby="compensa-title">
+      <div class="section-head">
+        <h1 id="compensa-title">Qué compensa</h1>
+        <p class="muted hint">Qué farmear, qué comprar para revender y qué fundir, con los precios que ha visto la hermandad.</p>
+      </div>
+      <div id="compensa-banners" class="banners"></div>
+      <div id="compensa-empty" class="card empty" hidden><p>Aún no hay precios de este mercado.</p></div>
+      <div id="compensa-content" class="compensa" hidden>
+        <ul id="best-cards" class="best-cards"></ul>
+
+        <section id="farm-section" class="card compensa-section" aria-labelledby="farm-title">
+          <div>
+            <h2 id="farm-title">Qué farmear</h2>
+            <p class="muted small-print">Lo que vale cada veta, planta o bicho vendiéndolo todo en la subasta, tras la comisión. No cuenta el tiempo de ir de un sitio a otro.</p>
+          </div>
+          <div class="filters" role="group" aria-label="Filtrar qué farmear">
+            <label class="filter-wide"><span class="sr-only">Profesión</span><select id="farm-prof">
+              <option value="">Minería, herboristería y desuello</option>
+              <option value="mining">Minería</option>
+              <option value="herbalism">Herboristería</option>
+              <option value="skinning">Desuello</option>
+              <option value="cloth">Tela (por unidad)</option>
+            </select></label>
+            <label class="inline-field">Tu habilidad<input id="farm-skill" type="text" inputmode="numeric" maxlength="3" placeholder="1–300" autocomplete="off"></label>
+            <label class="check"><input id="farm-rare" type="checkbox"> Incluir los raros</label>
+          </div>
+          <p id="farm-empty" class="empty-line" hidden></p>
+          <ol id="farm-list" class="rank"></ol>
+          <details id="farm-twin" class="days-table">
+            <summary>Ver todos en una tabla</summary>
+            <div id="farm-table"></div>
+          </details>
+        </section>
+
+        <section id="resale-section" class="card compensa-section" aria-labelledby="resale-title">
+          <div>
+            <h2 id="resale-title">Qué comprar para revender</h2>
+            <p class="muted small-print">El precio de hoy frente a lo máximo que compensa pagar para revender: reventa prudente, comisión, un depósito perdido y un 15 % de margen. Solo pone «Compra» si además es chollo.</p>
+          </div>
+          <div class="filters" role="group" aria-label="Presupuesto de compra">
+            <label class="inline-field filter-wide">Presupuesto<input id="resale-budget" type="text" maxlength="20" autocomplete="off" spellcheck="false"></label>
+            <p class="muted small-print filter-note">Como máximo el 25 % en un objeto y el 25 % de lo que se vende en un día.</p>
+          </div>
+          <p id="resale-feedback" class="feedback" role="alert"></p>
+          <p id="resale-empty" class="empty-line" hidden></p>
+          <ul id="resale-legend" class="legend" hidden>
+            <li><span class="key key-gain"></span>Por debajo de lo máximo</li>
+            <li><span class="key key-rest"></span>Por encima de lo máximo</li>
+          </ul>
+          <ol id="resale-list" class="rank"></ol>
+          <details id="resale-twin" class="days-table">
+            <summary>Ver todos en una tabla</summary>
+            <div id="resale-table"></div>
+          </details>
+        </section>
+
+        <section id="smelt-section" class="card compensa-section" aria-labelledby="smelt-title">
+          <div>
+            <h2 id="smelt-title">Qué fundir</h2>
+            <p class="muted small-print">Comprar hoy los materiales en la subasta (el carbón, al mercader) y vender el lingote con las mismas reglas. De momento solo fundición: las recetas de otras profesiones no se suben a la web.</p>
+          </div>
+          <p id="smelt-note" class="empty-line" hidden></p>
+          <p id="smelt-empty" class="empty-line" hidden></p>
+          <ul id="smelt-legend" class="legend" hidden>
+            <li><span class="key key-gain"></span>Se gana</li>
+            <li><span class="key key-loss"></span>Se pierde</li>
+          </ul>
+          <ol id="smelt-list" class="rank"></ol>
+          <details id="smelt-twin" class="days-table">
+            <summary>Ver en una tabla</summary>
+            <div id="smelt-table"></div>
+          </details>
+        </section>
+
+        <section id="map-section" class="card compensa-section" aria-labelledby="map-title">
+          <div>
+            <h2 id="map-title">Balance por objeto y variación</h2>
+            <p class="muted small-print">Cada punto es un objeto: más a la izquierda, más barato que su precio normal; más arriba, más varía su precio. Cuanto más varía, más tiene que bajar para ser chollo.</p>
+          </div>
+          <div class="filters" role="group" aria-label="Filtrar el balance">
+            <label><span class="sr-only">Categoría</span><select id="map-cat"></select></label>
+          </div>
+          <p id="map-empty" class="empty-line" hidden></p>
+          <ul id="map-legend" class="legend" hidden>
+            <li><span class="key key-chollo"></span>Chollo</li>
+            <li><span class="key key-caro"></span>Caro</li>
+            <li><span class="key key-point"></span>Resto</li>
+            <li><span class="key key-zone-good"></span>Zona de chollo</li>
+            <li><span class="key key-zone-up"></span>Zona cara</li>
+          </ul>
+          <div id="map-holder"></div>
+          <details id="map-twin" class="days-table">
+            <summary>Ver el balance en una tabla</summary>
+            <div id="map-table"></div>
+          </details>
+        </section>
+        <p id="compensa-caveat" class="caveat muted"></p>
       </div>
     </section>
 

@@ -11,7 +11,7 @@ import {execFileSync} from "node:child_process";
 import {DatabaseSync} from "node:sqlite";
 import * as E from "../src/especular.mjs";
 import worker, {Portfolio} from "../src/worker.mjs";
-import {GuildMarket, GuildStore, goldCell, pctCell, textCell} from "../src/guild.mjs";
+import {GuildMarket, GuildStore, goldCell, pctCell, textCell, WATCHLIST} from "../src/guild.mjs";
 import * as H from "../public/hermandad.js";
 
 H.setEspecular(E);
@@ -315,6 +315,162 @@ test("calculatorFlip runs especular.flip on typed amounts (worked example of the
 });
 
 // ---- static page contract ---------------------------------------------------------------------------------------
+// ---- Qué compensa -----------------------------------------------------------------------------------------------
+const marketOf = (items, extra = {}) => ({phase: "normal", cutBp: 500, budget: E.BUDGET, items, ...extra});
+const stock = (id, fields = {}) => ({id, name: `Objeto ${id}`, cat: "metal", vendor: 0, deposit: {D: 0}, verdict: "NORMAL", trend: "estable", ...fields});
+const today = (lo, qty5 = 50) => ({lo, qty5});
+
+test("the gathering and smelting tables are the addon's, and the watchlist prices all of them", () => {
+  const lua = read("addon/OroHermandad/Data.lua");
+  const pairs = text => [...text.matchAll(/\{(\d+),\s*([\d.]+)\}/g)].map(m => [Number(m[1]), Number(m[2])]);
+  const between = (from, to) => { const start = lua.indexOf(from); return lua.slice(start, lua.indexOf(to, start)); };
+  const nodes = (prof, next) => [...between(`  ${prof} = {`, next).matchAll(/\{key = "(\w+)",\s*skill = (\d+),(?:\s*note = "([^"]*)",)?\s*level = \{(\d+), (\d+)\},(\s*rare = true,)?\s*items = \{(.*?)\},\s*zones = "([^"]*)"\}/gs)]
+    .map(m => ({prof, key: m[1], skill: Number(m[2]), ...(m[3] ? {note: m[3]} : {}), level: [Number(m[4]), Number(m[5])], ...(m[6] ? {rare: true} : {}), items: pairs(m[7]), zones: m[8]}));
+  const cloth = [...between("Data.CLOTH = {", "Fundición").matchAll(/\{item = (\d+),\s*minLevel = (\d+),\s*maxLevel = (\d+),\s*mobs = "([^"]*)"\}/g)]
+    .map(m => ({prof: "cloth", key: m[1], skill: 1, level: [Number(m[2]), Number(m[3])], items: [[Number(m[1]), 1]], zones: m[4]}));
+  const parsed = [...nodes("mining", "  herbalism = {"), ...nodes("herbalism", "  skinning = {"), ...nodes("skinning", "Data.CLOTH = {"), ...cloth];
+  assert.equal(parsed.length, 47);
+  assert.deepEqual(parsed, [...H.GATHER]);
+  const smelt = [...between("Data.SMELT = {", "-- Barra").matchAll(/\{product = (\d+),\s*qty = (\d+),\s*skill = (\d+),\s*reagents = \{((?:\{\d+, \d+\}(?:, )?)+)\}\}/g)]
+    .map(m => ({product: Number(m[1]), qty: Number(m[2]), skill: Number(m[3]), reagents: pairs(m[4])}));
+  assert.equal(smelt.length, 10);
+  assert.deepEqual(smelt, [...H.SMELT]);
+  for (const [id, {buy}] of Object.entries(H.VENDOR_ITEMS)) assert.match(lua, new RegExp(`\\[${id}\\] = ${buy},`));
+  const watched = new Set(Object.values(WATCHLIST).flat());
+  for (const node of H.GATHER) for (const [id] of node.items) assert.ok(watched.has(id), `${node.key}: ${id}`);
+  for (const recipe of H.SMELT) for (const id of [recipe.product, ...recipe.reagents.map(r => r[0])]) assert.ok(watched.has(id) || H.VENDOR_ITEMS[id], `${recipe.product}: ${id}`);
+});
+
+test("salePrice is the prudent resale, then today's lowest, then the last three days", () => {
+  assert.deepEqual(H.salePrice(stock(1, {Rs: 900, price: today(700)})), {price: 900, source: "prudente"});
+  assert.deepEqual(H.salePrice(stock(1, {price: today(700), spark: [1, 2]})), {price: 700, source: "hoy"});
+  assert.deepEqual(H.salePrice(stock(1, {spark: [500, 400, null, null]})), {price: 400, source: "reciente"});
+  assert.equal(H.salePrice(stock(1, {spark: [500, null, null, null]})), null, "four days ago is too old");
+  assert.equal(H.salePrice(undefined), null);
+});
+
+test("farmRows values every material of a node after the cut, like the addon's routes", () => {
+  const items = [stock(3858, {name: "Mineral de mitril", Rs: 10000, conf: "ALTA", confLabel: "Fiable", d7: -120, Q: 300}), stock(7912, {name: "Piedra sólida", Rs: 1000}),
+    stock(2770, {name: "Mineral de cobre", price: today(100)}), stock(2835, {name: "Piedra basta", price: today(1000)}),
+    stock(13468, {name: "Loto negro", Rs: 3000000}), stock(14047, {name: "Paño rúnico", Rs: 5000}), stock(13463, {name: "Hojasueño", Rs: 20000})];
+  const {rows, unpriced} = H.farmRows(marketOf(items));
+  assert.deepEqual(rows.map(r => r.key), ["dreamfoil", "mithril", "copper"], "best first; rare nodes and cloth stay out");
+  const mithril = rows[1];
+  assert.equal(mithril.value, 2 * 9500 + 380, "2 × 95 % of 1g and 0,4 × 95 % of 10s");
+  assert.deepEqual(mithril.parts.map(p => [p.id, p.net, p.value]), [[3858, 9500, 19000], [7912, 950, 380]]);
+  assert.equal(mithril.unpricedParts, 3);
+  assert.equal(mithril.source, "prudente");
+  assert.equal(mithril.per, "veta");
+  assert.equal(mithril.label, "Minería");
+  assert.equal(rows[2].value, 2 * 95 + 427, "0,45 × 950 keeps its exact thousandths and rounds down at the end");
+  assert.equal(rows[2].source, "hoy");
+  assert.equal(unpriced, H.GATHER.filter(n => n.prof !== "cloth" && !n.rare).length - 3);
+  assert.equal(H.partsText(mithril), "2 × Mineral de mitril");
+  assert.equal(H.partsText(mithril, {all: true}), "2 × Mineral de mitril · 0,4 × Piedra sólida");
+  assert.deepEqual(H.farmRows(marketOf(items), {skill: 174}).rows.map(r => r.key), ["copper"]);
+  assert.deepEqual(H.farmRows(marketOf(items), {prof: "herbalism", rare: true}).rows.map(r => r.key), ["blacklotus", "dreamfoil"]);
+  assert.deepEqual(H.farmRows(marketOf(items), {prof: "cloth"}).rows.map(r => [r.key, r.value, r.per]), [["14047", 4750, "unidad"]]);
+  assert.equal(H.farmRows(marketOf(items, {cutBp: 0}), {prof: "cloth"}).rows[0].value, 5000, "the learned cut counts");
+});
+
+test("resaleRows only says buy for a chollo that pays, and the budget limits it", () => {
+  const chollo = stock(1, {name: "Chollo", verdict: "CHOLLO", Rs: 10000, Q: 400, price: today(5000, 100)});
+  const cheap = stock(2, {name: "Barato, bajada", verdict: "BAJADA", Rs: 10000, Q: 400, price: today(5000, 100)});
+  const near = stock(3, {name: "Cerca", Rs: 10000, Q: 400, price: today(8700, 100)}), far = stock(4, {name: "Lejos", Rs: 10000, Q: 400, price: today(12000, 100)});
+  const silent = stock(5, {name: "Sin precio hoy", Rs: 10000}), learning = stock(6, {name: "Aprendiendo", price: today(100)});
+  const rows = H.resaleRows(marketOf([far, silent, near, cheap, chollo, learning]));
+  assert.deepEqual(rows.map(r => r.id), [1, 2, 3, 4, 5], "to buy first, then the nearest to paying, and no resale means no row");
+  assert.deepEqual(rows.map(r => r.buy), [true, false, false, false, false]);
+  const expected = E.flip({Rs: 10000, Q: 400}, null, {cutBp: 500, D: 0, vendor: 0, budget: E.BUDGET, p: 5000, q5: 100});
+  assert.deepEqual(rows[0].flip, expected);
+  assert.equal(rows[0].flip.units, 50, "25 % of a 100g budget at 50s");
+  assert.equal(H.resaleRows(marketOf([chollo]), {budget: 10000000})[0].flip.units, 100, "1.000g: then what is on sale limits it");
+  assert.equal(rows[0].gapBp, E.idiv(5000 * 10000, expected.maxBuy) - 10000);
+  assert.ok(rows[2].gapBp > 0 && rows[3].gapBp > rows[2].gapBp);
+  assert.equal(rows[4].gapBp, null);
+  assert.equal(H.resaleRows(marketOf([stock(1, {verdict: "PROTECCION", Rs: 10000, Q: 400, price: today(5000, 100)})], {phase: "proteccion"}))[0].buy, false);
+});
+
+test("smeltRows buys the reagents today and sells the bar under the rules of a purchase to resell", () => {
+  const mithril = () => [stock(3858, {name: "Mineral de mitril", price: today(1000)}), stock(3860, {name: "Lingote de mitril", Rs: 2000, Q: 400, deposit: {D: 100}})];
+  const [row] = H.smeltRows(marketOf(mithril())).rows;
+  assert.equal(row.unitCost, 1000);
+  const f = E.flip({Rs: 2000, Q: 400}, [[1000, 50]], {cutBp: 500, D: 100, vendor: 0, budget: E.BUDGET});
+  assert.deepEqual(row.flip, f);
+  assert.deepEqual([f.netUnit, f.risk, f.units, f.profit, f.accept], [1899, 100, 50, 39950, true]);
+  assert.deepEqual([row.unitProfit, row.marginBp, row.pays, row.label], [799, 7263, true, "Compensa"]);
+  const lose = H.smeltRows(marketOf([stock(3858, {price: today(3000)}), stock(3860, {Rs: 2000, Q: 400, deposit: {D: 100}})])).rows[0];
+  assert.deepEqual([lose.unitProfit, lose.pays, lose.label], [-1201, false, "No compensa"]);
+  assert.equal(H.smeltRows(marketOf(mithril(), {phase: "proteccion"})).rows[0].label, "Orientativo", "no buying advice during the launch guard");
+  const falling = [stock(3858, {price: today(1000)}), stock(3860, {Rs: 2000, Q: 400, deposit: {D: 100}, trend: "bajando"})];
+  assert.deepEqual([H.smeltRows(marketOf(falling)).rows[0].pays, H.smeltRows(marketOf(falling)).rows[0].label], [false, "Mercado bajando"]);
+  const early = [stock(3858, {price: today(1000)}), stock(3860, {price: today(2000)})];
+  assert.deepEqual([H.smeltRows(marketOf(early)).rows[0].source, H.smeltRows(marketOf(early)).rows[0].label], ["hoy", "Orientativo"], "without a normal price it never pays");
+  // Coal comes from the merchant, unless the auction house is cheaper; two bars per craft share the cost, rounded up.
+  const steel = H.smeltRows(marketOf([stock(3575, {name: "Lingote de hierro", price: today(1500, 8)}), stock(3859, {name: "Lingote de acero", Rs: 4000, Q: 800})])).rows[0];
+  assert.deepEqual(steel.parts.map(p => [p.name, p.unit, p.fromVendor]), [["Lingote de hierro", 1500, false], ["Carbón", 500, true]]);
+  assert.equal(steel.unitCost, 2000);
+  assert.equal(steel.flip.units, 8, "what is on sale near the lowest limits the batch; the merchant does not");
+  const cheapCoal = H.smeltRows(marketOf([stock(3575, {price: today(1500)}), stock(3857, {price: today(300)}), stock(3859, {Rs: 4000})])).rows[0];
+  assert.deepEqual(cheapCoal.parts[1].unit, 300);
+  const bronze = H.smeltRows(marketOf([stock(2840, {price: today(101)}), stock(3576, {price: today(200)}), stock(2841, {Rs: 1000})])).rows[0];
+  assert.deepEqual([bronze.qty, bronze.unitCost], [2, 151]);
+  const missing = H.smeltRows(marketOf([stock(3860, {Rs: 2000})]));
+  assert.deepEqual([missing.rows.length, missing.unpriced], [0, H.SMELT.length], "a reagent without a price today hides the recipe");
+});
+
+test("bestCards answers the three questions and never calls a launch price good news", () => {
+  const items = [stock(13463, {name: "Hojasueño", Rs: 20000}), stock(14047, {name: "Paño rúnico", verdict: "CHOLLO", Rs: 10000, Q: 400, price: today(5000, 100)}),
+    stock(3858, {name: "Mineral de mitril", price: today(1000)}), stock(3860, {name: "Lingote de mitril", Rs: 2000, Q: 400, deposit: {D: 100}})];
+  const answer = (summary, filters) => H.bestCards(summary, H.farmRows(summary, filters), H.resaleRows(summary), H.smeltRows(summary));
+  const [farm, resale, smelt] = answer(marketOf(items));
+  assert.deepEqual([farm.key, farm.name, farm.id, farm.amount, farm.per, farm.good], ["farm", "Hojasueño", 13463, 38000, "por planta", false]);
+  assert.match(farm.note, /^Herboristería · con reventa prudente/);
+  assert.deepEqual([resale.name, resale.good], ["Paño rúnico", true]);
+  assert.match(resale.note, /^Compra 50× a /);
+  assert.deepEqual([smelt.name, smelt.amount, smelt.good], ["Lingote de mitril", 799, true]);
+  assert.match(smelt.note, /^Lote de 50: ganas ≈ 3g 99s 50c$/);
+  const guard = answer(marketOf([items[0], stock(14047, {name: "Paño rúnico", verdict: "PROTECCION", Rs: 10000, Q: 400, price: today(5000, 100)}), items[2], items[3]], {phase: "proteccion"}));
+  assert.deepEqual([guard[1].name, guard[1].good, guard[1].amount], ["Hoy, nada", false, null]);
+  assert.match(guard[1].note, /^Protección de lanzamiento/);
+  assert.deepEqual([guard[2].name, guard[2].good, guard[2].amount], ["Lingote de mitril", false, 799]);
+  assert.match(guard[2].note, /^Orientativo/);
+  const weak = answer(marketOf([stock(1, {name: "Flojo", verdict: "CHOLLO", Rs: 10000, Q: 400, price: today(8000, 1)})]));
+  assert.match(weak[1].note, /^Hay chollos, pero ninguno compensa/);
+  const empty = answer(marketOf([]));
+  assert.deepEqual(empty.map(c => [c.name, c.id, c.amount]), [["Sin datos", null, null], ["Hoy, nada", null, null], ["Hoy, nada", null, null]]);
+  const html = read("public/hermandad.html");
+  for (const card of empty) assert.match(html, new RegExp(`id="${card.target.slice(1)}"`));
+});
+
+test("marketMapSVG places each item by price and variation over the rule's own areas", () => {
+  // The areas are the real lines of especular.assess: 20 % below (25 % above) or 2,5 times the variation.
+  for (const sBp of [300, 800, 1200, 2000, 2500]) {
+    const a = E.assess({n: 14, N: 100000, sBp, trend: "estable", conf: "ALTA", fresh: true}, 100000, 2600);
+    assert.ok(Math.abs((a.dumpLine - 100000) / 10 + Math.max(2000, 2.5 * sBp)) <= 1, `chollo line at ${sBp}`);
+    assert.ok(Math.abs((a.spikeLine - 100000) / 10 - Math.max(2500, 2.5 * sBp)) <= 1, `caro line at ${sBp}`);
+  }
+  const point = (id, dBp, sBp, verdict = "NORMAL", name = `Objeto ${id}`) => ({id, name, dBp, sBp, verdict});
+  const chart = H.marketMapSVG({items: [point(1, -3000, 500, "CHOLLO", "Paño <rúnico>"), point(2, 4000, 900, "CARO"), point(3, 200, 700), point(4, -500, 1500), point(5, 20000, 90000), {id: 6, name: "Sin precio", dBp: null, sBp: 400, verdict: "SIN_PRECIO"}], width: 720, height: 380});
+  const markup = svgText(chart.node);
+  assert.doesNotMatch(markup, /NaN|undefined|Infinity/);
+  assert.match(markup, /Paño &lt;rúnico&gt;/, "names are escaped");
+  assert.ok(fontSizes(markup).every(size => size >= 12));
+  assert.equal(chart.layout.points.length, 5, "without a price today there is nothing to place");
+  assert.deepEqual(chart.layout.points.map(p => p.e.id), [1, 4, 3, 2, 5], "keyboard order is left to right");
+  assert.equal((markup.match(/<g class="good">.*?<\/g>/)[0].match(/<circle/g) ?? []).length, 1);
+  assert.equal((markup.match(/<g class="up">.*?<\/g>/)[0].match(/<rect/g) ?? []).length, 1, "caro has its own shape, not only its own colour");
+  assert.equal((markup.match(/<g class="rest">.*?<\/g>/)[0].match(/<circle/g) ?? []).length, 3);
+  const off = chart.layout.points.find(p => p.e.id === 5);
+  assert.deepEqual([off.x, off.y], [chart.layout.x1, chart.layout.y0], "values beyond the axes stay on the chart");
+  const zones = markup.match(/class="zone-good" points="([^"]+)"/)[1].split(" ");
+  assert.equal(zones.length, 5);
+  assert.equal(H.marketMapSVG({items: [point(1, null, 500)]}), null);
+  const narrow = svgText(H.marketMapSVG({items: Array.from({length: 40}, (_, i) => point(i + 1, -2500 - i * 50, 400 + i * 10, "CHOLLO")), width: 320, height: 300}).node);
+  assert.ok((narrow.match(/<g class="labels"[^>]*>.*?<\/g>/)[0].match(/<text/g) ?? []).length <= 3, "few labels on a phone");
+  assert.doesNotMatch(narrow, /NaN/);
+});
+
 test("the page is CSP-safe: one module script, no inline code, no external requests, no HTML injection", () => {
   const html = read("public/hermandad.html"), js = read("public/hermandad.js"), css = read("public/hermandad.css");
   assert.deepEqual([...html.matchAll(/<script\b[^>]*>/g)].map(m => m[0]), ['<script type="module" src="/hermandad.js">']);
@@ -342,7 +498,8 @@ test("every element the page script looks up exists in the HTML", () => {
   assert.ok(wanted.size > 40);
   for (const id of wanted) assert.ok(ids.has(id), `#${id} is missing from hermandad.html`);
   assert.equal(new Set([...html.matchAll(/\sid="([^"]+)"/g)].map(m => m[1])).size, [...html.matchAll(/\sid="([^"]+)"/g)].length, "ids are unique");
-  for (const screen of ["loading", "login", "fatal", "mercado", "balance", "miembros", "unirse"]) assert.match(html, new RegExp(`id="screen-${screen}" data-screen`));
+  for (const screen of ["loading", "login", "fatal", "mercado", "compensa", "balance", "miembros", "unirse"]) assert.match(html, new RegExp(`id="screen-${screen}" data-screen`));
+  assert.match(html, /<a href="#compensa" data-tab="compensa">/);
   const headers = [...html.matchAll(/<th scope="col"(?: data-sort="(\w+)")?/g)].filter((m, i) => i < 11).map(m => m[1] ?? null);
   assert.deepEqual(headers, ["name", "hoy", "N", "d1", "d7", "range", null, "Q", "members", "conf", "verdict"]);
   for (const key of headers.filter(Boolean)) assert.ok(H.SORTS[key], key);
@@ -510,6 +667,39 @@ test("against the real market: CSV of the view and of one item equal the server 
   assert.match(H.weekdayBars(detail.weekday).text, /^Faltan \d semanas? de datos/);
   for (const e of summary.items) assert.doesNotMatch(svgText(H.sparklineSVG(e.spark)), /NaN/);
   assert.equal(H.freshnessLine(summary.freshness, summary.dayOfLaunch, f.nowSec * 1000), "3 miembros · último envío hace un momento · día 28 desde el lanzamiento");
+});
+
+test("against the real market: 'Qué compensa' works from the summary alone and agrees with its chollo and its item", async t => {
+  const T = 2526, {f, owner, summary} = await seeded(t, T);
+  const chollo = summary.items.find(e => e.id === 14047);
+  const rows = H.resaleRows(summary);
+  assert.equal(rows[0].id, 14047);
+  assert.equal(rows[0].buy, true);
+  assert.equal(rows.filter(r => r.buy).length, 1);
+  for (const key of ["units", "cost", "profit", "maxBuy", "breakEven", "netUnit", "risk", "D", "capLiq", "capBudget", "accept", "reason", "depositEstimated"]) {
+    assert.deepEqual(rows[0].flip[key], chollo.flip[key], key);
+  }
+  // The detail's flip uses the same inputs for any verdict, so every row matches its item.
+  const other = rows.find(r => r.id === 13463);
+  const detail = await (await f.call(`/api/guild/item?market=${encodeURIComponent(MARKET)}&id=13463`, {cookie: owner.cookie})).json();
+  for (const key of ["units", "cost", "profit", "maxBuy", "breakEven", "accept", "reason"]) assert.deepEqual(other.flip[key], detail.flip[key], key);
+  const farm = H.farmRows(summary);
+  assert.deepEqual(farm.rows.map(r => r.key).sort(), ["dreamfoil", "richthorium", "thorium"]);
+  const dreamfoil = farm.rows.find(r => r.key === "dreamfoil"), item = summary.items.find(e => e.id === 13463);
+  assert.equal(dreamfoil.value, 2 * E.idiv(item.Rs * (10000 - summary.cutBp), 10000));
+  assert.deepEqual(H.farmRows(summary, {prof: "cloth"}).rows.map(r => r.key).sort(), ["14047", "2589"]);
+  assert.deepEqual(H.smeltRows(summary).rows, [], "this market has no bars");
+  const map = H.marketMapSVG({items: summary.items});
+  assert.equal(map.layout.points.length, summary.items.length);
+  assert.doesNotMatch(svgText(map.node), /NaN|undefined/);
+  const [cardFarm, cardResale, cardSmelt] = H.bestCards(summary, farm, rows, H.smeltRows(summary));
+  assert.equal(cardFarm.amount, farm.rows[0].value);
+  assert.equal(cardResale.id, 14047);
+  assert.equal(cardSmelt.id, null);
+  const launch = (await seeded(t, 2505)).summary;
+  assert.deepEqual(H.resaleRows(launch), [], "no normal price, no resale");
+  assert.equal(H.marketMapSVG({items: launch.items}), null);
+  assert.equal(H.farmRows(launch).rows.find(r => r.key === "dreamfoil").source, "hoy");
 });
 
 test("against the real market: launch week says 'Aprendiendo precios'; a falling market shows its banner and no chollos", async t => {

@@ -472,13 +472,244 @@ export function calculatorFlip(detail, inputs) {
   return {result, opts};
 }
 
+// ---- Qué compensa: farming, buying to resell and smelting, worked out from the market summary --------------------
+export const PROFESSIONS = Object.freeze({mining: {label: "Minería", per: "veta"}, herbalism: {label: "Herboristería", per: "planta"},
+  skinning: {label: "Desuello", per: "bicho"}, cloth: {label: "Tela", per: "unidad"}});
+/** Copies of Data.GATHER and Data.CLOTH in the addon's Data.lua (test/hermandad-view.test.mjs compares them). items:
+ * [itemID, average units per node or mob]. A cloth row counts one unit, because no drop rate is known: it is only
+ * listed on its own, never against the nodes. */
+export const GATHER = Object.freeze([
+  {prof: "mining", key: "copper", skill: 1, level: [1, 20], items: [[2770, 2], [2835, 0.45], [774, 0.01], [818, 0.01], [1210, 0.01]], zones: "Los Baldíos, Durotar, Dun Morogh, Bosque de Elwynn, Claros de Tirisfal, Costa Oscura"},
+  {prof: "mining", key: "tin", skill: 65, level: [15, 30], items: [[2771, 2], [2836, 0.4], [1210, 0.01], [1206, 0.01], [1705, 0.01], [1529, 0.01]], zones: "Vallefresno, Laderas de Trabalomas, Montañas Crestagrana, Los Humedales, Sierra Espolón"},
+  {prof: "mining", key: "silver", skill: 75, level: [15, 35], rare: true, items: [[2775, 1.5], [1206, 0.015]], zones: "Vallefresno, Las Mil Agujas, Laderas de Trabalomas, Tierras Altas de Arathi"},
+  {prof: "mining", key: "iron", skill: 125, level: [25, 40], items: [[2772, 2], [2838, 0.4], [1529, 0.013], [1705, 0.01], [3864, 0.007]], zones: "Tierras Altas de Arathi, Montañas de Alterac, Vega de Tuercespina, Las Mil Agujas, Desolace"},
+  {prof: "mining", key: "gold", skill: 155, level: [30, 45], rare: true, items: [[2776, 1.5], [1529, 0.01], [3864, 0.01]], zones: "Desolace, Tierras Altas de Arathi, Vega de Tuercespina, Tierras Inhóspitas"},
+  {prof: "mining", key: "mithril", skill: 175, level: [35, 50], items: [[3858, 2], [7912, 0.4], [3864, 0.008], [7909, 0.007], [7910, 0.007]], zones: "Tierras del Interior, Desolace, Tanaris, Tierras Inhóspitas, Feralas"},
+  {prof: "mining", key: "truesilver", skill: 230, level: [40, 55], rare: true, items: [[7911, 1.5], [7909, 0.01], [7910, 0.01]], zones: "Silithus, Tierras del Interior, Las Estepas Ardientes, Cráter de Un'Goro"},
+  {prof: "mining", key: "thorium", skill: 245, note: "vetas pequeñas", level: [45, 60], items: [[10620, 2], [12365, 0.4], [7910, 0.008], [12361, 0.007], [12364, 0.007], [12799, 0.007], [12800, 0.007]], zones: "Cráter de Un'Goro, Silithus, Las Estepas Ardientes, Frondavil, Cuna del Invierno"},
+  {prof: "mining", key: "richthorium", skill: 275, note: "vetas enriquecidas", level: [50, 60], items: [[10620, 3], [12365, 0.4], [12363, 0.03], [12361, 0.008], [12364, 0.008], [12799, 0.008], [7910, 0.008], [12800, 0.007]], zones: "Silithus, Cuna del Invierno, Tierras de la Peste del Este, Azshara, Las Estepas Ardientes"},
+  {prof: "herbalism", key: "peacebloom", skill: 1, level: [1, 15], items: [[2447, 2]], zones: "zonas iniciales, Los Baldíos"},
+  {prof: "herbalism", key: "silverleaf", skill: 1, level: [1, 15], items: [[765, 2]], zones: "zonas iniciales"},
+  {prof: "herbalism", key: "earthroot", skill: 15, level: [5, 20], items: [[2449, 2]], zones: "Los Baldíos, Claros de Tirisfal, Teldrassil, Dun Morogh"},
+  {prof: "herbalism", key: "mageroyal", skill: 50, level: [10, 25], items: [[785, 2]], zones: "Los Baldíos, Páramos de Poniente, Costa Oscura, Loch Modan"},
+  {prof: "herbalism", key: "briarthorn", skill: 70, level: [15, 30], items: [[2450, 2]], zones: "Los Baldíos, Páramos de Poniente, Los Humedales, Bosque del Ocaso"},
+  {prof: "herbalism", key: "stranglekelp", skill: 85, level: [15, 40], items: [[3820, 2]], zones: "bajo el agua: Vega de Tuercespina, Los Humedales, Costa Oscura"},
+  {prof: "herbalism", key: "bruiseweed", skill: 100, level: [20, 35], items: [[2453, 2]], zones: "Los Baldíos, Sierra Espolón, Vallefresno, Laderas de Trabalomas"},
+  {prof: "herbalism", key: "steelbloom", skill: 115, level: [25, 40], items: [[3355, 2]], zones: "Vega de Tuercespina, Sierra Espolón, Tierras Altas de Arathi"},
+  {prof: "herbalism", key: "kingsblood", skill: 125, level: [25, 40], items: [[3356, 2]], zones: "Vega de Tuercespina, Laderas de Trabalomas, Los Humedales, Vallefresno"},
+  {prof: "herbalism", key: "gravemoss", skill: 120, level: [25, 40], rare: true, items: [[3369, 1]], zones: "cementerios de Desolace y Bosque del Ocaso"},
+  {prof: "herbalism", key: "liferoot", skill: 150, level: [30, 45], items: [[3357, 2]], zones: "Vega de Tuercespina, Marjal Revolcafango, Los Humedales"},
+  {prof: "herbalism", key: "fadeleaf", skill: 160, level: [30, 45], items: [[3818, 2]], zones: "Marjal Revolcafango, Vega de Tuercespina, Tierras Altas de Arathi"},
+  {prof: "herbalism", key: "goldthorn", skill: 170, level: [35, 50], items: [[3821, 2]], zones: "Vega de Tuercespina, Feralas, Tierras Altas de Arathi"},
+  {prof: "herbalism", key: "khadgar", skill: 185, level: [35, 50], items: [[3358, 2]], zones: "Vega de Tuercespina, Feralas, Marjal Revolcafango"},
+  {prof: "herbalism", key: "wintersbite", skill: 195, level: [35, 45], items: [[3819, 2]], zones: "Montañas de Alterac"},
+  {prof: "herbalism", key: "firebloom", skill: 205, level: [40, 55], items: [[4625, 2]], zones: "Tanaris, La Garganta de Fuego, Las Tierras Devastadas"},
+  {prof: "herbalism", key: "purplelotus", skill: 210, level: [40, 55], items: [[8831, 2]], zones: "Tierras del Interior, Feralas, Azshara, Tanaris"},
+  {prof: "herbalism", key: "arthastears", skill: 220, level: [45, 60], items: [[8836, 2]], zones: "Tierras de la Peste del Oeste y del Este, Frondavil"},
+  {prof: "herbalism", key: "sungrass", skill: 230, level: [45, 60], items: [[8838, 2]], zones: "Feralas, Tierras del Interior, Azshara, Cráter de Un'Goro"},
+  {prof: "herbalism", key: "blindweed", skill: 235, level: [40, 55], items: [[8839, 2]], zones: "Pantano de las Penas, Cráter de Un'Goro"},
+  {prof: "herbalism", key: "ghostmushroom", skill: 245, level: [40, 55], rare: true, items: [[8845, 1]], zones: "cuevas de Tierras del Interior y Desolace"},
+  {prof: "herbalism", key: "gromsblood", skill: 250, level: [45, 60], items: [[8846, 2]], zones: "Las Tierras Devastadas, Frondavil, Desolace"},
+  {prof: "herbalism", key: "sansam", skill: 260, level: [48, 60], items: [[13464, 2]], zones: "Azshara, Cráter de Un'Goro, Tierras de la Peste del Este"},
+  {prof: "herbalism", key: "dreamfoil", skill: 270, level: [50, 60], items: [[13463, 2]], zones: "Cráter de Un'Goro, Azshara, Tierras de la Peste del Este, Frondavil"},
+  {prof: "herbalism", key: "silversage", skill: 280, level: [50, 60], items: [[13465, 2]], zones: "Cuna del Invierno, Cráter de Un'Goro, Tierras de la Peste del Este"},
+  {prof: "herbalism", key: "plaguebloom", skill: 285, level: [52, 60], items: [[13466, 2]], zones: "Tierras de la Peste del Este y del Oeste, Frondavil"},
+  {prof: "herbalism", key: "icecap", skill: 290, level: [53, 60], items: [[13467, 2]], zones: "Cuna del Invierno"},
+  {prof: "herbalism", key: "blacklotus", skill: 300, level: [55, 60], rare: true, items: [[13468, 1]], zones: "Las Estepas Ardientes, Tierras de la Peste del Este, Silithus"},
+  {prof: "skinning", key: "light", skill: 1, note: "bichos de nivel 5–20", level: [5, 20], items: [[2318, 1.5], [2934, 1], [783, 0.1]], zones: "Los Baldíos, Páramos de Poniente, Costa Oscura, Loch Modan"},
+  {prof: "skinning", key: "medium", skill: 100, note: "bichos de nivel 20–30", level: [20, 30], items: [[2319, 1.5], [4232, 0.1]], zones: "Los Humedales, Vallefresno, Sierra Espolón, Laderas de Trabalomas"},
+  {prof: "skinning", key: "heavy", skill: 150, note: "bichos de nivel 30–40", level: [30, 40], items: [[4234, 1.5], [4235, 0.1]], zones: "Tierras Altas de Arathi, Desolace, Vega de Tuercespina"},
+  {prof: "skinning", key: "thick", skill: 200, note: "bichos de nivel 40–50", level: [40, 50], items: [[4304, 1.5], [8169, 0.1]], zones: "Feralas, Tanaris, Tierras del Interior"},
+  {prof: "skinning", key: "rugged", skill: 250, note: "bichos de nivel 50–60", level: [50, 60], items: [[8170, 1.5], [8171, 0.1]], zones: "Cráter de Un'Goro, Cuna del Invierno, Silithus, Tierras de la Peste del Este"},
+  {prof: "cloth", key: "2589", skill: 1, level: [5, 20], items: [[2589, 1]], zones: "humanoides de nivel 5–20"},
+  {prof: "cloth", key: "2592", skill: 1, level: [15, 30], items: [[2592, 1]], zones: "humanoides de nivel 15–30"},
+  {prof: "cloth", key: "4306", skill: 1, level: [25, 40], items: [[4306, 1]], zones: "humanoides de nivel 25–40"},
+  {prof: "cloth", key: "4338", skill: 1, level: [35, 50], items: [[4338, 1]], zones: "humanoides de nivel 35–50"},
+  {prof: "cloth", key: "14047", skill: 1, level: [48, 60], items: [[14047, 1]], zones: "humanoides de nivel 48–60"}]);
+/** Copy of Data.SMELT in the addon's Data.lua. Data.FOREVER_SMELT stays out: its IDs are unconfirmed and not watched. */
+export const SMELT = Object.freeze([
+  {product: 2840, qty: 1, skill: 1, reagents: [[2770, 1]]}, {product: 3576, qty: 1, skill: 65, reagents: [[2771, 1]]},
+  {product: 2841, qty: 2, skill: 65, reagents: [[2840, 1], [3576, 1]]}, {product: 2842, qty: 1, skill: 75, reagents: [[2775, 1]]},
+  {product: 3575, qty: 1, skill: 125, reagents: [[2772, 1]]}, {product: 3577, qty: 1, skill: 155, reagents: [[2776, 1]]},
+  {product: 3859, qty: 1, skill: 165, reagents: [[3575, 1], [3857, 1]]}, {product: 3860, qty: 1, skill: 175, reagents: [[3858, 1]]},
+  {product: 6037, qty: 1, skill: 230, reagents: [[7911, 1]]}, {product: 12359, qty: 1, skill: 250, reagents: [[10620, 1]]}]);
+/** What SMELT needs from a merchant, from Data.VENDOR_BUY (copper per unit); it is not watched, so it has no market price. */
+export const VENDOR_ITEMS = Object.freeze({3857: {name: "Carbón", buy: 500}});
+
+const itemsById = summary => new Map((summary?.items ?? []).map(e => [e.id, e]));
+const nameOf = e => e.name || `Objeto ${e.id}`;
+const afterCut = (copper, cutBp) => rules().idiv(copper * (10000 - cutBp), 10000);
+/** The price to value what you would sell: the prudent resale once there is a normal price, else today's lowest, else
+ * the day value of the last three days. {price, source: "prudente" | "hoy" | "reciente"}, or null. */
+export function salePrice(e) {
+  if (isInt(e?.Rs)) return {price: e.Rs, source: "prudente"};
+  if (isInt(e?.price?.lo)) return {price: e.price.lo, source: "hoy"};
+  for (const v of (e?.spark ?? []).slice(-3).reverse()) if (isInt(v)) return {price: v, source: "reciente"};
+  return null;
+}
+const SOURCE_TEXT = {prudente: "reventa prudente", hoy: "precio de hoy, aún sin precio normal", reciente: "precio de los últimos días, aún sin precio normal"};
+export const sourceText = source => SOURCE_TEXT[source] ?? "";
+/** Each node or mob valued like the addon's routes: every material it gives, after the cut. A node whose main material has
+ * no price is counted in unpriced, not shown; rare nodes are left out unless asked for. Filters: prof ("" is every
+ * node and no cloth), skill (hides what needs more), rare. Returns {rows (best first), unpriced}. */
+export function farmRows(summary, {prof = "", skill = null, rare = false} = {}) {
+  const items = itemsById(summary), cutBp = summary?.cutBp ?? rules().CUT_BP;
+  const rows = [];
+  let unpriced = 0;
+  for (const node of GATHER) {
+    if (prof ? node.prof !== prof : node.prof === "cloth") continue;
+    if ((node.rare && !rare) || (isInt(skill) && node.skill > skill)) continue;
+    const main = items.get(node.items[0][0]), sale = salePrice(main);
+    if (!sale) { unpriced++; continue; }
+    let milli = 0;
+    const parts = [];
+    for (const [id, units] of node.items) {
+      const e = items.get(id), found = salePrice(e);
+      if (!found) continue;
+      const net = afterCut(found.price, cutBp), thousandths = Math.round(units * 1000);   // 0,45 units stay exact
+      milli += net * thousandths;
+      parts.push({id, name: nameOf(e), units, net, value: Math.floor(net * thousandths / 1000)});
+    }
+    rows.push({...node, ...PROFESSIONS[node.prof], id: main.id, name: nameOf(main), value: Math.floor(milli / 1000), parts,
+      unpricedParts: node.items.length - parts.length, source: sale.source, conf: main.conf, confLabel: main.confLabel, d7: main.d7, Q: main.Q});
+  }
+  rows.sort((a, b) => b.value - a.value || a.skill - b.skill || a.key.localeCompare(b.key));
+  return {rows, unpriced};
+}
+/** "2 × Mineral de mitril · 0,4 × Piedra sólida": what a node gives, the materials worth at least 5 % of it unless all. */
+export function partsText(row, {all = false} = {}) {
+  const parts = all ? row.parts : row.parts.filter(p => p.value * 20 >= row.value);
+  return parts.map(p => `${String(p.units).replace(".", ",")} × ${p.name}`).join(" · ");
+}
+/** especular.flip on today's lowest price of every item with a prudent resale, whatever its verdict, as the item detail
+ * does. buy: chollo and it pays (with the same budget it is the chollo's own flip). gapBp: today against the most that
+ * pays. Those to buy come first by profit, then the nearest to paying. */
+export function resaleRows(summary, {budget = null} = {}) {
+  const {flip, idiv} = rules();
+  const rows = [];
+  for (const e of summary?.items ?? []) {
+    if (!isInt(e.Rs)) continue;
+    const p = e.price?.lo ?? null;
+    const f = flip({Rs: e.Rs, Q: e.Q}, null, {cutBp: summary.cutBp, D: e.deposit?.D ?? null, vendor: e.vendor, budget: budget ?? summary.budget, p, q5: e.price?.qty5 ?? null});
+    if (f.reason === "FUERA_DE_RANGO") continue;
+    rows.push({id: e.id, name: nameOf(e), e, p, flip: f, buy: e.verdict === "CHOLLO" && f.accept, gapBp: isInt(p) && f.maxBuy > 0 ? idiv(p * 10000, f.maxBuy) - 10000 : null});
+  }
+  const gap = r => r.gapBp ?? Infinity;
+  return rows.sort((a, b) => Number(b.buy) - Number(a.buy) || (a.buy ? b.flip.profit - a.flip.profit : 0) || gap(a) - gap(b) || a.id - b.id);
+}
+/** Each smelting recipe, buying every reagent today (at the merchant when that is not dearer) and selling the bar with the
+ * rules of a purchase to resell: especular.flip with the cost per bar as the price, so the same cut, lost deposit, margin,
+ * liquidity and budget limits apply. During the launch guard, without a normal price or with the bar falling it never
+ * says that it pays. Returns {rows (those that pay first, then by profit per bar), unpriced}. */
+export function smeltRows(summary, {budget = null} = {}) {
+  const {flip, idiv, ceilDiv, UNITS_MAX} = rules();
+  const items = itemsById(summary), rows = [];
+  let unpriced = 0;
+  for (const recipe of SMELT) {
+    const product = items.get(recipe.product), sale = salePrice(product);
+    let cost = 0, crafts = UNITS_MAX;
+    const parts = [];
+    for (const [id, need] of recipe.reagents) {
+      const e = items.get(id), auction = e?.price?.lo ?? null, vendor = VENDOR_ITEMS[id] ?? null;
+      const fromVendor = vendor !== null && (!isInt(auction) || vendor.buy <= auction);
+      const unit = fromVendor ? vendor.buy : auction;
+      if (!isInt(unit)) { cost = null; break; }
+      cost += unit * need;
+      if (!fromVendor) crafts = Math.min(crafts, Math.max(1, Math.floor((e.price.qty5 ?? 1) / need)));
+      parts.push({id, name: e?.name || vendor?.name || `Objeto ${id}`, need, unit, fromVendor});
+    }
+    if (!sale || cost === null) { unpriced++; continue; }
+    const unitCost = ceilDiv(cost, recipe.qty);
+    const f = flip({Rs: sale.price, Q: product.Q}, [[unitCost, Math.min(crafts * recipe.qty, UNITS_MAX)]],
+      {cutBp: summary.cutBp, D: product.deposit?.D ?? null, vendor: product.vendor, budget: budget ?? summary.budget});
+    if (f.reason === "FUERA_DE_RANGO") { unpriced++; continue; }
+    const unitProfit = f.netUnit - f.risk - unitCost;
+    const guarded = summary.phase !== "normal" || sale.source !== "prudente", falling = product.trend === "bajando";
+    const pays = f.accept && !guarded && !falling;
+    rows.push({id: product.id, name: nameOf(product), skill: recipe.skill, qty: recipe.qty, parts, sale: sale.price, source: sale.source, unitCost, unitProfit, marginBp: idiv(unitProfit * 10000, unitCost + f.risk),
+      flip: f, pays, label: pays ? "Compensa" : guarded ? "Orientativo" : falling ? "Mercado bajando" : "No compensa", trend: product.trend, d7: product.d7});
+  }
+  rows.sort((a, b) => Number(b.pays) - Number(a.pays) || b.unitProfit - a.unitProfit || a.id - b.id);
+  return {rows, unpriced};
+}
+/** The three answers at the top of the view: {key, label, target, good, name, id, amount, per, note}; amount and id are null
+ * when there is nothing to point at. Only a real purchase or a recipe that pays counts as good news. */
+export function bestCards(summary, farm, resale, smelt) {
+  const topFarm = farm.rows[0], buy = resale.find(r => r.buy), nearest = resale.find(r => isInt(r.gapBp));
+  const pays = smelt.rows.find(r => r.pays), topSmelt = smelt.rows[0];
+  const noBuy = resale.some(r => r.e.verdict === "CHOLLO") ? "Hay chollos, pero ninguno compensa tras la comisión y el depósito." : cholloEmptyText(summary);
+  return [
+    topFarm ? {key: "farm", label: "Qué farmear", target: "#farm-section", good: false, name: topFarm.name + (topFarm.note ? ` (${topFarm.note})` : ""), id: topFarm.id, amount: topFarm.value, per: `por ${topFarm.per}`,
+      note: `${topFarm.label} · con ${sourceText(topFarm.source)}`}
+      : {key: "farm", label: "Qué farmear", target: "#farm-section", good: false, name: "Sin datos", id: null, amount: null, per: "", note: "Todavía no hay precios de lo que se recolecta."},
+    buy ? {key: "resale", label: "Qué comprar para revender", target: "#resale-section", good: true, name: buy.name, id: buy.id, amount: buy.flip.profit, per: "de ganancia",
+      note: `Compra ${buy.flip.units}× a ${formatGSC(buy.flip.maxBuy)} como máximo`}
+      : {key: "resale", label: "Qué comprar para revender", target: "#resale-section", good: false, name: "Hoy, nada", id: null, amount: null, per: "",
+        note: noBuy + (nearest && summary.phase === "normal" ? ` Lo más cerca: ${nearest.name}, a ${formatPct(nearest.gapBp)} de lo máximo que compensa pagar.` : "")},
+    pays ? {key: "smelt", label: "Qué fundir", target: "#smelt-section", good: true, name: pays.name, id: pays.id, amount: pays.unitProfit, per: "por lingote",
+      note: `Lote de ${pays.flip.units}: ganas ≈ ${formatGSC(pays.flip.profit)}`}
+      : {key: "smelt", label: "Qué fundir", target: "#smelt-section", good: false, name: topSmelt?.label === "Orientativo" ? topSmelt.name : "Hoy, nada", id: topSmelt?.label === "Orientativo" ? topSmelt.id : null,
+        amount: topSmelt?.label === "Orientativo" ? topSmelt.unitProfit : null, per: topSmelt?.label === "Orientativo" ? "por lingote" : "",
+        note: !topSmelt ? "Faltan precios de hoy de los materiales." : topSmelt.label === "Orientativo" ? "Orientativo: con precios de lanzamiento no es una recomendación de compra." : `Lo mejor: ${topSmelt.name}, ${formatGSC(topSmelt.unitProfit)} por lingote.`}];
+}
+
+/** The balance map: one mark per item with a normal price and a price today, x its price against normal (dBp) and y how
+ * much it varies (sBp), over the areas where especular.assess calls a trusted price chollo or caro: at least 20 % below or
+ * 25 % above, and 2,5 times the variation when that is more, up to the 25 % variation that stops being trusted.
+ * Values beyond the axes stay at their edge. Returns null without such items, else {node, layout: {points: [{e, x, y}]
+ * (by x), x0, x1, y0, y1}} for the hover layer. */
+export function marketMapSVG({items = [], width = 720, height = 360} = {}) {
+  const list = items.filter(e => isInt(e.dBp) && isInt(e.sBp));
+  if (list.length === 0) return null;
+  const loX = Math.max(-9000, Math.min(-3000, ...list.map(e => e.dBp - 300))), hiX = Math.min(10000, Math.max(3500, ...list.map(e => e.dBp + 300)));
+  const hiY = Math.min(6000, Math.max(2000, ...list.map(e => e.sBp))) * 1.08;
+  const x0 = 46, x1 = width - 12, y0 = 26, y1 = height - 46;
+  const x = v => round1(x0 + (x1 - x0) * (Math.max(loX, Math.min(hiX, v)) - loX) / (hiX - loX));
+  const y = v => round1(y1 - (y1 - y0) * Math.min(hiY, v) / hiY);
+  const trusted = Math.min(2500, hiY), edgeLo = Math.min(trusted, -loX / 2.5), edgeHi = Math.min(trusted, hiX / 2.5);
+  const polygon = points => points.map(([a, b]) => `${x(a)},${y(b)}`).join(" ");
+  const narrow = width < 480;
+  const xTicks = niceTicks(loX, hiX, narrow ? 4 : 7).filter(t => t >= loX && t <= hiX), yTicks = niceTicks(0, hiY, 4).filter(t => t >= 0 && t <= hiY);
+  const points = list.map(e => ({e, x: x(e.dBp), y: y(e.sBp)})).sort((a, b) => a.x - b.x || a.y - b.y || a.e.id - b.e.id);
+  const groups = {rest: [], up: [], good: []};
+  for (const p of points) groups[p.e.verdict === "CHOLLO" ? "good" : p.e.verdict === "CARO" ? "up" : "rest"].push(p);
+  // Labels only for what stands out: chollos, then caros, then the cheapest; none on top of another.
+  const placed = [];
+  const labelled = [...groups.good, ...groups.up, ...groups.rest].slice(0, narrow ? 3 : 6).flatMap(p => {
+    const name = nameOf(p.e), text = name.length > 22 ? name.slice(0, 21) + "…" : name;
+    const room = text.length * 7, right = p.x + 9 + room <= x1;
+    const box = {left: right ? p.x + 9 : p.x - 9 - room, right: right ? p.x + 9 + room : p.x - 9, y: p.y};
+    if (placed.some(o => Math.abs(o.y - box.y) < 16 && box.left < o.right && o.left < box.right)) return [];
+    placed.push(box);
+    return [h("text", {x: right ? p.x + 9 : p.x - 9, y: round1(p.y + 4), "text-anchor": right ? "start" : "end", fill: CHART.text, stroke: CHART.surface, "stroke-width": 3, "paint-order": "stroke"}, text)];
+  });
+  const node = h("svg", {class: "market-map", viewBox: `0 0 ${width} ${height}`, width, height, role: "img",
+    "aria-label": `Balance de ${plural(list.length, "objeto", "objetos")}: ${plural(groups.good.length, "chollo", "chollos")} y ${plural(groups.up.length, "caro", "caros")}. Los valores están también en la tabla de debajo.`},
+    h("polygon", {class: "zone-good", points: polygon([[loX, 0], [-2000, 0], [-2000, 800], [-2.5 * edgeLo, edgeLo], [loX, edgeLo]]), fill: CHART.good, "fill-opacity": 0.12}),
+    h("polygon", {class: "zone-up", points: polygon([[hiX, 0], [2500, 0], [2500, 1000], [2.5 * edgeHi, edgeHi], [hiX, edgeHi]]), fill: CHART.up, "fill-opacity": 0.12}),
+    h("g", {class: "grid"}, yTicks.map(t => h("line", {x1: x0, x2: x1, y1: y(t), y2: y(t), stroke: CHART.grid, "stroke-width": 1}))),
+    h("line", {class: "normal-line", x1: x(0), x2: x(0), y1: y0, y2: y1, stroke: CHART.normal, "stroke-width": 1}),
+    h("g", {class: "y-labels", "font-size": 12, fill: CHART.muted, "text-anchor": "end"}, yTicks.map(t => h("text", {x: x0 - 6, y: round1(y(t) + 4)}, `${rules().texts.pct(t)} %`))),
+    h("g", {class: "x-labels", "font-size": 12, fill: CHART.muted, "text-anchor": "middle"}, xTicks.map(t => h("text", {x: x(t), y: y1 + 18}, formatPct(t)))),
+    h("g", {class: "axis-titles", "font-size": 12, fill: CHART.muted},
+      h("text", {x: 4, y: 14}, "Cuánto varía su precio"), h("text", {x: x1, y: height - 8, "text-anchor": "end"}, "Hoy frente a su precio normal")),
+    h("g", {class: "rest"}, groups.rest.map(p => h("circle", {cx: p.x, cy: p.y, r: 4, fill: CHART.normal, stroke: CHART.surface, "stroke-width": 2}))),
+    h("g", {class: "up"}, groups.up.map(p => h("rect", {x: round1(p.x - 5), y: round1(p.y - 5), width: 10, height: 10, transform: `rotate(45 ${p.x} ${p.y})`, fill: CHART.up, stroke: CHART.surface, "stroke-width": 2}))),
+    h("g", {class: "good"}, groups.good.map(p => h("circle", {cx: p.x, cy: p.y, r: 6, fill: CHART.good, stroke: CHART.surface, "stroke-width": 2}))),
+    h("g", {class: "labels", "font-size": 12}, labelled),
+    h("circle", {class: "focus-ring", cx: x0, cy: y1, r: 9, fill: "none", stroke: CHART.text, "stroke-width": 2, visibility: "hidden"}),
+    h("rect", {class: "hit", x: 0, y: 0, width, height, fill: "transparent"}));
+  return {node, layout: {points, x0, x1, y0, y1}};
+}
+
 // =================================================================================================================
 // Page (browser only)
 // =================================================================================================================
 function boot(doc, win) {
   const $ = selector => doc.querySelector(selector);
   const state = {me: null, csrf: "", market: null, summary: null, detail: null, filters: {q: "", cat: "", show: "", conf: ""},
-    sort: {key: "", dir: "asc"}, view: "mercado", lastUpload: null, pollTimer: null, members: null, busy: false};
+    sort: {key: "", dir: "asc"}, view: "mercado", lastUpload: null, pollTimer: null, members: null, busy: false,
+    compensa: {prof: "", skill: "", budget: "", rare: false, cat: ""}};
   let toastTimer;
 
   // ---- tiny DOM helpers
@@ -540,7 +771,7 @@ function boot(doc, win) {
   }
 
   // ---- views
-  const VIEWS = ["mercado", "balance", "miembros", "unirse"];
+  const VIEWS = ["mercado", "compensa", "balance", "miembros", "unirse"];
   function showOnly(id) {
     for (const section of doc.querySelectorAll("[data-screen]")) section.hidden = section.id !== id;
   }
@@ -573,8 +804,9 @@ function boot(doc, win) {
       if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
     }
     showOnly("screen-" + view);
-    $("#market-bar").hidden = !(view === "mercado" || view === "balance");
+    $("#market-bar").hidden = !(view === "mercado" || view === "compensa" || view === "balance");
     if (view === "miembros") loadMembers();
+    if (view === "compensa") renderCompensa();
     if (item && state.summary) openDetail(Number(item[1]));
     else if (!item && $("#detail").open) $("#detail").close();
   }
@@ -668,8 +900,8 @@ function boot(doc, win) {
   // The previous render stays (dimmed) while it reloads, so nothing jumps.
   async function loadMarket() {
     if (!state.market) { state.summary = null; renderMarket(); return; }
-    const frame = $("#screen-mercado");
-    frame.setAttribute("aria-busy", "true"); frame.classList.add("refreshing");
+    const frames = [$("#screen-mercado"), $("#screen-compensa")];
+    for (const frame of frames) { frame.setAttribute("aria-busy", "true"); frame.classList.add("refreshing"); }
     try {
       const summary = await request(`/api/guild/market?market=${encodeURIComponent(state.market)}`);
       state.summary = summary;
@@ -678,7 +910,7 @@ function boot(doc, win) {
     } catch (error) {
       if (error.status === 404) { state.summary = null; renderMarket(); }
       else handle(error);
-    } finally { frame.removeAttribute("aria-busy"); frame.classList.remove("refreshing"); }
+    } finally { for (const frame of frames) { frame.removeAttribute("aria-busy"); frame.classList.remove("refreshing"); } }
   }
   function renderFreshness() {
     const s = state.summary, me = state.me;
@@ -700,23 +932,30 @@ function boot(doc, win) {
     $("#market-content").hidden = !s;
     $("#balance-empty").hidden = !!s;
     $("#balance-content").hidden = !s;
+    $("#compensa-empty").hidden = !!s;
+    $("#compensa-content").hidden = !s;
     if (!s) {
       $("#market-empty-text").textContent = state.me?.markets?.length
         ? "Todavía no hay datos de ese mercado."
         : "Todavía nadie de la hermandad ha subido precios. Cuando alguien escanee la subasta y el sincronizador de su PC envíe los datos, aparecerán aquí.";
       $("#market-empty-admin").hidden = !state.me?.canAdmin;
       $("#banners").replaceChildren();
+      $("#compensa-banners").replaceChildren();
       return;
     }
     renderExports();
-    $("#banners").replaceChildren(...marketBanners(s).map(b => el("div", {class: "banner banner-" + b.kind, role: "status"},
+    const banners = () => marketBanners(s).map(b => el("div", {class: "banner banner-" + b.kind, role: "status"},
       el("span", {class: "banner-icon", "aria-hidden": "true", text: b.kind === "falling" ? "↘" : b.kind === "rising" ? "↗" : b.kind === "learning" ? "◷" : "⚑"}),
-      el("p", {}, el("strong", {text: b.title + ". "}), b.text))));
+      el("p", {}, el("strong", {text: b.title + ". "}), b.text)));
+    $("#banners").replaceChildren(...banners());
+    $("#compensa-banners").replaceChildren(...banners());
     $("#caveat").textContent = `Recuerda: ${s.caveat}. Los cálculos son estimaciones con los precios que la hermandad ha visto; confírmalos siempre en la subasta.`;
+    $("#compensa-caveat").textContent = $("#caveat").textContent;
     renderChollos();
     renderCategoryFilter();
     renderTable();
     renderBalance();
+    if (state.view === "compensa") renderCompensa();
   }
 
   // ---- "Chollos de hoy"
@@ -840,6 +1079,193 @@ function boot(doc, win) {
       pctNode(i.d7), el("span", {class: "conf conf-" + i.conf, text: i.conf === "ALTA" ? "Fiable" : "Orientativo"}))) : [el("li", {class: "muted", text: empty})];
     $("#risers").replaceChildren(...list(b.risers, "Ningún objeto fiable ha subido esta semana."));
     $("#fallers").replaceChildren(...list(b.fallers, "Ningún objeto fiable ha bajado esta semana."));
+  }
+
+  // ---- "Qué compensa": everything is worked out here from the summary, so the filters answer at once
+  const COMPENSA_SAVED = [["#farm-prof", "prof"], ["#farm-skill", "skill"], ["#resale-budget", "budget"]];
+  try {
+    const saved = JSON.parse(win.localStorage.getItem("hermandad.compensa") ?? "{}");
+    for (const [id, key] of COMPENSA_SAVED) if (typeof saved?.[key] === "string") { $(id).value = saved[key]; state.compensa[key] = $(id).value; }
+  } catch { /* private mode or an old value */ }
+  for (const [id, key] of COMPENSA_SAVED) {
+    $(id).addEventListener(id === "#farm-prof" ? "change" : "input", event => {
+      state.compensa[key] = event.target.value;
+      try { win.localStorage.setItem("hermandad.compensa", JSON.stringify({prof: state.compensa.prof, skill: state.compensa.skill, budget: state.compensa.budget})); } catch { /* private mode */ }
+      renderCompensa();
+    });
+  }
+  $("#farm-rare").addEventListener("change", event => { state.compensa.rare = event.target.checked; renderCompensa(); });
+  $("#map-cat").addEventListener("change", event => { state.compensa.cat = event.target.value; if (state.summary) renderMap(); });
+  // The map is drawn at its real width, so its text stays at 12 px: it is redrawn when that width changes.
+  let mapWidth = 0, resizeTimer;
+  win.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if (state.view === "compensa" && state.summary && $("#map-holder").clientWidth !== mapWidth) renderMap(); }, 150);
+  });
+
+  function renderCompensa() {
+    const s = state.summary, filters = state.compensa;
+    if (!s) return;
+    const skillText = filters.skill.trim(), budgetText = filters.budget.trim();
+    const skill = /^\d{1,3}$/.test(skillText) ? Number(skillText) : null;
+    const typed = budgetText ? parseGSC(budgetText) : null, typedOk = typed !== null && typed >= 1 && typed <= 100000000000;
+    $("#resale-budget").placeholder = formatGSC(s.budget);
+    $("#resale-feedback").textContent = budgetText && !typedOk ? "Presupuesto: escribe un importe como 100g." : "";
+    const budget = typedOk ? typed : s.budget;
+    const farm = farmRows(s, {prof: filters.prof, skill, rare: filters.rare}), resale = resaleRows(s, {budget}), smelt = smeltRows(s, {budget});
+    $("#best-cards").replaceChildren(...bestCards(s, farm, resale, smelt).map(c => el("li", {class: "best-card" + (c.good ? " is-good" : "")},
+      el("span", {class: "eyebrow", text: c.label}),
+      c.id !== null ? itemButton(c.id, c.name, "item-link best-name") : el("span", {class: "best-name", text: c.name}),
+      isInt(c.amount) ? el("span", {class: "best-amount"}, money(c.amount), " ", el("small", {text: c.per})) : null,
+      el("span", {class: "best-note", text: c.note}),
+      el("button", {type: "button", class: "jump", text: "Ver el detalle", onclick: () => $(c.target).scrollIntoView()}))));
+    renderFarm(farm);
+    renderResale(resale);
+    renderSmelt(smelt);
+    const select = $("#map-cat");
+    const cats = groupByCategory(s.items).map(g => ({cat: g.cat, label: g.items[0].catLabel ?? g.cat, n: g.items.length}));
+    select.replaceChildren(el("option", {value: "", text: "Todas las categorías"}), ...cats.map(c => el("option", {value: c.cat, text: `${c.label} (${c.n})`})));
+    select.value = cats.some(c => c.cat === filters.cat) ? filters.cat : "";
+    filters.cat = select.value;
+    renderMap();
+  }
+  const itemButton = (id, name, className = "item-link") => el("button", {type: "button", class: className, text: name, onclick: () => navigateItem(id)});
+  const num = (...children) => el("td", {class: "num"}, ...children);
+  const cell = (...children) => el("td", {}, ...children);
+  /** A chart's table twin: headers [[text, numeric]], rows of cells whose first one is the row header. */
+  function twinTable(headers, rows) {
+    return el("div", {class: "table-scroll"}, el("table", {},
+      el("thead", {}, el("tr", {}, ...headers.map(([text, numeric]) => el("th", {scope: "col", class: numeric ? "num" : null, text})))),
+      el("tbody", {}, ...rows.map(([first, ...cells]) => el("tr", {}, el("th", {scope: "row"}, first), ...cells)))));
+  }
+  function rankRow({id, name, tag, track, value, detail}) {
+    return el("li", {class: "rank-row"},
+      el("div", {class: "rank-name"}, itemButton(id, name), tag ? el("span", {class: "rank-tag", text: tag}) : null),
+      el("div", {"aria-hidden": "true"}, track),
+      el("div", {class: "rank-value"}, ...value),
+      detail ? el("p", {class: "rank-detail", text: detail}) : null);
+  }
+  /** A bar from the middle line: to the right when value > 0; maxAbs fills half of the track. */
+  function divergingTrack(value, maxAbs, tone) {
+    const track = el("span", {class: "track"}, el("span", {class: "zero"}));
+    if (!isInt(value) || value === 0) return track;
+    const bar = el("span", {class: `bar tone-${tone} ${value < 0 ? "to-left" : "to-right"}`});
+    bar.style.width = Math.max(2, Math.round(50 * Math.min(1, Math.abs(value) / maxAbs))) + "%";
+    if (value < 0) bar.style.right = "50%"; else bar.style.left = "50%";
+    track.append(bar);
+    return track;
+  }
+  function renderFarm(farm) {
+    const top = farm.rows.slice(0, 12), max = top[0]?.value || 1;
+    $("#farm-empty").hidden = top.length > 0;
+    $("#farm-empty").textContent = farm.unpriced ? "Todavía no hay precios de estos materiales: aparecerán cuando alguien de la hermandad escanee la subasta." : "Nada cumple estos filtros.";
+    $("#farm-twin").hidden = top.length === 0;
+    const title = r => r.name + (r.note ? ` (${r.note})` : "");
+    const tag = r => `${r.label}${r.prof === "cloth" ? "" : ` · habilidad ${r.skill}`} · niveles ${r.level[0]}–${r.level[1]}${r.rare ? " · raro" : ""}`;
+    $("#farm-list").replaceChildren(...top.map(r => {
+      const fill = el("span", {class: "rank-fill"});
+      fill.style.width = Math.max(1, Math.round(100 * r.value / max)) + "%";
+      return rankRow({id: r.id, name: title(r), tag: tag(r), track: el("span", {class: "rank-base"}, fill), value: [money(r.value), el("small", {text: `por ${r.per}`})],
+        detail: `${partsText(r)}. Dónde: ${r.zones}.`});
+    }));
+    $("#farm-table").replaceChildren(twinTable([["Objeto"], ["Profesión"], ["Habilidad", true], ["Niveles"], ["Vale", true], ["Por"], ["Δ7d", true], ["Oferta típica", true], ["Confianza"], ["Precio usado"], ["Da"], ["Zonas"]],
+      farm.rows.map(r => [itemButton(r.id, title(r)), cell(r.label), num(r.prof === "cloth" ? "—" : String(r.skill)), cell(`${r.level[0]}–${r.level[1]}`), num(money(r.value)), cell(r.per), num(pctNode(r.d7)), num(formatUnits(r.Q)),
+        cell(r.conf ? r.confLabel : "Aprendiendo"), cell(sourceText(r.source)), el("td", {class: "twin-wrap", text: partsText(r, {all: true})}), el("td", {class: "twin-wrap", text: r.zones})])));
+  }
+  function renderResale(rows) {
+    const s = state.summary, {texts} = rules(), guarded = s.phase !== "normal";
+    const top = rows.slice(0, 10), maxAbs = Math.max(1000, ...top.map(r => Math.min(10000, Math.abs(r.gapBp ?? 0))));
+    $("#resale-empty").hidden = !(guarded || rows.length === 0);
+    $("#resale-empty").textContent = guarded ? "Protección de lanzamiento: hasta el 18-nov no se propone ninguna compra." + (rows.length ? " Aquí ves cuánto tendría que bajar cada objeto." : " Aún no hay objetos con 7 días de precios.")
+      : rows.length ? "" : "Hacen falta 7 días de precios para saber a cuánto se revende cada objeto.";
+    $("#resale-legend").hidden = rows.length === 0;
+    $("#resale-twin").hidden = rows.length === 0;
+    $("#resale-list").replaceChildren(...top.map(r => rankRow({id: r.id, name: r.name, tag: r.e.catLabel ?? r.e.cat, track: divergingTrack(r.gapBp, maxAbs, isInt(r.gapBp) && r.gapBp <= 0 ? "gain" : "rest"),
+      value: r.buy ? [el("span", {class: "badge verdict-CHOLLO", text: "Compra"}), money(r.flip.profit), el("small", {text: "de ganancia"})] : [pctNode(r.gapBp), el("small", {text: "frente a lo máximo"})],
+      detail: r.buy ? `Compra ${r.flip.units}× a ${formatGSC(r.flip.maxBuy)} como máximo · no revendas por debajo de ${formatGSC(r.flip.breakEven)} · objetivo ${formatGSC(r.flip.Rs)}${r.flip.depositEstimated ? " · depósito estimado" : ""}` : r.flip.maxBuy > 0 ? `${isInt(r.p) ? `Hoy ${formatGSC(r.p)}` : "Sin precio hoy"} · compensa pagar hasta ${formatGSC(r.flip.maxBuy)} · ${r.e.statusText}` : texts.flip(r.flip, formatGSC)})));
+    $("#resale-table").replaceChildren(twinTable([["Objeto"], ["Hoy", true], ["Compensa hasta", true], ["Frente a lo máximo", true], ["Reventa prudente", true], ["Unidades", true], ["Coste", true], ["Ganancia", true], ["Estado"]],
+      rows.map(r => [itemButton(r.id, r.name), num(money(r.p)), num(money(r.flip.maxBuy)), num(pctNode(r.gapBp)), num(money(r.flip.Rs)), num(r.flip.units ? String(r.flip.units) : "—"), num(r.flip.units ? money(r.flip.cost) : "—"), num(r.flip.units ? money(r.flip.profit) : "—"),
+        cell(el("span", {class: "badge verdict-" + (r.buy ? "CHOLLO" : r.e.verdict), title: r.e.statusText, text: r.buy ? "Compra" : r.e.verdictLabel}))])));
+  }
+  function renderSmelt(smelt) {
+    const s = state.summary, rows = smelt.rows, maxAbs = Math.max(100, ...rows.map(r => Math.abs(r.unitProfit)));
+    const badge = r => el("span", {class: "badge " + (r.pays ? "verdict-CHOLLO" : r.label === "Mercado bajando" ? "verdict-BAJADA" : "off"), text: r.label});
+    const signed = copper => el("span", {}, copper > 0 ? "+" : "", money(copper));
+    const uses = r => r.parts.map(p => `${p.need} × ${p.name} a ${formatGSC(p.unit)}${p.fromVendor ? " (mercader)" : ""}`).join(" + ");
+    $("#smelt-note").hidden = s.phase === "normal" || rows.length === 0;
+    $("#smelt-note").textContent = "Precios de lanzamiento: el cálculo es orientativo y no es una recomendación de compra hasta el 18-nov.";
+    $("#smelt-empty").hidden = rows.length > 0;
+    $("#smelt-empty").textContent = "Faltan precios de hoy de los materiales o de los lingotes: aparecerán cuando alguien de la hermandad escanee la subasta.";
+    $("#smelt-legend").hidden = rows.length === 0;
+    $("#smelt-twin").hidden = rows.length === 0;
+    $("#smelt-list").replaceChildren(...rows.map(r => rankRow({id: r.id, name: r.name, tag: `Minería · habilidad ${r.skill}`, track: divergingTrack(r.unitProfit, maxAbs, r.unitProfit > 0 ? "gain" : "loss"),
+      value: [badge(r), signed(r.unitProfit), el("small", {text: "por lingote"})],
+      detail: `${uses(r)} → ${r.qty > 1 ? `${r.qty} lingotes` : "lingote"} a ${formatGSC(r.sale)} (${sourceText(r.source)})${r.pays ? ` · lote de ${r.flip.units}: ganas ≈ ${formatGSC(r.flip.profit)}` : ""}`})));
+    $("#smelt-table").replaceChildren(twinTable([["Lingote"], ["Habilidad", true], ["Materiales"], ["Coste por lingote", true], ["Venta", true], ["Ganancia por lingote", true], ["Margen", true], ["Lote", true], ["Ganancia del lote", true], ["Estado"]],
+      rows.map(r => [itemButton(r.id, r.name), num(String(r.skill)), el("td", {class: "twin-wrap", text: uses(r)}), num(money(r.unitCost)), num(money(r.sale)), num(money(r.unitProfit)), num(formatPct(r.marginBp)), num(r.flip.units ? String(r.flip.units) : "—"), num(r.flip.units ? money(r.flip.profit) : "—"), cell(badge(r))])));
+  }
+  function renderMap() {
+    const s = state.summary, holder = $("#map-holder");
+    const items = filterItems(s.items, {cat: state.compensa.cat}), known = items.filter(e => isInt(e.N));
+    mapWidth = holder.clientWidth;
+    const width = Math.max(300, mapWidth || 720);
+    const chart = marketMapSVG({items, width, height: width < 480 ? 300 : 380});
+    $("#map-empty").hidden = !!chart;
+    $("#map-empty").textContent = known.length ? "Hoy todavía nadie ha escaneado estos objetos: el balance compara el precio de hoy con el normal."
+      : `Aprendiendo precios: hacen falta 7 días con datos para saber qué es normal (de momento ${plural(marketMood(s.items).maxN, "día", "días")}).`;
+    $("#map-legend").hidden = !chart;
+    holder.replaceChildren(...(chart ? [mapFrame(chart)] : []));
+    $("#map-twin").hidden = known.length === 0;
+    const rows = [...known].sort((a, b) => (a.dBp ?? Infinity) - (b.dBp ?? Infinity) || a.id - b.id);
+    $("#map-table").replaceChildren(twinTable([["Objeto"], ["Hoy", true], ["Normal 14 d", true], ["Frente a lo normal", true], ["Variación", true], ["Δ7d", true], ["Mín – máx 14 d", true], ["Oferta típica", true], ["Estado"]],
+      rows.map(e => [itemButton(e.id, nameOf(e)), num(money(e.price?.lo)), num(money(e.N)), num(pctNode(e.dBp)), num(isInt(e.sBp) ? `±${rules().texts.pct(e.sBp)} %` : "—"), num(pctNode(e.d7)),
+        num(isInt(e.min14) ? el("span", {class: "range"}, money(e.min14), el("span", {class: "muted", text: " – "}), money(e.max14)) : "—"), num(formatUnits(e.Q)),
+        cell(el("span", {class: "badge verdict-" + e.verdict, title: e.statusText, text: e.verdictLabel}))])));
+  }
+  function mapFrame(chart) {
+    const frame = el("div", {class: "chart-frame", tabindex: "0", "aria-label": "Balance de objetos: usa las flechas para recorrerlos e Intro para abrir uno"});
+    const node = svg(chart.node), tip = el("div", {class: "chart-tip", hidden: true}), ring = node.querySelector(".focus-ring");
+    frame.append(node, tip);
+    const {points} = chart.layout;
+    let current = -1;
+    const show = i => {
+      current = i;
+      const p = points[i], e = p.e, scale = node.getBoundingClientRect().width / node.viewBox.baseVal.width;
+      ring.setAttribute("cx", String(p.x)); ring.setAttribute("cy", String(p.y)); ring.setAttribute("visibility", "visible");
+      tip.replaceChildren(el("strong", {text: nameOf(e)}), el("span", {}, "Hoy ", money(e.price?.lo), " · normal ", money(e.N)),
+        el("span", {text: `${formatPct(e.dBp)} frente a lo normal · varía ±${rules().texts.pct(e.sBp)} %`}), el("span", {class: "muted", text: e.verdictLabel}));
+      tip.hidden = false;
+      tip.style.left = Math.max(0, Math.min(p.x * scale + 14, frame.clientWidth - tip.offsetWidth - 4)) + "px";
+      tip.style.top = Math.max(0, Math.min(p.y * scale + 14, frame.clientHeight - tip.offsetHeight - 4)) + "px";
+    };
+    const hide = () => { current = -1; tip.hidden = true; ring.setAttribute("visibility", "hidden"); };
+    // The nearest item within 28 px answers, because a dot is too small a target.
+    const nearest = event => {
+      const rect = node.getBoundingClientRect(), k = node.viewBox.baseVal.width / rect.width;
+      const px = (event.clientX - rect.left) * k, py = (event.clientY - rect.top) * k;
+      let best = -1, distance = 28 * 28;
+      points.forEach((p, i) => { const d = (p.x - px) ** 2 + (p.y - py) ** 2; if (d <= distance) { distance = d; best = i; } });
+      return best;
+    };
+    node.addEventListener("pointermove", event => {
+      const i = nearest(event);
+      if (i < 0) hide(); else if (i !== current) show(i);
+    });
+    node.addEventListener("pointerleave", event => { if (event.pointerType === "mouse") hide(); });
+    // A click opens the item under a mouse; on a touch screen the first tap shows it and the second opens it.
+    node.addEventListener("click", event => {
+      const i = nearest(event);
+      if (i >= 0 && i === current) navigateItem(points[i].e.id);
+      else if (i >= 0) show(i);
+    });
+    frame.addEventListener("keydown", event => {
+      if (event.key === "Enter" && current >= 0) { event.preventDefault(); navigateItem(points[current].e.id); return; }
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      show(current < 0 ? 0 : Math.max(0, Math.min(points.length - 1, current + (event.key === "ArrowLeft" ? -1 : 1))));
+    });
+    frame.addEventListener("blur", hide);
+    return frame;
   }
 
   // ---- item detail
