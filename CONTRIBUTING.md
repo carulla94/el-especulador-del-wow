@@ -59,7 +59,7 @@ No publiques con `npm run deploy` sin revisar destino, bindings y migraciones; s
 | `src/auctioneer.mjs` | Lectura restringida de SavedVariables de Auctioneer y del puente. |
 | `src/worker.mjs` | Autenticación, API y coordinación de la cuenta en Cloudflare. |
 | `src/storage.mjs` | Persistencia SQLite del Durable Object. |
-| `src/guild.mjs` | Mercado de la hermandad: Durable Object `GuildMarket`, claves de miembros, envíos del sincronizador, resúmenes y CSV. |
+| `src/guild.mjs` | Mercado de la hermandad: Durable Object `GuildMarket`, claves de miembros, envíos del sincronizador (formatos 1 y 2), huecos por observador, resúmenes y CSV. |
 | `src/especular.mjs` | Reglas «Especular v1» (chollos, flips, balances, días de la semana), gemelas del `Spec.lua` del addon. La construcción la copia a `public/especular.js`. |
 | `test-vectors/` | Contrato compartido con el addon (`especular-v1.json`); no se edita: un cambio de reglas va en un archivo `-v2` nuevo. |
 | `public/hermandad.*` | Panel de la hermandad (`/hermandad`): página, estilos y JavaScript con gráficos SVG propios. |
@@ -68,7 +68,19 @@ No publiques con `npm run deploy` sin revisar destino, bindings y migraciones; s
 | `addon/EspeculadorBridge/` | Puente experimental para el cliente real del juego. |
 | `pc_sync/` | Envío opcional de archivos desde el PC a la cuenta en Cloudflare. |
 | `test/` | Pruebas del motor, importadores, almacenamiento, transporte, mercado de la hermandad y su panel. |
+| `test/fixtures/relay/` | Copias exactas de los datos de prueba de la retransmisión que comparten el addon (`test-lua/fixtures/relay/`) y el subidor (`pc_sync/fixtures/relay/`), y `guild-v1.mjs`, el `src/guild.mjs` anterior a la 0.4 (solo cambia su `import`) para probar que una base escrita por él sobrevive. No se editan a mano. |
 | `.github/workflows/` | Validación y publicación de cada edición. |
+
+## Retransmisión de la hermandad (relay-v1)
+
+Desde la 0.4 cada addon comparte sus escaneos completos con la hermandad por el canal oculto de los addons (mensajes `P3` y `Q3` del prefijo `OroHerm`) y los PC con el subidor los envían al panel como observadores aparte (envío formato 2). Reglas para no romperlo:
+
+- Los formatos de los mensajes, el código de observador y el envío formato 2 son un contrato entre `addon/OroHermandad`, `pc_sync/hermandad.py` y `src/guild.mjs`, con los mismos datos de prueba en los tres. Un cambio incompatible lleva un nombre nuevo (`P4`, `Q4`, formato 3), nunca un cambio de los actuales; el panel sigue aceptando el formato 1 de los subidores 0.3.
+- Privacidad: los nombres de los personajes nunca salen del juego. Cada personaje se identifica con un código de 8 cifras hexadecimales (FNV-1a de 32 bits del reino y nombre de la hermandad y del personaje), calculado por quien recibe el mensaje a partir del remitente que da el juego. Ese código es seudónimo, no anónimo: quien conozca la lista de la hermandad podría calcularlo. No lo muestres en el panel ni lo escribas en registros, y no añadas al envío nada que no esté en el contrato. Quien no quiera compartir escribe `/oro compartir off`.
+- En el servidor, la columna `member_id` de `guild_obs_day` y `guild_obs_point` es el hueco del observador: el id del miembro para sus propios personajes (también las filas anteriores a la 0.4) o `1000000000 + n` para un compañero retransmitido. Los agregados se calculan por persona (un hueco retransmitido vinculado a un miembro es ese miembro).
+- Los motivos de `skippedObservers` también son contrato: `LIMITE_DE_OBSERVADORES` (el panel está lleno), `ENVIO` (no cabía en ese envío: el subidor vuelve a enviar enseguida) y `CUOTA` (se acabó la parte del día para compañeros: el subidor vuelve a enviar pasada la medianoche UTC). Los compañeros entran por turnos, primero el que lleva más tiempo sin guardarse.
+- `Core.lua` llama a `Relay.lua` solo a través de `relayCall` (tras actualizar con solo un `/reload`, el juego aún no carga `Relay.lua` y todo lo demás debe seguir funcionando).
+- Los cambios de la base de la hermandad son aditivos y los aplica el propio Durable Object (`GuildStore.migrate`, marcado en `guild_meta.schema`), sin migraciones de wrangler. Si añades otro, sigue el mismo patrón y amplía la prueba de `test/guild-relay.test.mjs` que abre una base escrita por la versión anterior.
 
 ## Antes de proponer un cambio
 

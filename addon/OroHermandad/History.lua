@@ -7,12 +7,17 @@
 -- OroHermandadHist es lo único que el subidor de la hermandad saca del PC: solo lleva objetos vigilados (precios,
 -- nombre del objeto, precio de mercader, categoría y depósitos) por mercado. Nunca nombres de personajes, oro,
 -- profesiones ni nada de OroHermandadDB u OroHermandadCharDB.
+-- Esquema 2 (0.4.0): cada mercado lleva además `self` (los códigos de tus personajes) y `obs`, los precios de la lista
+-- fija que han compartido tus compañeros de hermandad al terminar sus escaneos completos (Relay.lua), con 15 días de
+-- días, 72 h de puntos y su propio tope de 2 MB. Cada compañero va con un código de 8 cifras (un hash del nombre
+-- del personaje y de la hermandad), nunca con su nombre. Ese código es seudónimo, no anónimo: quien conozca la lista
+-- de la hermandad podría calcularlo.
 local _, ns = ...
 local Data, Items, Spec, Prices = ns.Data, ns.Items, ns.Spec, ns.Prices
 local History = {}
 ns.History = History
 
-History.SCHEMA = 1
+History.SCHEMA = 2              -- 0.4.0: añade self y obs por mercado (la 0.3.x deja intacto un esquema 2)
 History.ROWS_PER_TICK = 2000   -- filas de un escaneo por tanda: 100 000 filas de un escaneo completo, unas 50 tandas
 History.ITEMS_PER_TICK = 4     -- objetos que se escriben por tanda al acabar de leer un escaneo (lo normal es tocar
                                -- solo el último registro; por el camino largo, con 120 días, unos 3 ms cada uno)
@@ -32,7 +37,7 @@ local isInt = Spec.IsInt
 local hist                     -- OroHermandadHist (la tabla viva que el juego guarda al salir)
 local db = {}                  -- OroHermandadDB: estado privado (extras vigilados, día de la última importación)
 local marketKeyFn              -- función de Core que da "Reino-Facción"
-local version = "0.3.1"
+local version = "0.4.0"
 local loadInfo = {}            -- cómo se cargó OroHermandadHist (para /oro sondeo)
 local shapes = {}              -- tipo de escaneo -> forma de su primera fila (para /oro sondeo)
 local queue, running = {}, nil
@@ -86,6 +91,12 @@ local function changed()
   local ok, err = pcall(onChange)
   if not ok then History.lastError = tostring(err) end
 end
+
+-- Aviso a Relay.lua de cada escaneo grabado (ya escrito): {market, t, whole, fallback, duplicate, written,
+-- items = {{id, lo, qty, qty5}, ...}} con los objetos de la lista fija que se escribieron con punto, de menor a mayor
+-- ID (nunca los extras de /oro vigilar). Relay decide si se comparte.
+local onScanRecorded
+function History.OnScanRecorded(fn) onScanRecorded = type(fn) == "function" and fn or nil end
 
 -- Precio positivo -> cobre entero (al más cercano; los del escaneo completo son compra ya / cantidad y pueden
 -- tener decimales), o nil si no es un precio válido.
@@ -226,6 +237,15 @@ local function marketFor(key, create)
   return market
 end
 
+-- Para Relay.lua y Core: el mercado actual ("Reino-Facción" válido o nil), la categoría de un objeto de la lista
+-- fija y la entrada de un mercado (create: la crea si no existe).
+function History.CurrentMarket() return currentKey() end
+function History.FixedCategory(id) return FIXED[id] end
+function History.Market(key, create)
+  if not validMarketKey(key) then return nil end
+  return marketFor(key, create)
+end
+
 local function touch(market, t)
   market.updated = t or market.updated
   local cut = Prices.LearnedCut and Prices.LearnedCut()
@@ -285,14 +305,239 @@ function History.Unwatch(id)
 end
 
 ---------------------------------------------------------------------------
+-- Precios de compañeros (esquema 2: market.self y market.obs; los escribe Relay.lua)
+---------------------------------------------------------------------------
+--   self = "65c8ae44,27e0ee58": códigos de tus personajes en ese mercado, el más nuevo primero (10 como mucho).
+--   obs[código] = {seen = hora del escaneo más nuevo aplicado, s = "t,t,t" horas de los escaneos ya aplicados (para no
+--                  contar dos veces el mismo), items = {[id] = {d = días, p = puntos}}} (contrato 2, solo lista fija).
+History.OBS_DAYS = 15                    -- días por compañero: la ventana de 14 días, hoy y mañana
+History.OBS_POINT_SECONDS = 3 * 86400    -- puntos de 72 h
+History.OBS_SCAN_SECONDS = 4 * 86400     -- escaneos aplicados que se recuerdan
+History.OBS_SCANS = 64
+History.OBS_STALE = 15 * 86400           -- un compañero sin escaneos en 15 días se olvida
+History.OBS_PER_MARKET = 40
+History.OBS_MAX_BYTES = 2048 * 1024      -- tope propio (40 compañeros con sus 15 días), aparte de los 768 KB de lo tuyo
+History.SELF_MAX = 10
+
+local function isHash(h) return type(h) == "string" and #h == 8 and not h:find("[^0-9a-f]") end
+History.IsHash = isHash
+
+-- "a,b,c" -> lista de códigos válidos, sin repetir, 10 como mucho.
+local function selfList(text)
+  local out, set = {}, {}
+  if type(text) ~= "string" then return out end
+  for h in text:gmatch("[^,]+") do
+    if isHash(h) and not set[h] and #out < History.SELF_MAX then out[#out + 1] = h; set[h] = true end
+  end
+  return out
+end
+History.SelfList = selfList
+
+-- "t,t,t" -> horas enteras sin repetir, de menor a mayor.
+local function decodeTimes(text)
+  local list, set = {}, {}
+  if type(text) ~= "string" then return list end
+  for x in text:gmatch("[^,]+") do
+    local t = x:match("^%d+$") and #x <= 10 and tonumber(x) or nil
+    if isInt(t, 1, Spec.TIME_MAX) and not set[t] then set[t] = true; list[#list + 1] = t end
+  end
+  table.sort(list)
+  return list
+end
+
+-- Lista ordenada -> texto, solo las de los últimos 4 días si se da now y las 64 más nuevas.
+local function encodeTimes(list, t)
+  local kept = {}
+  for _, x in ipairs(list) do if not t or x > t - History.OBS_SCAN_SECONDS then kept[#kept + 1] = x end end
+  local parts = {}
+  for i = max(1, #kept - History.OBS_SCANS + 1), #kept do parts[#parts + 1] = tostring(kept[i]) end
+  return table.concat(parts, ",")
+end
+History.DecodeTimes, History.EncodeTimes = decodeTimes, encodeTimes
+
+local function evictionOrder(a, b)
+  if a.seen ~= b.seen then return a.seen < b.seen end
+  return a.hash < b.hash
+end
+
+-- Deja como mucho 40 compañeros en el mercado: se van los de escaneo más viejo. Devuelve cuántos se fueron.
+local function capObservers(obs)
+  local list = {}
+  for h, entry in pairs(obs) do list[#list + 1] = {hash = h, seen = entry.seen} end
+  local extra = #list - History.OBS_PER_MARKET
+  if extra <= 0 then return 0 end
+  table.sort(list, evictionOrder)
+  for i = 1, extra do obs[list[i].hash] = nil end
+  return extra
+end
+History.EvictionOrder = evictionOrder
+
+-- Copia limpia de market.obs: códigos válidos que no son tuyos, horas enteras, objetos de la lista fija con sus
+-- textos (se normalizan después, en History.PruneObs).
+local function sanitizeObs(obs, mine)
+  local out = {}
+  for h, entry in pairs(type(obs) == "table" and obs or {}) do
+    if isHash(h) and not mine[h] and type(entry) == "table" then
+      local clean = {items = {}}
+      for id, item in pairs(type(entry.items) == "table" and entry.items or {}) do
+        if type(id) == "number" and FIXED[id] and type(item) == "table" then
+          clean.items[id] = {d = type(item.d) == "string" and item.d or "", p = type(item.p) == "string" and item.p or ""}
+        end
+      end
+      local times = decodeTimes(entry.s)
+      clean.s = encodeTimes(times)
+      clean.seen = isInt(entry.seen, 1, Spec.TIME_MAX) and entry.seen or times[#times]
+      if clean.seen and next(clean.items) then out[h] = clean end
+    end
+  end
+  return out
+end
+
+-- Días de un compañero: solo los suyos (src o) de los últimos keep días (15 si no se dice).
+local function obsDays(text, today, keep)
+  local kept = {}
+  for _, r in ipairs(Spec.DecodeDays(text)) do if r.src == "o" then kept[#kept + 1] = r end end
+  return Spec.EncodeDays(Spec.PruneDays(kept, today, keep or History.OBS_DAYS))
+end
+
+local function obsPoints(text, t, seconds)
+  return Spec.EncodePoints(Spec.PrunePoints(Spec.DecodePoints(text), t, seconds))
+end
+
+-- Con los textos ya normalizados (tras la carga; todo lo que se escribe después sale canónico y ordenado de más viejo
+-- a más nuevo), quitar los registros cuyo primer campo (día u hora) no pasa de limit es cortar el texto por delante:
+-- sin decodificarlo ni crear basura. nil si el texto no tiene la forma esperada (entonces, el camino largo).
+local function cutOlder(text, limit)
+  if not normalized or type(text) ~= "string" then return nil end
+  local pos, size = 1, #text
+  while pos <= size do
+    local first = tonumber(text:match("^(%d+),", pos))
+    if not first then return nil end
+    if first > limit then return pos == 1 and text or text:sub(pos) end
+    local sep = text:find(";", pos, true)
+    if not sep then return "" end
+    pos = sep + 1
+  end
+  return ""
+end
+
+local function trimDays(text, today, keep) return cutOlder(text, today - keep) or obsDays(text, today, keep) end
+local function trimPoints(text, t, seconds) return cutOlder(text, t - seconds) or obsPoints(text, t, seconds) end
+
+-- Poda de lo de los compañeros (al cargar y al salir): 15 días de días, 72 h de puntos, escaneos aplicados de 4 días,
+-- fuera quien lleve 15 días sin escaneos o se quede sin objetos, y 40 por mercado como mucho. Devuelve cuántos
+-- compañeros se quitaron.
+function History.PruneObs(h, t)
+  local today = Spec.DayIndex(t)
+  if type(h) ~= "table" or type(h.markets) ~= "table" or not today then return 0 end
+  local removed = 0
+  for _, market in pairs(h.markets) do
+    if type(market) == "table" and type(market.obs) == "table" then
+      for hash, entry in pairs(market.obs) do
+        for id, item in pairs(entry.items) do
+          item.d = trimDays(item.d, today, History.OBS_DAYS)
+          item.p = trimPoints(item.p, t, History.OBS_POINT_SECONDS)
+          if item.d == "" and item.p == "" then entry.items[id] = nil end
+        end
+        entry.s = encodeTimes(decodeTimes(entry.s), t)
+        if entry.seen < t - History.OBS_STALE or next(entry.items) == nil then
+          market.obs[hash] = nil
+          removed = removed + 1
+        end
+      end
+      removed = removed + capObservers(market.obs)
+      if next(market.obs) == nil then market.obs = nil end
+    end
+  end
+  return removed
+end
+
+-- Bytes de lo de los compañeros (la suma de Spec.EstimateSize de cada market.obs).
+local function obsSize(h)
+  local total = 0
+  for _, market in pairs(type(h) == "table" and type(h.markets) == "table" and h.markets or {}) do
+    if type(market) == "table" and type(market.obs) == "table" then total = total + Spec.EstimateSize(market.obs, "obs") end
+  end
+  return total
+end
+History.ObsSize = obsSize
+
+-- Si lo de los compañeros pasa de 2 MB: (1) sus puntos de más de 24 h, (2) sus días de más de 7 días, (3) de más de
+-- 3 días, (4) todos sus puntos y, solo si aún no cabe, (5) se van compañeros, el de escaneo más viejo primero (de
+-- todos los mercados). Así lo último que se pierde es lo que el subidor aún tiene que enviar (los días de hoy y de
+-- los 2 anteriores de cada compañero). Devuelve el paso (0 = cabía) y el tamaño.
+function History.ShrinkObs(h, t, maxBytes)
+  maxBytes = maxBytes or History.OBS_MAX_BYTES
+  local size = obsSize(h)
+  if size <= maxBytes or not isInt(t, 1, Spec.TIME_MAX) then return 0, size end
+  local function eachItem(fn)
+    for _, market in pairs(h.markets) do
+      if type(market) == "table" and type(market.obs) == "table" then
+        for hash, entry in pairs(market.obs) do
+          for id, item in pairs(entry.items) do
+            fn(item)
+            if item.d == "" and item.p == "" then entry.items[id] = nil end
+          end
+          if next(entry.items) == nil then market.obs[hash] = nil end
+        end
+        if next(market.obs) == nil then market.obs = nil end
+      end
+    end
+  end
+  eachItem(function(item) item.p = trimPoints(item.p, t, 86400) end)
+  size = obsSize(h)
+  if size <= maxBytes then return 1, size end
+  local today = Spec.DayIndex(t)
+  for step, keep in ipairs({7, 3}) do
+    eachItem(function(item) item.d = trimDays(item.d, today, keep) end)
+    size = obsSize(h)
+    if size <= maxBytes then return 1 + step, size end
+  end
+  eachItem(function(item) item.p = "" end)
+  size = obsSize(h)
+  if size <= maxBytes then return 4, size end
+  local list = {}
+  for _, market in pairs(h.markets) do
+    if type(market) == "table" and type(market.obs) == "table" then
+      for hash, entry in pairs(market.obs) do
+        list[#list + 1] = {market = market, hash = hash, seen = entry.seen, size = Spec.EstimateSize(entry, hash)}
+      end
+    end
+  end
+  table.sort(list, evictionOrder)
+  local estimate = size
+  for _, o in ipairs(list) do
+    if estimate <= maxBytes and obsSize(h) <= maxBytes then break end
+    o.market.obs[o.hash] = nil
+    if next(o.market.obs) == nil then o.market.obs = nil end
+    estimate = estimate - o.size
+  end
+  return 5, obsSize(h)
+end
+
+-- Llama a fn con los obs quitados un momento de cada mercado: el tope de 768 KB de lo tuyo se mide sin ellos.
+local function withoutObs(h, fn)
+  local detached = {}
+  for key, market in pairs(h.markets) do
+    if type(market) == "table" and market.obs ~= nil then detached[key] = market.obs; market.obs = nil end
+  end
+  local ok, a, b = pcall(fn)
+  for key, obs in pairs(detached) do h.markets[key].obs = obs end
+  if not ok then error(a, 0) end
+  return a, b
+end
+History.WithoutObs = withoutObs
+
+---------------------------------------------------------------------------
 -- Carga y guardado
 ---------------------------------------------------------------------------
 -- Copia limpia de lo que se cargó del archivo: mercados válidos, objetos con ID numérico, campos del tipo correcto.
 -- Los textos de días y puntos se dejan tal cual: Spec.PruneHist los decodifica y se salta lo que esté mal.
+-- Lee el esquema 1 (0.3.x: lo tuyo se copia igual, sin self ni obs) y el 2; siempre devuelve el 2.
 local function sanitize(saved)
   local out = {schema = History.SCHEMA, addon = version, markets = {}}
-  local markets = type(saved) == "table" and saved.schema == History.SCHEMA and type(saved.markets) == "table"
-    and saved.markets or {}
+  local schema = type(saved) == "table" and saved.schema or nil
+  local markets = (schema == 1 or schema == 2) and type(saved.markets) == "table" and saved.markets or {}
   for key, market in pairs(markets) do
     if validMarketKey(key) and type(market) == "table" then
       local clean = {items = {}, dep = {}}
@@ -315,6 +560,13 @@ local function sanitize(saved)
           if encoded ~= "" then clean.dep[id] = encoded end
         end
       end
+      if schema == 2 then
+        local mine, set = selfList(market.self), {}
+        for _, h in ipairs(mine) do set[h] = true end
+        if #mine > 0 then clean.self = table.concat(mine, ",") end
+        local obs = sanitizeObs(market.obs, set)
+        if next(obs) then clean.obs = obs end
+      end
       out.markets[key] = clean
     end
   end
@@ -329,7 +581,8 @@ end
 
 -- En ADDON_LOADED. saved: lo que el juego cargó en OroHermandadHist (nil si nada). opts: db (OroHermandadDB ya
 -- preparado), market (función "Reino-Facción"), version, dbLoaded (OroHermandadDB venía del archivo).
--- Limpia, poda (120 días, 14 días de puntos) y deja el total en 768 KB o menos. Devuelve la tabla que debe quedar en
+-- Limpia, poda (120 días, 14 días de puntos; lo de los compañeros, 15 días y 72 h) y deja lo tuyo en 768 KB o menos
+-- (medido sin lo de los compañeros, que tiene su propio tope de 2 MB). Devuelve la tabla que debe quedar en
 -- OroHermandadHist.
 function History.Load(saved, opts)
   opts = opts or {}
@@ -347,15 +600,19 @@ function History.Load(saved, opts)
     hist = nil
     return saved
   end
-  loadInfo.badSchema = type(saved) == "table" and saved.schema ~= History.SCHEMA
+  loadInfo.badSchema = type(saved) == "table" and saved.schema ~= 1 and saved.schema ~= History.SCHEMA
+  loadInfo.fromSchema = type(saved) == "table" and saved.schema or nil
   hist = sanitize(saved)
   normalized = false
   if t then
     local ok, removed = pcall(Spec.PruneHist, hist, t)
     loadInfo.pruned = ok and removed or nil
-    normalized = ok
-    local okShrink, step, size = pcall(Spec.Shrink, hist, Spec.MAX_BYTES, t)
+    local okObs = pcall(History.PruneObs, hist, t)
+    normalized = ok and okObs
+    local okShrink, step, size = pcall(withoutObs, hist, function() return Spec.Shrink(hist, Spec.MAX_BYTES, t) end)
     if okShrink then loadInfo.shrinkStep, loadInfo.size = step, size end
+    local okObsShrink, obsStep, obsBytes = pcall(History.ShrinkObs, hist, t)
+    if okObsShrink then loadInfo.obsStep, loadInfo.obsSize = obsStep, obsBytes end
     db.histSince = db.histSince or t
   end
   local items = 0
@@ -367,14 +624,17 @@ end
 function History.Hist() return hist end
 function History.LoadInfo() return loadInfo end
 
--- En PLAYER_LOGOUT, antes de que el juego escriba el archivo: el tope de 768 KB también para lo de esta sesión.
+-- En PLAYER_LOGOUT, antes de que el juego escriba el archivo: los topes de 768 KB (lo tuyo) y 2 MB (lo de los
+-- compañeros, ya podado) también para lo de esta sesión. Devuelve paso y tamaño de cada uno.
 function History.BeforeSave()
   if not hist then return nil end
   hist.schema, hist.addon = History.SCHEMA, version
   local t = now()
   if not t then return nil end
-  local step, size = Spec.Shrink(hist, Spec.MAX_BYTES, t)
-  return step, size
+  pcall(History.PruneObs, hist, t)
+  local step, size = withoutObs(hist, function() return Spec.Shrink(hist, Spec.MAX_BYTES, t) end)
+  local obsStep, obsBytes = History.ShrinkObs(hist, t)
+  return step, size, obsStep, obsBytes
 end
 
 -- ¿Sobrevivió OroHermandadHist al último /reload? Detecta el fallo de Forever que guarda los SavedVariables pero no
@@ -640,7 +900,19 @@ step = function()
                           fallback = job.fallback, duplicate = job.duplicate, t = job.t, ticks = job.ticks,
                           errors = job.errors}
     running = nil
-    if job.written > 0 then changed() end
+    if job.written > 0 then
+      changed()
+      if onScanRecorded then
+        local items = {}
+        for _, id in ipairs(job.ids) do
+          local a = job.agg[id]
+          if FIXED[id] and a and not a.noPoint then items[#items + 1] = {id, a.lo, a.qty, a.qty5} end
+        end
+        local okHook, errHook = pcall(onScanRecorded, {market = job.market, t = job.t, whole = job.whole,
+          fallback = job.fallback or false, duplicate = job.duplicate or false, written = job.written, items = items})
+        if not okHook then History.lastError = tostring(errHook) end
+      end
+    end
     startNext()
   else
     schedule(step)
@@ -1166,8 +1438,9 @@ local function probeLines()
     for _ in pairs(market and market.dep or {}) do deposits = deposits + 1 end
     local markets = 0
     for _ in pairs(hist.markets) do markets = markets + 1 end
+    local own = withoutObs(hist, function() return Spec.EstimateSize(hist) end)
     add("OroHermandadHist: " .. plural(countItems(market), "objeto", "objetos") .. " en este mercado, "
-      .. plural(markets, "mercado", "mercados") .. ", " .. string.format("%.0f", Spec.EstimateSize(hist) / 1024)
+      .. plural(markets, "mercado", "mercados") .. ", " .. string.format("%.0f", own / 1024)
       .. " KB de " .. (Spec.MAX_BYTES / 1024) .. " KB como máximo · depósitos de " .. plural(deposits, "objeto", "objetos")
       .. (loadInfo.shrinkStep and loadInfo.shrinkStep > 0 and (" · al cargar se recortó (paso " .. loadInfo.shrinkStep .. ")") or ""))
     local import = History.lastImport
@@ -1179,7 +1452,18 @@ local function probeLines()
     else
       add("Historial de Auctionator: aún no importado en esta sesión.")
     end
-    if History.lastError then add("Último fallo interno: " .. History.lastError) end
+    local relay = ns.Relay
+    local errors = {}
+    if History.lastError then errors[#errors + 1] = History.lastError end
+    if relay and relay.lastError then errors[#errors + 1] = "precios compartidos: " .. tostring(relay.lastError) end
+    if ns.Guild and ns.Guild.relayError then errors[#errors + 1] = "cola de precios: " .. tostring(ns.Guild.relayError) end
+    if #errors > 0 then add("Último fallo interno: " .. table.concat(errors, " · ")) end
+  end)
+
+  -- Precios compartidos por la hermandad (Relay.lua): cuántos compañeros y cómo va; nunca nombres ni códigos.
+  section(function()
+    local relay = ns.Relay
+    if relay and type(relay.ProbeLine) == "function" then add(relay.ProbeLine()) end
   end)
 
   add("¿OroHermandadHist sobrevivió al último /reload? " .. History.SurvivalText())

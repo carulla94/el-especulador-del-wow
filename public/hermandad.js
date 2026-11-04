@@ -119,11 +119,15 @@ export function formatWhen(iso, nowMs, timeZone) {
   if (same(at, yesterday)) return `ayer ${clock}`;
   return `${Number(at.day)} ${MONTHS[Number(at.month) - 1]} ${clock}`;
 }
-/** The freshness strip: "4 miembros · último envío hace 2 h · día 12 desde el lanzamiento". */
+/** The freshness strip: "4 personas aportan (2 suben) · último envío hace 2 h · día 12 desde el lanzamiento". Persons
+ * (freshness.observers) are the members who upload plus the guild mates whose addon shared their scans in 14 days;
+ * "suben" (contributors) are the members who uploaded. Without the persons count it reads "4 miembros". */
 export function freshnessLine(freshness, dayOfLaunch, nowMs) {
   const parts = [];
-  const contributors = freshness?.contributors ?? 0;
-  parts.push(contributors > 0 ? plural(contributors, "miembro", "miembros") : "ningún envío en 14 días");
+  const contributors = freshness?.contributors ?? 0, observers = freshness?.observers;
+  if (contributors <= 0) parts.push("ningún envío en 14 días");
+  else if (isInt(observers)) parts.push(`${plural(observers, "persona aporta", "personas aportan")} (${plural(contributors, "sube", "suben")})`);
+  else parts.push(plural(contributors, "miembro", "miembros"));
   const ago = relativeTime(freshness?.lastUploadAt, nowMs);
   if (ago) parts.push(`último envío ${ago}`);
   if (isInt(dayOfLaunch)) {
@@ -132,6 +136,16 @@ export function freshnessLine(freshness, dayOfLaunch, nowMs) {
     else parts.push(`faltan ${1 - dayOfLaunch} días para el lanzamiento`);
   }
   return parts.join(" · ");
+}
+
+/** Who is behind one day of the market: the labels of the members kept (null for a guild mate who only shares from
+ * the game), e.g. "Ana, Luis y 2 compañeros", "Ana, Luis" or "1 compañero"; the count alone when nobody is known. */
+export function peopleText(labels, count) {
+  const list = Array.isArray(labels) ? labels : [], names = list.filter(Boolean), mates = list.length - names.length;
+  if (!list.length) return isInt(count) ? String(count) : "—";
+  const others = mates > 0 ? plural(mates, "compañero", "compañeros") : null;
+  if (!names.length) return others;
+  return others ? `${names.join(", ")} y ${others}` : names.join(", ");
 }
 
 // ---- What the market says as a whole -------------------------------------------------------------------------
@@ -184,7 +198,7 @@ export function cholloEmptyText(summary) {
   if (mood.learning === mood.items) return `Aprendiendo precios: hacen falta 7 días con datos (de momento ${plural(mood.maxN, "día", "días")}).`;
   if (!items.some(e => e.price)) return "Hoy todavía nadie ha escaneado la subasta: los chollos se buscan con el precio más bajo visto hoy por la hermandad.";
   if (mood.falling >= 3 && mood.falling * 3 >= mood.known) return "El mercado está bajando: no se proponen compras para revender mientras dure la caída.";
-  return "Hoy nadie de la hermandad ha visto ningún objeto por debajo de su línea de chollo. Cuantos más miembros escaneen, antes se detectan.";
+  return "Hoy nadie de la hermandad ha visto ningún objeto por debajo de su línea de chollo. Cuantos más compañeros escaneen la subasta entera con el addon, antes se detectan.";
 }
 
 // ---- The market table: filters and sorting -------------------------------------------------------------------
@@ -431,11 +445,11 @@ export function csvRows(columns, records) {
 export const SUMMARY_COLUMNS = Object.freeze([
   {label: "Objeto", kind: "text", value: e => e.name || `Objeto ${e.id}`}, {label: "ID", kind: "int", value: e => e.id},
   {label: "Categoría", kind: "text", value: e => e.catLabel}, {label: "Hoy (oro)", kind: "gold", value: e => e.today?.v},
-  {label: "Más bajo hoy (oro)", kind: "gold", value: e => e.price?.lo}, {label: "Visto por", kind: "text", value: e => e.price?.member},
+  {label: "Más bajo hoy (oro)", kind: "gold", value: e => e.price?.lo}, {label: "Visto por", kind: "text", value: e => e.price ? e.price.member ?? "un compañero" : null},
   {label: "Normal 14 d (oro)", kind: "gold", value: e => e.N}, {label: "Δ1d (%)", kind: "pct", value: e => e.d1},
   {label: "Δ7d (%)", kind: "pct", value: e => e.d7}, {label: "Mín 14 d (oro)", kind: "gold", value: e => e.min14},
   {label: "Máx 14 d (oro)", kind: "gold", value: e => e.max14}, {label: "Oferta típica", kind: "int", value: e => e.Q},
-  {label: "Miembros", kind: "int", value: e => e.members}, {label: "Días con datos", kind: "int", value: e => e.n},
+  {label: "Personas", kind: "int", value: e => e.members}, {label: "Días con datos", kind: "int", value: e => e.n},
   {label: "Confianza", kind: "text", value: e => e.confLabel}, {label: "Veredicto", kind: "text", value: e => e.verdictLabel}]);
 /** The daily columns of the server CSV (kind=daily) for one item of the detail view. */
 export function dailyColumns(item, launchDay) {
@@ -443,7 +457,7 @@ export function dailyColumns(item, launchDay) {
     {label: "Objeto", kind: "text", value: () => item.name || `Objeto ${item.id}`}, {label: "ID", kind: "int", value: () => item.id},
     {label: "Categoría", kind: "text", value: () => item.catLabel}, {label: "Valor (oro)", kind: "gold", value: x => x.v},
     {label: "Mín (oro)", kind: "gold", value: x => x.lo}, {label: "Máx (oro)", kind: "gold", value: x => x.hi},
-    {label: "Cantidad", kind: "int", value: x => x.qty}, {label: "Miembros", kind: "int", value: x => x.obs}];
+    {label: "Cantidad", kind: "int", value: x => x.qty}, {label: "Personas", kind: "int", value: x => x.obs}];
 }
 
 // ---- The editable flip calculator of the item detail --------------------------------------------------------
@@ -918,7 +932,8 @@ function boot(doc, win) {
     if (!s) { strip.textContent = me ? freshnessLine(null, me.dayOfLaunch, Date.now()) : ""; return; }
     strip.textContent = freshnessLine(s.freshness, s.dayOfLaunch, Date.now());
     const f = s.freshness ?? {};
-    strip.title = f.lastUploadAt ? `Último envío: ${f.lastUploadBy ?? "un miembro"}, ${formatWhen(f.lastUploadAt, Date.now())} · hoy ${plural(f.contributorsToday ?? 0, "miembro ha enviado", "miembros han enviado")} precios` : "";
+    strip.title = f.lastUploadAt ? `Último envío: ${f.lastUploadBy ?? "un compañero"}, ${formatWhen(f.lastUploadAt, Date.now())} · hoy ${plural(f.contributorsToday ?? 0, "miembro ha enviado", "miembros han enviado")} precios` +
+      (isInt(f.observersToday) ? ` · hoy aportan ${plural(f.observersToday, "persona", "personas")} (también quienes solo comparten sus escaneos desde el juego)` : "") : "";
   }
   function renderExports() {
     const base = `/api/guild/export.csv?market=${encodeURIComponent(state.market ?? "")}`;
@@ -978,7 +993,7 @@ function boot(doc, win) {
           el("button", {type: "button", class: "item-link", text: e.name || `Objeto ${e.id}`, onclick: () => navigateItem(e.id)}),
           el("span", {class: "badge verdict-CHOLLO", text: f?.accept ? "Chollo" : "Chollo · no compensa"})),
         el("p", {class: "chollo-price"}, money(e.price?.lo), el("span", {class: "muted", text: ` · ${(e.statusText || "").replace(/^Chollo: /, "")}`})),
-        el("p", {class: "seen muted", text: `Visto por ${f?.who ?? e.price?.member ?? "un miembro"}, ${formatWhen(f?.at ?? e.price?.at, Date.now())} · normal ${formatGSC(e.N)}`}),
+        el("p", {class: "seen muted", text: `Visto por ${f?.who ?? e.price?.member ?? "un compañero"}, ${formatWhen(f?.at ?? e.price?.at, Date.now())} · normal ${formatGSC(e.N)}`}),
         figures,
         el("p", {class: "flip-text", text: f?.accept
           ? `Objetivo de reventa ${formatGSC(f.Rs)} · tras la comisión del ${rules().texts.pct(f.cutBp ?? s.cutBp)} % y un depósito perdido${f.depositEstimated ? " (estimado)" : ""}`
@@ -1042,7 +1057,7 @@ function boot(doc, win) {
     const nameCell = el("th", {scope: "row", class: "name-cell"},
       el("button", {type: "button", class: "item-link", text: e.name || `Objeto ${e.id}`, onclick: () => navigateItem(e.id)}),
       state.sort.key ? el("span", {class: "cat-tag", text: e.catLabel ?? e.cat}) : null);
-    const today = e.price ? el("td", {class: "num", title: `Más bajo visto hoy por ${e.price.member ?? "un miembro"}, ${formatWhen(e.price.at, Date.now())}`}, money(e.price.lo)) : el("td", {class: "num"}, el("span", {class: "none", text: "—"}));
+    const today = e.price ? el("td", {class: "num", title: `Más bajo visto hoy por ${e.price.member ?? "un compañero"}, ${formatWhen(e.price.at, Date.now())}`}, money(e.price.lo)) : el("td", {class: "num"}, el("span", {class: "none", text: "—"}));
     return el("tr", {class: e.verdict === "CHOLLO" ? "is-chollo" : e.verdict === "CARO" ? "is-caro" : null},
       nameCell, today,
       el("td", {class: "num"}, money(e.N)),
@@ -1302,7 +1317,7 @@ function boot(doc, win) {
       el("p", {class: "detail-meta muted", text: `${item.catLabel} · ID ${item.id}${item.watch ? " · lista fija de la hermandad" : " · objeto vigilado por algún miembro"}${item.vendor ? ` · se vende al vendedor por ${formatGSC(item.vendor)}` : ""}`}),
       el("div", {class: "detail-status"}, el("span", {class: "badge verdict-" + a.verdict, text: detail.verdictLabel}), el("span", {text: detail.statusText}), el("span", {class: "muted", text: " · " + detail.confText})),
       el("div", {class: "stats"},
-        stat("Más bajo hoy", money(price?.lo), price ? `${price.member ?? "un miembro"}, ${formatWhen(price.at, Date.now())}` : "nadie lo ha visto hoy"),
+        stat("Más bajo hoy", money(price?.lo), price ? `${price.member ?? "un compañero"}, ${formatWhen(price.at, Date.now())}` : "nadie lo ha visto hoy"),
         stat("Normal 14 d", money(b.N), b.n ? plural(b.n, "día", "días") + " con datos" : null),
         stat("Línea de chollo", money(a.dumpLine), isInt(a.dumpLine) ? "por debajo, chollo" : null),
         stat("Precio alto", money(a.spikeLine), isInt(a.spikeLine) ? "por encima, caro" : null),
@@ -1342,7 +1357,7 @@ function boot(doc, win) {
       tip.replaceChildren(el("strong", {text: dayLabel(current)}),
         point ? el("span", {}, "Valor ", money(point.v)) : el("span", {class: "muted", text: "Sin datos ese día"}),
         point ? el("span", {}, "Mín – máx ", money(point.lo), " – ", money(point.hi)) : null,
-        point ? el("span", {class: "muted", text: `${plural(point.obs ?? 0, "miembro", "miembros")}${isInt(point.qty) ? ` · ${formatUnits(point.qty)}` : ""}`}) : null);
+        point ? el("span", {class: "muted", text: `${plural(point.obs ?? 0, "persona", "personas")}${isInt(point.qty) ? ` · ${formatUnits(point.qty)}` : ""}`}) : null);
       tip.hidden = false;
       const left = x(current) * scale;
       tip.style.left = Math.max(0, Math.min(left + 12, frame.clientWidth - tip.offsetWidth - 4)) + "px";
@@ -1368,11 +1383,11 @@ function boot(doc, win) {
     return el("details", {class: "days-table"},
       el("summary", {text: `Ver los ${plural(detail.days.length, "día", "días")} en una tabla`}),
       el("div", {class: "table-scroll"}, el("table", {},
-        el("thead", {}, el("tr", {}, ...["Día", "Valor", "Mín", "Máx", "Cantidad", "Miembros"].map((t, i) => el("th", {scope: "col", class: i >= 1 && i <= 4 ? "num" : null, text: t})))),
+        el("thead", {}, el("tr", {}, ...["Día", "Valor", "Mín", "Máx", "Cantidad", "Personas"].map((t, i) => el("th", {scope: "col", class: i >= 1 && i <= 4 ? "num" : null, text: t})))),
         el("tbody", {}, ...rows.map(x => el("tr", {},
           el("th", {scope: "row", text: dayLabel(x.d)}), el("td", {class: "num"}, money(x.v)), el("td", {class: "num"}, money(x.lo)),
           el("td", {class: "num"}, money(x.hi)), el("td", {class: "num", text: formatUnits(x.qty)}),
-          el("td", {text: x.members.filter(Boolean).join(", ") || String(x.obs)})))))),
+          el("td", {text: peopleText(x.members, x.obs)})))))),
       el("button", {type: "button", class: "button subtle small", text: "Descargar estos días (CSV)", onclick: () =>
         download(csvRows(dailyColumns(detail.item, state.summary?.launchDay ?? rules().LAUNCH), detail.days), `Hermandad_${detail.item.id}_diario_${detail.date}.csv`)}));
   }
@@ -1394,7 +1409,7 @@ function boot(doc, win) {
         el("thead", {}, el("tr", {}, ...["Cuándo", "Más bajo", "A la venta", "Cerca del mínimo", "Quién"].map((t, i) => el("th", {scope: "col", class: i >= 1 && i <= 3 ? "num" : null, text: t})))),
         el("tbody", {}, ...points.map(p => el("tr", {},
           el("td", {text: formatWhen(p.at, Date.now())}), el("td", {class: "num"}, money(p.lo)), el("td", {class: "num", text: formatUnits(p.qty)}),
-          el("td", {class: "num", text: p.qty5 ? formatUnits(p.qty5) : "—"}), el("td", {text: p.member ?? "—"})))))) : el("p", {class: "empty-line", text: "Nadie ha escaneado este objeto en los últimos 14 días."}));
+          el("td", {class: "num", text: p.qty5 ? formatUnits(p.qty5) : "—"}), el("td", {text: p.member ?? (p.mate ? "un compañero" : "—")})))))) : el("p", {class: "empty-line", text: "Nadie ha escaneado este objeto en los últimos 14 días."}));
   }
 
   // ---- flip calculator (especular.flip on what the player types)
@@ -1481,7 +1496,8 @@ function boot(doc, win) {
       return el("tr", {class: m.revoked ? "revoked" : null},
         el("th", {scope: "row", text: m.label}),
         el("td", {text: m.role === "admin" ? "Administra" : "Miembro"}),
-        el("td", {text: m.revoked ? `Revocado ${formatWhen(m.revokedAt, Date.now())}` : "Activo"}),
+        el("td", {text: (m.revoked ? `Revocado ${formatWhen(m.revokedAt, Date.now())}` : "Activo") +
+          (m.characters > 0 ? ` · ${plural(m.characters, "personaje vinculado", "personajes vinculados")}` : "")}),
         el("td", {text: m.lastUploadAt ? `${relativeTime(m.lastUploadAt, Date.now())}` : "Nunca"}),
         el("td", {}, keys),
         el("td", {}, el("div", {class: "actions"}, ...actions)));

@@ -1,0 +1,7 @@
+## Interface: 16001
+## Title: Oro de Hermandad - subidor
+## Notes: Lo crea el subidor de precios del PC para que Oro de Hermandad sepa que este PC sube los precios de la hermandad. No hace nada mas.
+## Author: Oro de Hermandad
+## Version: 1
+## OptionalDeps: OroHermandad
+OroHermandad_Subidor.lua

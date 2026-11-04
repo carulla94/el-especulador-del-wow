@@ -8,7 +8,7 @@ Pone los precios. Con la app de CurseForge: busca **Auctionator** en WoW Forever
 
 ## 2. Descarga OroHermandad.zip
 
-Descárgalo de la [versión 0.3.1](https://github.com/carulla94/el-especulador-del-wow/releases/download/oro-hermandad-v0.3.1/OroHermandad.zip) (todas las versiones, en [Releases](https://github.com/carulla94/el-especulador-del-wow/releases)). Si no puedes abrir el enlace, pídeselo a quien te pasó esta guía.
+Descárgalo de la [versión 0.4.0](https://github.com/carulla94/el-especulador-del-wow/releases/download/oro-hermandad-v0.4.0/OroHermandad.zip) (todas las versiones, en [Releases](https://github.com/carulla94/el-especulador-del-wow/releases)). Si no puedes abrir el enlace, pídeselo a quien te pasó esta guía.
 
 ## 3. Descomprímelo en la carpeta AddOns
 
@@ -32,11 +32,13 @@ En la pantalla de personajes, pulsa **Menú** (arriba) y luego **Addons** (o **A
 En la ventana eliges el modo: **Tranquilo** mientras subes de nivel, **A tope** en sesiones solo para hacer oro. Cuantos más del grupo lo usen, mejores son las sugerencias de hermandad.
 El tercer modo, **Especular**, busca chollos para comprar y revender: necesita 7 días de escaneos para el precio normal y 10 para los chollos (12 en Tranquilo), y no sugiere compras hasta el 18-nov.
 
+**Precios compartidos:** al terminar un escaneo completo, el addon comparte con tu hermandad, sin que se vea en el chat, el precio más bajo y las unidades de la lista fija. Los nombres de los personajes nunca salen del juego: el panel solo recibe un código de 8 cifras por personaje (seudónimo, no anónimo). No hay que hacer nada; con `/oro compartir off` dejas de compartir los tuyos. Con 1 o 2 compañeros que tengan el subidor en su PC, el panel recoge lo de todos (quien instale el subidor: sal del juego del todo una vez después).
+
 ## Si algo falla
 
 Escribe `/console scriptErrors 1` en el chat, repite lo que hacías y pasa el texto del error al grupo.
 
-Para actualizar, borra la carpeta `OroHermandad` y repite los pasos 2 y 3. Después **sal del juego del todo y vuelve a entrar**: un `/reload` no carga los archivos nuevos de una versión (la 0.3.0 trae dos y un historial de precios nuevo). El manual va dentro del zip: `OroHermandad/LEEME.md`.
+Para actualizar, borra la carpeta `OroHermandad` y repite los pasos 2 y 3. Después **sal del juego del todo y vuelve a entrar**: un `/reload` no carga los archivos nuevos de una versión (la 0.4.0 trae uno, `Relay.lua`). El manual va dentro del zip: `OroHermandad/LEEME.md`.
 
 ## Para quien reparte el zip
 

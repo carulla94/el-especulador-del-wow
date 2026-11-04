@@ -5,7 +5,7 @@ local Guild, UI, Tooltip, Extras, History, Spec = ns.Guild, ns.UI, ns.Tooltip, n
 local Core = {}
 ns.Core = Core
 
-Core.VERSION = "0.3.1"
+Core.VERSION = "0.4.0"
 
 local DEFAULTS = {mode = "lazy", autoOpen = true, sound = true, tooltip = true}
 -- Un escaneo de resumen cuenta como completo si trae al menos esta parte de los resultados del último que contó
@@ -37,6 +37,18 @@ local function safely(label, fn, ...)
   local ok, err = pcall(fn, ...)
   if not ok then say("error en " .. label .. ": " .. tostring(err)) end
   return ok, err
+end
+
+-- Precios compartidos (Relay.lua): siempre por aquí, sin nada en el chat si fallan. Tras actualizar el addon con
+-- solo un /reload, el juego aún no carga Relay.lua (lee la lista de archivos al arrancar): entonces no hay datos de
+-- la hermandad, todo lo demás funciona y solo /oro sondeo, /oro compartir y /oro subidor lo explican.
+local RELAY_RESTART = "tras actualizar el addon, sal del juego del todo y vuelve a entrar (un /reload no carga sus "
+  .. "archivos nuevos)."
+local function relayLoaded() return type(ns.Relay) == "table" end
+local function relayCall(name, ...)
+  local relay = ns.Relay
+  if type(relay) ~= "table" or type(relay[name]) ~= "function" then return false end
+  return pcall(relay[name], ...)
 end
 
 -- Precios de Auctionator: uno por reino y facción.
@@ -111,6 +123,9 @@ end
 
 -- Lo decodificado de cada objeto se guarda mientras su texto no cambie (en Lua dos textos iguales son el mismo
 -- valor: comparar es inmediato). Así el motor recibe la misma tabla de días hasta el siguiente escaneo.
+-- Precios de los compañeros (Relay.lua, ya decodificados por tandas): guild = {{id = código, records, point}, ...}
+-- y guildKey, una tabla que cambia cada vez que cambian esos datos o tus días (el motor recalcula con ella). Un objeto
+-- que solo tienen los compañeros también entra, con tus días vacíos.
 local specCache = {key = nil, items = {}}
 local function specContext(onlyID)
   local hist = History.Hist()
@@ -123,22 +138,38 @@ local function specContext(onlyID)
   local market = hist.markets[key]
   local source = type(market) == "table" and type(market.items) == "table" and market.items or {}
   local deposits = type(market) == "table" and type(market.dep) == "table" and market.dep or {}
+  local okGuild, guild = relayCall("GuildItems", key)
+  guild = okGuild and type(guild) == "table" and guild or {}
   local items = {}
   local function add(id, item)
-    if type(id) ~= "number" or type(item) ~= "table" then return end
+    if type(id) ~= "number" or (item ~= nil and type(item) ~= "table") then return end
+    local g = guild[id]
+    if not item and not (History.IsFixed(id) and g) then return end
     local c = specCache.items[id]
     if not c then c = {}; specCache.items[id] = c end
-    if c.d ~= item.d or not c.records then c.d, c.records = item.d, History.RecentRecords(item.d) end
-    if c.p ~= item.p then c.p, c.point = item.p, History.LastPoint(item.p) end
+    local d, p = item and item.d, item and item.p
+    if c.d ~= d or not c.records then c.d, c.records = d, d and History.RecentRecords(d) or {} end
+    if c.p ~= p then c.p, c.point = p, p and History.LastPoint(p) or nil end
     if c.dep ~= deposits[id] or c.deposit == nil then
       c.dep = deposits[id]
       c.deposit = Spec.DecodeDeposits(deposits[id])[Engine.SPEC_DEPOSIT_DURATION] or false
     end
-    if #c.records > 0 then
-      items[id] = {records = c.records, point = c.point, vendor = item.v, dep = c.deposit or nil, cat = item.c, name = item.n}
+    if #c.records > 0 or g then
+      local entry = {records = c.records, point = c.point, vendor = item and item.v or Items.SellPrice(id),
+                     dep = c.deposit or nil, cat = item and item.c or History.FixedCategory(id), name = item and item.n or nil}
+      if g then
+        if c.guildFrom ~= g.key or c.guildRecords ~= c.records then c.guildFrom, c.guildRecords, c.guildKey = g.key, c.records, {} end
+        entry.guild, entry.guildKey = g.list, c.guildKey
+      end
+      items[id] = entry
     end
   end
-  if onlyID then add(onlyID, source[onlyID]) else for id, item in pairs(source) do add(id, item) end end
+  if onlyID then
+    add(onlyID, source[onlyID])
+  else
+    for id, item in pairs(source) do add(id, item) end
+    for id in pairs(guild) do if source[id] == nil then add(id, nil) end end
+  end
   return {T = T, now = t, hints = db.spec.on ~= false, budget = (specBudget()), copperValues = supportsCopper(),
           items = items, books = History.Books()}
 end
@@ -292,6 +323,8 @@ local function printStatus()
   local budget, fixed = specBudget()
   say("Especular: presupuesto para chollos " .. Engine.Money(budget) .. (fixed and "" or " (el 25 % de tu oro)")
     .. "; en Tranquilo, A tope y la descripción de los objetos, " .. (db.spec.on ~= false and "encendido." or "apagado."))
+  local okRelay, relayLine = relayCall("StatusLine")
+  if okRelay and relayLine then say(relayLine) end
   if not Prices.Available() then say("Auctionator no está activo: sin él no hay precios.") end
 end
 
@@ -353,7 +386,8 @@ end
 
 local function openOptions()
   if not (Extras.OpenSettings and Extras.OpenSettings()) then
-    say("opciones: /oro auto on|off, /oro minimapa on|off, /oro sonido on|off, /oro info on|off, /oro especular on|off")
+    say("opciones: /oro auto on|off, /oro minimapa on|off, /oro sonido on|off, /oro info on|off, /oro especular on|off, "
+      .. "/oro compartir on|off, /oro subidor on|off|auto")
   end
 end
 
@@ -420,6 +454,8 @@ local HELP = {
   "/oro sesion — oro ganado en esta sesión  ·  /oro sesion reset",
   "/oro amigo Ana ingenieria 150 — añade a alguien a mano  ·  /oro amigo borrar Ana",
   "/oro sync — envía tus datos a la hermandad y le pide los suyos",
+  "/oro compartir on|off — comparte con la hermandad los precios de tus escaneos completos (sin nombres; por defecto sí)",
+  "/oro subidor on|off|auto — el PC que sube los precios al panel pide a la hermandad los que se perdió (auto: lo detecta)",
   "/oro comision 5 — porcentaje que se queda la subasta (por defecto 5)",
   "/oro tabla — precios guardados de la lista vigilada, para copiarlos a Excel",
   "/oro vigilar [enlace] — guarda también los precios de ese objeto (hasta 40)  ·  /oro olvidar [enlace]",
@@ -533,6 +569,40 @@ local function specCommand(args)
   refreshSoon()
 end
 
+-- /oro subidor y /oro compartir: lo único de los precios compartidos que sale en el chat, y solo al escribirlo.
+local function subidorCommand(args)
+  local word = Data.Normalize(args[2] or "")
+  local mode = (ON[word] and "on") or (OFF[word] and "off") or ((word == "auto" or word == "automatico") and "auto") or nil
+  if word ~= "" and not mode then say("uso: /oro subidor on|off|auto"); return end
+  if not relayLoaded() then say("los precios compartidos aún no están cargados: " .. RELAY_RESTART); return end
+  local _, current, marker = relayCall("SetSubidor", mode)
+  if mode == "on" then
+    say("subidor activado: este PC pedirá a la hermandad los precios que se perdió.")
+  elseif mode == "off" then
+    say("subidor desactivado: este PC solo recoge lo que la hermandad comparte mientras juegas.")
+  elseif mode == "auto" then
+    say("subidor en automático: se activa si el subidor del PC ha creado su aviso (sal del juego del todo una vez tras instalarlo).")
+  elseif current == "on" then
+    say("subidor: siempre activado.")
+  elseif current == "off" then
+    say("subidor: desactivado.")
+  else
+    say(marker and "subidor: automático (este PC sube precios: sí). Pide a la hermandad los precios que se perdió mientras no estabas."
+      or "subidor: automático (este PC sube precios: no).")
+  end
+end
+
+local function shareCommand(args)
+  if not relayLoaded() then say("los precios compartidos aún no están cargados: " .. RELAY_RESTART); return end
+  local okShare, sharing = relayCall("Share")
+  sharing = okShare and sharing == true
+  local value = Data.Normalize(args[2] or "") == "" and sharing or onOff(args[2], sharing)
+  if value == nil then say("uso: /oro compartir on|off"); return end
+  if Data.Normalize(args[2] or "") ~= "" then relayCall("SetShare", value) end
+  say(value and "compartir precios con la hermandad: activado."
+    or "compartir precios con la hermandad: desactivado: tus escaneos ya no se comparten (sigues viendo los de la hermandad).")
+end
+
 local function tableCommand()
   local text, count, hint = History.Table()
   if count == 0 then
@@ -545,6 +615,7 @@ end
 
 local function probeCommand()
   local lines = History.Probe()
+  if not relayLoaded() then lines[#lines + 1] = "Precios compartidos: aún no están cargados: " .. RELAY_RESTART end
   say("sondeo (también en la ventana, para copiarlo y pegarlo en una incidencia):")
   for _, line in ipairs(lines) do print("  " .. line) end
   safely("el sondeo", UI.ShowText, "Oro de Hermandad · sondeo", table.concat(lines, "\n"),
@@ -571,7 +642,13 @@ local function handleSlash(input)
   elseif cmd == "sync" then
     if not (type(IsInGuild) == "function" and IsInGuild()) then say("no estás en ninguna hermandad."); return end
     Guild.Announce(true); Guild.Request(); importRosterSoon() -- true: tus datos salen aunque no hayan cambiado
-    say("he enviado tus datos a la hermandad y le he pedido los suyos.")
+    local okAsk, asked = relayCall("Ask") -- en el PC con el subidor, también los precios que se perdió
+    say("he enviado tus datos a la hermandad y le he pedido los suyos"
+      .. ((okAsk and asked == "sent") and ", y también los precios que este PC se perdió." or "."))
+  elseif cmd == "subidor" then
+    subidorCommand(args)
+  elseif cmd == "compartir" then
+    shareCommand(args)
   elseif cmd == "auto" then
     setFlag("auto", args[2], function() return db.autoOpen end, function(v) db.autoOpen = v end)
   elseif cmd == "sonido" then
@@ -695,6 +772,11 @@ function handlers.ADDON_LOADED(name)
     OroHermandadHist = History.Load(OroHermandadHist, {db = db, market = marketKey, version = Core.VERSION,
                                                        dbLoaded = dbLoaded})
   end)
+  -- Precios compartidos con la hermandad: sin nada en el chat (un fallo queda para /oro sondeo). Lo que llega de los
+  -- compañeros repinta igual que un escaneo propio.
+  local okRelay, relayError = relayCall("Init", db, cdb)
+  if not okRelay and relayLoaded() then ns.Relay.lastError = tostring(relayError) end
+  relayCall("OnChange", function() invalidateSpecTips(); refreshSoon() end)
 end
 
 -- Un escaneo de Auctionator ha terminado: kind "full" (completo, el de replicate) o "summary" (el de resumen, el que
@@ -737,6 +819,8 @@ function handlers.PLAYER_LOGIN()
   safely("el botón del minimapa", Extras.CreateMinimapButton)
   if type(C_GuildInfo) == "table" and type(C_GuildInfo.GuildRoster) == "function" then pcall(C_GuildInfo.GuildRoster) end
   after(15, function() Guild.UpdateKey(); Guild.Announce(); Guild.Request(); importRosterSoon() end)
+  -- Después del anuncio: tu código, el aviso del subidor y, en ese PC, la petición de los precios que se perdió.
+  after(25, function() relayCall("Login") end)
   -- Una vez al día: rellena con el historial de Auctionator los días que faltan (su base ya está cargada).
   local importTries = 0
   local function importHistory()
@@ -862,7 +946,8 @@ end
 handlers.COMMODITY_SEARCH_RESULTS_UPDATED = commodityResults
 handlers.COMMODITY_SEARCH_RESULTS_ADDED = commodityResults
 
--- Justo antes de que el juego escriba los SavedVariables: el historial no pasa de 768 KB.
+-- Justo antes de que el juego escriba los SavedVariables: el historial no pasa de 768 KB (lo tuyo) y 2 MB (lo de
+-- los compañeros).
 function handlers.PLAYER_LOGOUT() History.BeforeSave() end
 
 function handlers.PLAYER_GUILD_UPDATE() Guild.UpdateKey(); invalidateMembers(); importRosterSoon() end

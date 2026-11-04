@@ -1,6 +1,10 @@
--- Oro de Hermandad: comparte profesiones y recetas rentables con la hermandad (mensajes de addon)
--- y lee las profesiones del roster de la hermandad para quien no tenga el addon.
--- Solo se comparte: nivel, profesiones con su nivel y hasta 8 recetas con beneficio. Nada de bolsas ni oro.
+-- Oro de Hermandad: comparte profesiones y recetas rentables con la hermandad (mensajes de addon, que no salen en el
+-- chat) y lee las profesiones del roster de la hermandad para quien no tenga el addon.
+-- De profesiones solo se comparte: nivel, profesiones con su nivel y hasta 8 recetas con beneficio. Nada de bolsas ni oro.
+-- Desde la 0.4.0 también viajan por aquí los precios de la lista vigilada de los escaneos completos (Relay.lua,
+-- mensajes P3 y Q3): van en una cola aparte de menos prioridad (lo de profesiones nunca espera detrás) y nunca salen en
+-- combate, en mazmorras o bandas ni con los mensajes de addon restringidos. Los nombres de los personajes no salen del
+-- juego: quien recibe identifica a quien envía con un código seudónimo (ver Relay.lua).
 local _, ns = ...
 local Data = ns.Data
 local Guild = {}
@@ -20,12 +24,15 @@ local LOCKDOWN_POLL = 10       -- con el chat bloqueado (mazmorra, banda, encuen
 local MAX_QTY = 1000           -- unidades por receta que aceptamos (munición: 200 por tanda)
 local MAX_QTY_V020 = 100       -- la versión 0.2.0 rechaza más y perdería la serie entera: no se envían
 local NOGUILD = "_sinhermandad"
+local RELAY_MAX_QUEUE = 64     -- mensajes de precios (P3/Q3) en su cola, como mucho
+local RELAY_KINDS = {P3 = true, Q3 = true}
 
 local state = {
   db = nil, getSelf = nil, key = nil, settled = false, legacy = nil, importedKey = nil, adopted = {},
   queue = {}, sending = false, owed = false,
   pending = {}, lastAnnounce = -math.huge, announceScheduled = false, forceNext = false, lastSig = nil,
   repliedTo = {}, requestedAt = -math.huge, seq = 0,
+  relayQueue = {}, relayHandler = nil, peerHook = nil,
 }
 
 local SEND = type(Enum) == "table" and Enum.SendAddonMessageResult or nil
@@ -80,6 +87,42 @@ local function chatLocked()
   return ok and locked == true
 end
 
+-- Los precios (P3/Q3) esperan también en combate, en mazmorras, bandas, campos de batalla y arenas, y con cualquier
+-- restricción de addons activa (Enum.AddOnRestrictionType: combate 0, encuentro 1, piedra angular 2, JcJ 3, mapa 4,
+-- chat 5). Si InCombatLockdown o IsInInstance fallan (algo restringido), se espera; si falla la pregunta por una
+-- restricción concreta, no bloquea: el propio envío devolvería 11 (bloqueado) y entonces también se espera.
+local RESTRICTION_TYPES = {0, 1, 2, 3, 4, 5}
+local function restrictionTypes()
+  local kinds = type(Enum) == "table" and type(Enum.AddOnRestrictionType) == "table" and Enum.AddOnRestrictionType or nil
+  local list = {}
+  if kinds then for _, value in pairs(kinds) do if type(value) == "number" then list[#list + 1] = value end end end
+  return #list > 0 and list or RESTRICTION_TYPES
+end
+
+local function relayBlocked()
+  if chatLocked() then return true end
+  if type(InCombatLockdown) == "function" then
+    local ok, inCombat = pcall(function() return InCombatLockdown() == true end)
+    if not ok or inCombat then return true end
+  end
+  local active = type(C_RestrictedActions) == "table" and C_RestrictedActions.IsAddOnRestrictionActive
+  if type(active) == "function" then
+    for _, kind in ipairs(restrictionTypes()) do
+      local ok, on = pcall(function() return active(kind) == true end)
+      if ok and on then return true end
+    end
+  end
+  if type(IsInInstance) == "function" then
+    local ok, inside = pcall(function()
+      local isInside, kind = IsInInstance()
+      return isInside == true and kind ~= "none"
+    end)
+    if not ok or inside then return true end
+  end
+  return false
+end
+Guild.RelayBlocked = relayBlocked
+
 ---------------------------------------------------------------------------
 -- Nombres
 ---------------------------------------------------------------------------
@@ -116,6 +159,7 @@ local function fold(text)
   if not out then out = changeCase(text, false); folded[text] = out end
   return out
 end
+Guild.Fold = fold -- Relay.lua calcula el código de cada personaje con estas mismas minúsculas
 
 -- Nombres al estilo del servidor: primera letra en mayúscula, el resto en minúscula y sin tu propio reino.
 function Guild.NormalizeName(name)
@@ -143,6 +187,7 @@ local function shortName(sender)
   if type(Ambiguate) == "function" then return Ambiguate(sender, "none") end
   return (sender:match("^([^%-]+)")) or sender
 end
+Guild.ShortName = shortName
 
 ---------------------------------------------------------------------------
 -- Almacén por hermandad
@@ -291,10 +336,11 @@ end
 -- Envío con cola, reintento y límite de ritmo
 ---------------------------------------------------------------------------
 -- "sent", "retry" (el servidor frena), "lockdown" (chat bloqueado: se espera) o "fail".
+-- Los precios (entry.relay) además esperan en combate, en instancias y con los mensajes de addon restringidos.
 local function rawSend(entry)
   if not (type(C_ChatInfo) == "table" and type(C_ChatInfo.SendAddonMessage) == "function") then return "fail" end
   if entry.channel == "GUILD" and not (type(IsInGuild) == "function" and IsInGuild()) then return "fail" end
-  if chatLocked() then return "lockdown" end
+  if chatLocked() or (entry.relay and relayBlocked()) then return "lockdown" end
   local ok, result = pcall(C_ChatInfo.SendAddonMessage, Guild.PREFIX, entry.msg, entry.channel, entry.target)
   if not ok then return "fail" end
   if result == LOCKDOWN then return "lockdown" end
@@ -302,7 +348,37 @@ local function rawSend(entry)
   return (result == nil or result == true or result == SUCCESS) and "sent" or "fail"
 end
 
-local function pump()
+local function without(queue, drop)
+  local keep = {}
+  for _, other in ipairs(queue) do if not drop(other) then keep[#keep + 1] = other end end
+  return keep
+end
+
+-- Primer mensaje de precios que aún vale: uno que lleva en cola más que su ttl se quita con el resto de su serie,
+-- sin avisar (el escaneo sigue en el buzón de quien lo hizo y puede llegar luego con la puesta al día).
+local function nextRelay()
+  local entry = state.relayQueue[1]
+  while entry and clock() - entry.queuedAt > entry.ttl do
+    local series = entry.series
+    state.relayQueue = without(state.relayQueue, function(other) return other.series == series end)
+    entry = state.relayQueue[1]
+  end
+  return entry
+end
+
+-- Un mensaje cada 1,2 s. Primero la cola de profesiones (H2/C2/R2, con su lógica de respuestas y anuncios
+-- pendientes); los precios solo salen cuando esa cola está vacía. Solo hay un envío programado a la vez (pumpToken):
+-- si los precios esperan (combate, instancia, frenazo del servidor) y llega algo de profesiones, sale ya.
+local pump
+local pumpToken = 0
+local function schedulePump(delay, waitingRelay)
+  pumpToken = pumpToken + 1
+  local token = pumpToken
+  state.waitingRelay = waitingRelay or false
+  after(delay, function() if token == pumpToken then pump() end end)
+end
+
+pump = function()
   local entry = state.queue[1]
   -- Respuestas por susurro que llegarían cuando quien pidió ya no las acepta: fuera, y luego va un anuncio general.
   while entry and entry.channel == "WHISPER" and not (entry.series and entry.series.started)
@@ -311,37 +387,115 @@ local function pump()
     state.owed = true
     entry = state.queue[1]
   end
+  if not entry and state.owed then
+    state.owed, state.sending = false, false
+    Guild.Announce(true)
+    if state.sending then return end -- el anuncio ya está en cola y su envío, programado
+  end
+  local relay = false
+  if not entry then
+    entry = nextRelay()
+    relay = entry ~= nil
+  end
   if not entry then
     state.sending = false
-    if state.owed then state.owed = false; Guild.Announce(true) end
     return
   end
+  state.sending = true
   local status = rawSend(entry)
-  if status == "lockdown" then after(LOCKDOWN_POLL, pump); return end -- no gasta intentos
+  if status == "lockdown" then schedulePump(LOCKDOWN_POLL, relay); return end -- no gasta intentos
   entry.tries = (entry.tries or 0) + 1
-  if status == "retry" and entry.tries < 6 then after(5, pump); return end
-  table.remove(state.queue, 1)
-  if status == "sent" then
-    if entry.series then entry.series.started = true end
-    if entry.kind == "request" then state.requestedAt = clock() end -- la ventana de respuestas cuenta desde aquí
-  elseif entry.series then
-    -- Sin esta parte la serie no se completa: se quita el resto y, si fue por el ritmo del servidor, se repite luego.
-    local keep = {}
-    for _, other in ipairs(state.queue) do if other.series ~= entry.series then keep[#keep + 1] = other end end
-    state.queue = keep
-    if status == "retry" then state.owed = true end
+  if status == "retry" and entry.tries < 6 then schedulePump(5, relay); return end
+  if relay then
+    table.remove(state.relayQueue, 1)
+    if status == "sent" then
+      if entry.series then entry.series.started = true end
+      if entry.onSent then
+        local ok, err = pcall(entry.onSent, entry)
+        if not ok then Guild.relayError = tostring(err) end
+      end
+    else
+      -- Sin esta parte la serie no se completa: fuera el resto (y, si era un susurro, todo lo que iba a esa persona).
+      -- Nunca deja un anuncio de profesiones pendiente (state.owed): los precios no los repite nadie.
+      local series, target = entry.series, entry.channel == "WHISPER" and entry.target or nil
+      state.relayQueue = without(state.relayQueue, function(other)
+        return other.series == series or (target ~= nil and other.channel == "WHISPER" and other.target == target)
+      end)
+    end
+  else
+    table.remove(state.queue, 1)
+    if status == "sent" then
+      if entry.series then entry.series.started = true end
+      if entry.kind == "request" then state.requestedAt = clock() end -- la ventana de respuestas cuenta desde aquí
+    elseif entry.series then
+      -- Sin esta parte la serie no se completa: se quita el resto y, si fue por el ritmo del servidor, se repite luego.
+      local series = entry.series
+      state.queue = without(state.queue, function(other) return other.series == series end)
+      if status == "retry" then state.owed = true end
+    end
   end
-  after(1.2, pump) -- el servidor admite ráfagas de 10 y luego 1 por segundo
+  schedulePump(1.2) -- el servidor admite ráfagas de 10 y luego 1 por segundo
+end
+
+local function startPump()
+  if not state.sending then
+    state.sending = true
+    schedulePump(0.2)
+  end
 end
 
 local function enqueue(msg, channel, target, kind, series)
   if type(msg) ~= "string" or #msg > 250 then return end
   state.queue[#state.queue + 1] = {msg = msg, channel = channel or "GUILD", target = target, kind = kind,
                                    series = series, queuedAt = clock()}
-  if not state.sending then
-    state.sending = true
-    after(0.2, pump)
+  if state.sending and state.waitingRelay then schedulePump(0.2) else startPump() end
+end
+
+-- Una serie de mensajes de precios (Relay.lua) en su cola de menos prioridad. ttl: segundos que puede esperar cada
+-- parte; onSent(entry): al salir cada parte de verdad (las ventanas de la puesta al día empiezan ahí). Devuelve false
+-- sin poner nada en cola si algún mensaje pasa de 250 bytes o la cola pasaría de 64 mensajes.
+function Guild.EnqueueRelay(messages, channel, target, ttl, onSent)
+  if type(messages) ~= "table" or #messages == 0 then return false end
+  if #state.relayQueue + #messages > RELAY_MAX_QUEUE then return false end
+  for _, msg in ipairs(messages) do
+    if type(msg) ~= "string" or msg == "" or #msg > 250 then return false end
   end
+  channel = channel or "GUILD"
+  if channel == "WHISPER" and type(target) ~= "string" then return false end
+  local series, at = {}, clock()
+  for _, msg in ipairs(messages) do
+    state.relayQueue[#state.relayQueue + 1] = {msg = msg, channel = channel, target = target, kind = "relay",
+      relay = true, series = series, queuedAt = at, ttl = tonumber(ttl) or 600,
+      onSent = type(onSent) == "function" and onSent or nil}
+  end
+  startPump()
+  return true
+end
+
+-- Mensajes de precios esperando turno.
+function Guild.RelayQueued() return #state.relayQueue end
+
+-- Quita de la cola de precios los mensajes para los que drop(texto) es verdad (con /oro compartir off, tus P3). Las
+-- partes de una serie que ya salieron caducan en quien las recibe como serie incompleta. Devuelve cuántos quitó.
+function Guild.DropRelay(drop)
+  if type(drop) ~= "function" then return 0 end
+  local before = #state.relayQueue
+  state.relayQueue = without(state.relayQueue, function(entry)
+    local ok, yes = pcall(drop, entry.msg)
+    return ok and yes == true
+  end)
+  return before - #state.relayQueue
+end
+
+-- Relay.lua recibe aquí los mensajes P3 y Q3 (de la hermandad y por susurro; él aplica sus reglas) y se entera de
+-- quién acaba de anunciarse a la hermandad (H2 o R2), para pedirle los precios que se perdió.
+function Guild.SetRelayHandler(fn) state.relayHandler = type(fn) == "function" and fn or nil end
+function Guild.OnPeerSeen(fn) state.peerHook = type(fn) == "function" and fn or nil end
+
+local function peerSeen(sender, kind, channel)
+  if not state.peerHook then return end
+  local ok, err = pcall(state.peerHook, sender, kind, channel)
+  if not ok then Guild.relayError = tostring(err) end
 end
 
 ---------------------------------------------------------------------------
@@ -420,12 +574,14 @@ function Guild.Handle(text, sender, channel)
   local kind = fields[1]
   if kind == "R" .. PROTOCOL then
     if channel == "GUILD" then Guild.Reply(sender) end
+    peerSeen(sender, kind, channel)
     return false
   elseif kind == "H" .. PROTOCOL then
     local level = int(fields[2], 0, 100)
     local craftCount = int(fields[4], 0, MAX_CRAFTS)
     local seq = int(fields[5], 0, 999)
     if not (level and craftCount and seq) or not guildKey() then return false end
+    peerSeen(sender, kind, channel)
     local friend, key = member(name, true, true)
     if not friend then return false end
     local old, profs = friend.addon, parseProfs(fields[3])
@@ -572,6 +728,7 @@ local function isGuildmate(sender)
   local friend = member(short, false)
   return friend ~= nil and (friend.roster ~= nil or friend.addon ~= nil)
 end
+Guild.IsGuildmate = isGuildmate
 
 -- Respuesta a una petición nuestra reciente, o las recetas que faltan de una serie ya empezada.
 local function expecting(text, sender)
@@ -581,9 +738,18 @@ local function expecting(text, sender)
   return key ~= nil and state.pending[key] ~= nil
 end
 
+-- Devuelve lo mismo que Guild.Handle: true si cambió algo de la hermandad (Core repinta y quizá suena). Los precios
+-- (P3/Q3) van a Relay.lua y siempre devuelven false: nunca repintan ni suenan.
 function Guild.OnAddonMessage(prefix, text, channel, sender)
   if secret(prefix) or secret(text) or secret(channel) or secret(sender) then return false end
   if prefix ~= Guild.PREFIX or type(text) ~= "string" then return false end
+  if RELAY_KINDS[text:match("^([^|]*)")] then
+    if state.relayHandler and (channel == "GUILD" or channel == "WHISPER") and type(sender) == "string" then
+      local ok, err = pcall(state.relayHandler, text, sender, channel)
+      if not ok then Guild.relayError = tostring(err) end
+    end
+    return false
+  end
   if channel == "GUILD" then return Guild.Handle(text, sender, channel) end
   if channel == "WHISPER" and expecting(text, sender) and isGuildmate(sender) then
     return Guild.Handle(text, sender, channel)

@@ -126,7 +126,7 @@ function Extras.RegisterSettings(core)
   end
   local db = state.db
   local ok, err = pcall(function()
-    local category = Settings.RegisterVerticalLayoutCategory("Oro de Hermandad")
+    local category, layout = Settings.RegisterVerticalLayoutCategory("Oro de Hermandad")
     local function checkbox(tbl, key, variable, label, tooltip, default, onChange)
       local setting = Settings.RegisterAddOnSetting(category, variable, key, tbl, Settings.VarType.Boolean, label, default)
       if onChange then setting:SetValueChangedCallback(function(_, value) onChange(value) end) end
@@ -174,6 +174,15 @@ function Extras.RegisterSettings(core)
       end
       Settings.CreateSlider(category, budgetSetting, options,
         "Oro máximo para comprar chollos (cada uno usa como mucho la cuarta parte). En 0, el 25 % del oro que llevas.")
+    end)
+    -- Precios compartidos con la hermandad: solo un texto (se cambia con /oro compartir y /oro subidor).
+    pcall(function()
+      if layout and type(layout.AddInitializer) == "function" and type(CreateSettingsListSectionHeaderInitializer) == "function" then
+        layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Precios compartidos con la hermandad",
+          "Al terminar un escaneo completo se comparten, sin que se vea en el chat, el precio más bajo y las unidades de "
+            .. "la lista fija; los compañeros nunca salen con su nombre. /oro compartir off deja de compartir los tuyos. "
+            .. "/oro subidor on|off|auto: el PC que sube los precios al panel pide los que se perdió."))
+      end
     end)
     Settings.RegisterAddOnCategory(category)
     state.categoryID = category:GetID()

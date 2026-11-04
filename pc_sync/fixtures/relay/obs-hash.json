@@ -1,0 +1,30 @@
+{
+  "algorithm": "relay-v1 observer hash: FNV-1a 32 (offset 2166136261, prime 16777619, mod 2^32) over the UTF-8 bytes of canonical, as 8 lowercase hex digits",
+  "canonical": "canonRealm(guildRealm) .. \"/\" .. fold(guildName) .. \"|\" .. fold(name) .. \"-\" .. canonRealm(realm); name/realm split at the first hyphen of sender; no hyphen: realm = ownRealm",
+  "fold": "Guild.lua changeCase(text, false): ASCII A-Z and the 2-byte UTF-8 Latin-1 / Latin Extended-A / Cyrillic rules of shiftCase; every other byte sequence unchanged",
+  "canonRealm": "fold(realm with spaces, tabs, hyphens and apostrophes removed)",
+  "marketTag": "FNV-1a 32 hex of the exact market key bytes (History market key, e.g. GritodeGuerra-Alliance), not folded",
+  "privacy": "pseudonymous, not anonymous: anyone who knows the guild roster can recompute these hashes",
+  "vectors": [
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Jusep-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|jusep-gritodeguerra", "hash": "65c8ae44", "note": "uploader 1, main character"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Jusepín-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|jusepín-gritodeguerra", "hash": "27e0ee58", "note": "uploader 1, alt on the same account (alias)"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Borja-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|borja-gritodeguerra", "hash": "556e986d", "note": "uploader 2"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Ána-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|ána-gritodeguerra", "hash": "47da174e", "note": "Latin-1 capital with accent: Á folds to á"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Борис-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|борис-gritodeguerra", "hash": "631b8919", "note": "Cyrillic: Б folds to б"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Łucja-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|łucja-gritodeguerra", "hash": "2cdf8f71", "note": "Latin Extended-A: Ł (U+0141) folds to ł (U+0142)"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Zoë-Sanguinarios", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|zoë-sanguinarios", "hash": "2c6d4eed", "note": "cross-realm guild mate: her own realm is kept"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "ÁNA-gritodeguerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|ána-gritodeguerra", "hash": "47da174e", "note": "same character as Ána-GritodeGuerra in other case"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Ána", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|ána-gritodeguerra", "hash": "47da174e", "note": "sender without realm: the receiver's own realm is appended"},
+    {"guildRealm": "GritodeGuerra", "guildName": "LOS ERRANTES", "sender": "Ána-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|ána-gritodeguerra", "hash": "47da174e", "note": "guild name case does not matter"},
+    {"guildRealm": "Grito de Guerra", "guildName": "Los Errantes", "sender": "Ána-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|ána-gritodeguerra", "hash": "47da174e", "note": "guild realm as GetGuildInfo may give it (spaces)"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Brontë-Aman'Thul", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|brontë-amanthul", "hash": "48a4d1aa", "note": "apostrophe removed from the realm"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Kael-Azjol-Nerub", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|kael-azjolnerub", "hash": "58e57eac", "note": "hyphenated realm: split at the first hyphen, hyphen removed"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Ÿvonne-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|ÿvonne-gritodeguerra", "hash": "560111a3", "note": "Ÿ (U+0178) folds to ÿ (U+00FF)"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Œdipe-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|œdipe-gritodeguerra", "hash": "101b2073", "note": "Œ (U+0152) folds to œ (U+0153)"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Errantes", "sender": "Ẁill-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los errantes|Ẁill-gritodeguerra", "hash": "19364aff", "note": "3-byte UTF-8 letter is kept as is; only ASCII and 2-byte letters fold"},
+    {"guildRealm": "GritodeGuerra", "guildName": "Los Señores del Oro", "sender": "Ána-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "gritodeguerra/los señores del oro|ána-gritodeguerra", "hash": "28d8d84c", "note": "other guild: the same character gets another hash"},
+    {"guildRealm": "Sanguinarios", "guildName": "Los Errantes", "sender": "Ána-GritodeGuerra", "ownRealm": "GritodeGuerra", "canonical": "sanguinarios/los errantes|ána-gritodeguerra", "hash": "28bb718b", "note": "same guild name on another home realm: another hash"}
+  ],
+  "fnv1a32_plain": [{"input": "", "hash": "811c9dc5"}, {"input": "a", "hash": "e40c292c"}, {"input": "foobar", "hash": "bf9cf968"}, {"input": "gritodeguerra/los errantes|ána-gritodeguerra", "hash": "47da174e"}],
+  "market_tags": [{"market": "GritodeGuerra-Alliance", "tag": "06642d3b"}, {"market": "GritodeGuerra-Horde", "tag": "7dd6b140"}, {"market": "Sanguinarios-Alliance", "tag": "84461900"}]
+}

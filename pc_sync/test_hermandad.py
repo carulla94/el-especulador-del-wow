@@ -6,6 +6,8 @@ import hashlib
 import io
 import json
 import os
+import re
+import shutil
 import tempfile
 import time
 import unittest
@@ -24,6 +26,24 @@ NOW = DAY_2499 + 5 * 86400 + 12 * 3600    # day 2504 at midday
 HERE = Path(__file__).resolve().parent
 SECRETS = ("Zaraguinda", "Pelopaja", "Hermandad Secreta de Prueba", "Receta: Poción secreta de prueba", "Herrería",
            "Alquimia", "ORO_DEL_BANCO_123456")
+# Shared relay-v1 fixtures (byte-identical copies of the ones the addon and the server test against).
+FIXTURES = HERE / "fixtures" / "relay"
+FIXTURE_SHA256 = {
+    "obs-hash.json": "c83a2641974175fe4f15cb6833e887e714a6f409fd4a7e28fc13a409cb6d425f",
+    "hist-schema1.lua": "32f9afd9a148487d2109af45b1faf94091c5a4c4c2a41eb736daf1037c164604",
+    "hist-schema1.json": "0b2f685b1dbd48be30c2748d4a61b77adf2644d08c56ce846805674d5133caa5",
+    "hist-schema2.lua": "15e09a13e526afd6e037934a7e4b30e1a01b957dbd3dc36b1f95082362922851",
+    "hist-schema2.json": "a4ec871683eaac5e2173d1e29fd27ce32dfaad91298a087da8a995ed1d59bbf1",
+    "hist-schema2-second.lua": "9d82e06dba911b21f36273f394c72dceca009775688938ebc02a803009e4668a",
+    "upload-schema1.json": "206274131bd28925c74fff90edabbe0ae5dfaf1a3e48f7361a29dba26802c131",
+    "upload-schema2.json": "b006c419d3e5fe9790bf8cd1c878d18d78e2fb5f74fe50e503c69e9e58eb1b8c",
+    "upload-schema2-from-hist1.json": "4bf06a62b459fdafc9f6c223ae6f166f0cbe5f07a03c300f49b35d69e9a26515",
+    "upload-schema2-second.json": "179b31d29de299d8ded833accc7e774a2a1f45398cb89ee5c0c5979fafb38026",
+    "companion/OroHermandad_Subidor/OroHermandad_Subidor.toc": "3948ebd232d93089e49f69813fab7c304d372afea0db0ec3096e53ba06407b14",
+    "companion/OroHermandad_Subidor/OroHermandad_Subidor.lua": "72dcab9bb57ccb82ec5fce7ec30fdfdfa4dc29411c014887b34a278a60408dca",
+    "constants.json": "293b0f52e6f382510ea900181b1fcfe6234148ba64c65f70912dee0dfbc296b9",
+}
+NAMES = ("Jusep", "Borja", "Ána", "Борис", "Los Errantes")   # characters and guild of the fixtures
 
 
 def lua(value, indent=""):
@@ -80,17 +100,32 @@ def sample_hist():
     }}
 
 
-EXPECTED = {"schema": 1, "addon": "0.3.0", "markets": [
-    {"market": "Mirage Raceway-Alliance", "cut": 500, "items": [
-        {"id": 2589, "name": "Paño de lino", "cat": "tela", "vendor": 13,
-         "days": [[2503, 90, 120, 100, 400, 3, "o"], [2504, 80, 95, 85, 350, 2, "o"]],
-         "points": [[NOW - 7200, 80, 350, 40], [NOW - 3600, 82, 300, 35]]},
-        {"id": 2772, "name": "Mena de hierro", "cat": "metal", "vendor": 150,
-         "days": [[2500, 1500, 1800, 1600, 40, 1, "a"]], "points": []}],
-     "deposits": [[2589, 1, 60], [2589, 2, 120], [2589, 3, 240], [3575, 3, 500]]},
-    {"market": "Zul'jin-Horde", "cut": None, "items": [
-        {"id": 2589, "name": "Paño de lino", "cat": "otro", "vendor": 0, "days": [[2504, 70, 70, 70, 0, 1, "o"]],
-         "points": []}], "deposits": []}]}
+def own(*series, obs=None, aliases=()):
+    """The self observer of a market in upload JSON schema 2."""
+    return {"obs": obs, "self": True, "aliases": list(aliases), "items": list(series)}
+
+
+# What the 0.4.0 uploader sends for sample_hist (OroHermandadHist schema 1 of the 0.3.x addon): upload JSON schema 2
+# with only the self observer, which has no code yet (obs null).
+EXPECTED = {"schema": 2, "addon": "0.3.0", "markets": [
+    {"market": "Mirage Raceway-Alliance", "cut": 500,
+     "items": [{"id": 2589, "name": "Paño de lino", "cat": "tela", "vendor": 13},
+               {"id": 2772, "name": "Mena de hierro", "cat": "metal", "vendor": 150},
+               {"id": 3575, "name": "Vacío", "cat": "metal", "vendor": 0}],
+     "deposits": [[2589, 1, 60], [2589, 2, 120], [2589, 3, 240], [3575, 3, 500]],
+     "observers": [own({"id": 2589, "days": [[2503, 90, 120, 100, 400, 3, "o"], [2504, 80, 95, 85, 350, 2, "o"]],
+                        "points": [[NOW - 7200, 80, 350, 40], [NOW - 3600, 82, 300, 35]]},
+                       {"id": 2772, "days": [[2500, 1500, 1800, 1600, 40, 1, "a"]], "points": []})]},
+    {"market": "Zul'jin-Horde", "cut": None, "items": [{"id": 2589, "name": "Paño de lino", "cat": "otro", "vendor": 0}],
+     "deposits": [], "observers": [own({"id": 2589, "days": [[2504, 70, 70, 70, 0, 1, "o"]], "points": []})]}]}
+
+
+def series_of(market, observer=None):
+    """{item id: series} of one observer (None: the self observer) of an uploaded market."""
+    for entry in market["observers"]:
+        if (observer is None and entry["self"]) or (observer is not None and entry["obs"] == observer and not entry["self"]):
+            return {s["id"]: s for s in entry["items"]}
+    return None
 
 
 def saved_variables(hist=None, db=True, chardb=False):
@@ -238,20 +273,41 @@ class DecodeTests(unittest.TestCase):
 
 
 # -----------------------------------------------------------------------------------------------------------
+def assert_schema_2_layout(test, upload):
+    """Key order and value types of upload JSON schema 2 (the bytes sent depend on the order)."""
+    test.assertEqual(list(upload), ["schema", "addon", "markets"])
+    test.assertEqual(upload["schema"], 2)
+    for market in upload["markets"]:
+        test.assertEqual(list(market), ["market", "cut", "items", "deposits", "observers"])
+        test.assertEqual([i["id"] for i in market["items"]], sorted({i["id"] for i in market["items"]}))
+        for item in market["items"]:
+            test.assertEqual(list(item), ["id", "name", "cat", "vendor"])
+        test.assertEqual(sum(o["self"] for o in market["observers"]), 1)
+        test.assertIs(market["observers"][0]["self"], True)
+        relayed = [o["obs"] for o in market["observers"][1:]]
+        test.assertEqual(relayed, sorted(set(relayed)))
+        named = {i["id"] for i in market["items"]}
+        for observer in market["observers"]:
+            test.assertEqual(list(observer), ["obs", "self", "aliases", "items"] if observer["self"] else ["obs", "self", "items"])
+            test.assertTrue(observer["obs"] is None and observer["self"] or isinstance(observer["obs"], str))
+            test.assertEqual([s["id"] for s in observer["items"]], sorted({s["id"] for s in observer["items"]}))
+            for series in observer["items"]:
+                test.assertEqual(list(series), ["id", "days", "points"])
+                test.assertIn(series["id"], named)
+                test.assertTrue(series["days"] or series["points"])
+                test.assertTrue(all(len(r) == 7 and r[6] in ("o", "a") for r in series["days"]))
+                test.assertTrue(observer["self"] or all(r[6] == "o" for r in series["days"]))
+                test.assertTrue(all(len(p) == 4 and all(type(x) is int for x in p) for p in series["points"]))
+
+
 class UploadTests(unittest.TestCase):
-    def test_payload_matches_contract_3_exactly(self):
+    def test_payload_matches_upload_schema_2_exactly(self):
         upload, notes = h.build_upload(h.extract_hist(saved_variables(sample_hist())), NOW)
         payload, more = h.encode_payload(upload)
         self.assertEqual(payload, encoded(EXPECTED))
         self.assertEqual((notes, more), ([], []))
         self.assertEqual(json.loads(payload), EXPECTED)
-        for market in upload["markets"]:
-            self.assertEqual(list(market), ["market", "cut", "items", "deposits"])
-            for item in market["items"]:
-                self.assertEqual(list(item), ["id", "name", "cat", "vendor", "days", "points"])
-                self.assertTrue(all(len(r) == 7 and r[6] in ("o", "a") for r in item["days"]))
-                self.assertTrue(all(len(p) == 4 and all(type(x) is int for x in p) for p in item["points"]))
-        self.assertEqual(list(upload), ["schema", "addon", "markets"])
+        assert_schema_2_layout(self, upload)
 
     def test_guild_names_professions_and_characters_never_leave_the_pc(self):
         hist = sample_hist()
@@ -268,12 +324,15 @@ class UploadTests(unittest.TestCase):
         self.assertIn("Paño de lino", payload)
 
     def test_other_schemas_and_bad_versions_are_rejected(self):
-        for schema in (2, 0, "1", True, None, 1.5):
+        for schema in (3, 0, "1", "2", True, None, 1.5, 2.0):
             hist = sample_hist()
             hist["schema"] = schema
             with self.subTest(schema=schema), self.assertRaises(h.SchemaError) as raised:
                 h.build_upload(hist, NOW)
-            self.assertIn("formato", str(raised.exception))
+            self.assertIn("solo entiende el formato 1 o 2", str(raised.exception))
+        hist = sample_hist()
+        hist["schema"] = 2                               # 0.4.0: the same own prices are read as in schema 1
+        self.assertEqual(h.build_upload(hist, NOW)[0], dict(EXPECTED))
         for addon in (None, 3, "", "0.3.0 beta", "x" * 33, "-1"):
             hist = sample_hist()
             hist["addon"] = addon
@@ -299,25 +358,28 @@ class UploadTests(unittest.TestCase):
         self.assertEqual([m["market"] for m in upload["markets"]], ["Reino-Alliance"])
         market = upload["markets"][0]
         self.assertIsNone(market["cut"])
-        first, second = market["items"]
+        first, second = market["items"]                                     # 12 has nothing to send: no metadata
         self.assertEqual(first["id"], 10)
         self.assertEqual(first["name"], "Concontrol " + "x" * 89)
         self.assertEqual(len(first["name"]), 100)
         self.assertEqual((first["cat"], first["vendor"]), ("otro", 0))
-        self.assertEqual([d[0] for d in first["days"]], [2504, 2505])       # day 2506 is after tomorrow
-        self.assertEqual(first["points"], [[NOW, 5, 1, 1]])                 # older than 14 days or in the future: out
+        prices = series_of(market)
+        self.assertEqual(sorted(prices), [10, 11])
+        self.assertEqual([d[0] for d in prices[10]["days"]], [2504, 2505])  # day 2506 is after tomorrow
+        self.assertEqual(prices[10]["points"], [[NOW, 5, 1, 1]])            # older than 14 days or in the future: out
         self.assertEqual((second["id"], second["name"], second["cat"], second["vendor"]), (11, "", "pocion", 0))
         self.assertEqual(len(notes), 3)
         self.assertIn("4 objetos no válidos se han saltado", notes[2])
+        assert_schema_2_layout(self, upload)
 
     def test_item_market_and_body_caps(self):
         items = {i: {"n": f"Objeto {i}", "c": "otro", "v": 1, "d": f"{2400 + i % 100},5,5,5,0,1,o"} for i in range(1, 351)}
         hist = {"schema": 1, "addon": "0.3.0", "markets": {"Reino-Alliance": {
             "items": items, "dep": {i: "1:5" for i in range(1, 351)}}}}
         upload, notes = h.build_upload(hist, NOW)
-        kept = upload["markets"][0]["items"]
+        kept = list(series_of(upload["markets"][0]).values())
         self.assertEqual(len(kept), 300)
-        self.assertEqual([i["id"] for i in kept], sorted(i["id"] for i in kept))
+        self.assertEqual([i["id"] for i in upload["markets"][0]["items"]], sorted(i["id"] for i in kept))
         dropped = [d for i, d in ((i, 2400 + i % 100) for i in range(1, 351)) if i not in {k["id"] for k in kept}]
         self.assertEqual(len(dropped), 50)
         self.assertLessEqual(max(dropped), min(i["days"][0][0] for i in kept))   # the most recent ones stay
@@ -332,8 +394,9 @@ class UploadTests(unittest.TestCase):
         size = len(h.encode_payload(upload)[0])
         with patch.object(h, "MAX_BODY_BYTES", size - 1):
             payload, more = h.encode_payload(upload)
-            self.assertTrue(all(i["points"] == [] for m in json.loads(payload)["markets"] for i in m["items"]))
-            self.assertEqual(len(more), 1)
+            self.assertTrue(all(s["points"] == [] for m in json.loads(payload)["markets"] for o in m["observers"]
+                                for s in o["items"]))
+            self.assertEqual(more, ["el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo"])
         with patch.object(h, "MAX_BODY_BYTES", 100), self.assertRaises(h.SyncError):
             h.encode_payload(upload)
 
@@ -504,7 +567,7 @@ class UploaderTests(Quiet):
         self.assertIn("UTF-8", uploader.cycle()["events"][0].message)
         for age, text, words in ((45, saved_variables(None), "todavía no tiene el historial"),
                                  (44, saved_variables({"schema": 1, "addon": "0.3.0", "markets": {}}), "todavía no hay precios"),
-                                 (43, saved_variables({"schema": 2, "addon": "0.4.0", "markets": {}}), "formato 2")):
+                                 (43, saved_variables({"schema": 3, "addon": "0.5.0", "markets": {}}), "formato 3")):
             write(self.first, text, age=age)
             event = uploader.cycle()["events"][0]
             self.assertIn(words, event.message)
@@ -554,7 +617,7 @@ class UploaderTests(Quiet):
                 mirage[2589]["p"] += f";{point},70,300,30"
             write(self.first, saved_variables(hist), age=age)
         def sent():
-            return {m["market"]: {i["id"]: i for i in m["items"]} for m in self.calls[-1]["markets"]}
+            return {m["market"]: series_of(m) for m in self.calls[-1]["markets"]}
         days = lambda item: [r[0] for r in item["days"]]
 
         self.assertEqual([e.kind for e in self.uploader(poster).cycle()["events"]], ["uploaded"])
@@ -613,9 +676,9 @@ class UploaderTests(Quiet):
         self.assertEqual(state[str(self.first)]["payload"], hashlib.sha256(h.encode_json(h.build_upload(hist, NOW)[0])).hexdigest())
 
     def test_progress_from_the_panel_answer(self):
-        posted = {"markets": [{"market": "A-Alliance", "items": [{"id": 1, "days": [[2500, 1, 1, 1, 0, 1, "o"]], "points": [[NOW, 1, 1, 0]]},
-                                                                 {"id": 2, "days": [[2502, 1, 1, 1, 0, 1, "o"]], "points": []}]},
-                              {"market": "B-Horde", "items": [{"id": 3, "days": [], "points": [[NOW - 5, 1, 1, 0]]}]}]}
+        posted = {"markets": [{"market": "A-Alliance", "observers": [own({"id": 1, "days": [[2500, 1, 1, 1, 0, 1, "o"]], "points": [[NOW, 1, 1, 0]]},
+                                                                         {"id": 2, "days": [[2502, 1, 1, 1, 0, 1, "o"]], "points": []})]},
+                              {"market": "B-Horde", "observers": [own({"id": 3, "days": [], "points": [[NOW - 5, 1, 1, 0]]})]}]}
         old = {"A-Alliance": {"day": 2503, "t": NOW - 99, "items": [7]}, "C-Horde": {"day": 1, "t": 2, "items": []}, 5: "basura"}
         result = {"markets": [{"market": "A-Alliance", "skippedItems": [2, "x"]}, {"market": "B-Horde", "skippedItems": []}]}
         self.assertEqual(h.accepted_progress(old, posted, result), {
@@ -864,6 +927,8 @@ class CliTests(Quiet):
         self.assertEqual((config["url"], config["wow"]), (URL, str(self.wow.resolve())))
         self.assertIn(str(self.file), config["sources"])
         out = self.output.getvalue()
+        self.assertIn("Basta con que una o dos personas de la hermandad tengan este subidor", out)
+        self.assertIn("Ni tú ni ellos tenéis que hacer nada en el juego.", out)
         self.assertIn("Ese número no está en la lista.", out)
         self.assertIn("Cuenta CUENTA1: envío aceptado (2 mercados, 3 objetos): 1 cambio. Te queda 1 envío hoy.", out)
         self.assertNotIn(KEY, out)
@@ -1028,6 +1093,109 @@ class CliTests(Quiet):
             self.assertEqual(self.main(["--quitar-inicio"], runner=self.runner()), 1)
         self.assertIn("solo existe en Windows", self.output.getvalue())
 
+    def install_addon(self):
+        """Oro de Hermandad in the test client's AddOns; returns where the marker addon goes."""
+        addons = self.wow / "_forever_" / "Interface" / "AddOns"
+        (addons / "OroHermandad").mkdir(parents=True)
+        (addons / "OroHermandad" / "OroHermandad.toc").write_text("## Interface: 16001\n## Title: Oro de Hermandad\n",
+                                                                  encoding="utf-8")
+        return addons / h.MARKER_FOLDER
+
+    def wow_files(self, marker):
+        return {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.wow.rglob("*")
+                if p.is_file() and marker not in p.parents}
+
+    def test_the_marker_is_the_only_thing_written_in_the_wow_folder(self):
+        marker = self.install_addon()
+        before = self.wow_files(marker)
+        self.assertEqual(self.main(["--once"], answers=[URL, ""]), 0)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual({p.name: p.read_bytes() for p in marker.iterdir()},
+                         {name: (FIXTURES / "companion" / h.MARKER_FOLDER / name).read_bytes()
+                          for name in (h.MARKER_TOC, h.MARKER_LUA)})
+        self.assertEqual(self.wow_files(marker), before)
+        self.assertEqual(self.output.getvalue().count(h.MARKER_LINES["created"]), 1)
+        self.assertIn("(un /reload no basta)", h.MARKER_LINES["created"])
+        self.assertEqual(self.main(["--once"], secret=None), 0)            # already right: rewritten never, said never
+        self.assertEqual(self.output.getvalue().count(h.MARKER_LINES["created"]), 1)
+        self.assertNotIn(h.MARKER_LINES["updated"], self.output.getvalue())
+        self.assertEqual(self.wow_files(marker), before)
+
+    def test_quitar_aviso_and_reset_remove_the_marker(self):
+        marker = self.install_addon()
+        self.assertEqual(self.main(["--quitar-aviso"]), 0)
+        self.assertIn("No sé dónde está WoW", self.output.getvalue())      # nothing saved yet
+        self.main(["--once"], answers=[URL, ""])
+        self.assertTrue(marker.is_dir())
+        self.assertEqual(self.main(["--quitar-aviso"]), 0)
+        self.assertFalse(marker.exists())
+        out = self.output.getvalue()
+        self.assertIn("He quitado el aviso Interface\\AddOns\\OroHermandad_Subidor.", out)
+        self.assertIn("/oro subidor off", out)
+        self.assertTrue((self.home / "config.json").exists(), "the settings stay")
+        self.assertEqual(self.main(["--quitar-aviso"]), 0)
+        self.assertIn("No había ningún aviso", self.output.getvalue())
+        self.assertEqual(self.main(["--once"], secret=None), 0)            # the uploader runs again: back
+        self.assertTrue(marker.is_dir())
+        self.assertEqual(self.main(["--reset"]), 0)
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.home / "config.json").exists())
+        self.assertIn("También he quitado el aviso", self.output.getvalue())
+        self.assertTrue((self.wow / "_forever_" / "Interface" / "AddOns" / "OroHermandad" / "OroHermandad.toc").is_file())
+        with patch.object(h, "remove_marker", return_value="denied"):
+            self.main(["--once"], answers=[URL, ""])
+            self.assertEqual(self.main(["--quitar-aviso"]), 1)
+        self.assertIn("Bórralo a mano", self.output.getvalue())
+
+    def test_a_marker_problem_is_said_once_and_the_upload_goes_on(self):
+        self.install_addon()
+        with patch.object(h, "_replace_file", side_effect=PermissionError("denegado")):
+            self.assertEqual(self.main(["--once"], answers=[URL, ""]), 0)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.output.getvalue().count(h.MARKER_LINES["denied"]), 1)
+        self.assertIn("En el juego escribe una vez /oro subidor on.", h.MARKER_LINES["denied"])
+
+    def test_the_startup_task_writes_the_marker_too(self):
+        marker = self.install_addon()
+        self.main(["--once"], answers=[URL, ""])
+        shutil.rmtree(marker)
+        def sleep(seconds):
+            raise RuntimeError("parar el bucle")
+        self.assertEqual(self.main(["--segundo-plano"], secret=None, sleep=sleep), 1)
+        self.assertTrue(marker.is_dir())
+        self.assertIn(h.MARKER_LINES["created"], (self.home / "registro.txt").read_text(encoding="utf-8"))
+
+    def test_run_checks_the_marker_at_start_and_then_every_hour(self):
+        statuses, asked, polls = iter(["denied", "denied", "created", "ok"]), [], 0
+        def marker():
+            asked.append(polls)
+            return next(statuses)
+        class Uploader:
+            folder = Path("WoW")
+            def cycle(self):
+                nonlocal polls
+                polls += 1
+                if polls > 6:
+                    raise h.AuthenticationError("parar")
+                return {"status": "ok", "events": []}
+        self.assertEqual(h.MARKER_POLLS * h.POLL_SECONDS, 3600)
+        with patch.object(h, "MARKER_POLLS", 2):
+            self.assertEqual(h.run(Uploader(), sleep=lambda s: None, marker=marker), 2)
+        self.assertEqual(asked, [0, 2, 4, 6])
+        out = self.output.getvalue()
+        self.assertEqual((out.count(h.MARKER_LINES["denied"]), out.count(h.MARKER_LINES["created"])), (1, 1))
+
+    def test_once_goes_on_while_an_upload_was_partial(self):
+        def event(partial):
+            return h.Event(h.Source("CUENTA1", self.file), "uploaded", result={}, upload={"markets": []}, partial=partial)
+        results, waits = [[event(True)], [event(True)], [event(False)]], []
+        class Uploader:
+            folder = Path("WoW")
+            def cycle(self):
+                return {"status": "ok", "events": results.pop(0)}
+        self.assertEqual(h.run(Uploader(), once=True, sleep=waits.append), 0)
+        self.assertEqual((waits, results), ([h.SETTLE_SECONDS, h.SETTLE_SECONDS], []))
+
     def test_run_loop_backoff_is_bounded_and_a_refused_key_stops(self):
         waits, calls = [], 0
         class Uploader:
@@ -1070,8 +1238,38 @@ class PackagingTests(unittest.TestCase):
     def test_readme_says_what_is_sent_and_what_never_is(self):
         text = (HERE / "LEEME.md").read_text(encoding="utf-8")
         for needle in ("HERMANDAD.cmd", "OroHermandadHist", "OroHermandadDB", "OroHermandadCharDB", "Auctionator.lua",
-                       "DPAPI", "--once", "--instalar-inicio", "--quitar-inicio", "--reset", "/api/guild/sync"):
+                       "DPAPI", "--once", "--instalar-inicio", "--quitar-inicio", "--reset", "--quitar-aviso",
+                       "/api/guild/sync"):
             self.assertIn(needle, text)
+
+    def test_readme_explains_the_guild_relay_and_its_privacy(self):
+        text = (HERE / "LEEME.md").read_text(encoding="utf-8")
+        for needle in ("una o dos personas", "canal oculto de los addons", "código de 8 cifras", "seudónimo, no anónimo",
+                       "los nombres de los personajes nunca salen del juego", "/oro compartir off", "/oro subidor on",
+                       "/oro subidor off", "Interface\\AddOns\\OroHermandad_Subidor", "un /reload no basta", "formato 2",
+                       "0.3.1", "No tienes que hacer nada en el juego"):
+            self.assertIn(needle, text)
+        for promise in ("No modifica WoW", "Nunca envía personajes", "no cambia archivos ni fechas de WoW, no compra"):
+            self.assertNotIn(promise, text.split("## Panel de la hermandad")[1])
+
+    def test_console_texts_and_docstring_match_what_the_uploader_does(self):
+        source = (HERE / "hermandad.py").read_text(encoding="utf-8")
+        for promise in ("No modifica WoW", "Nunca envía personajes"):
+            self.assertNotIn(promise, source)
+        for needle in ("pseudonymous, not anonymous", "Interface/AddOns/OroHermandad_Subidor", "Character names never leave"):
+            self.assertIn(needle, h.__doc__)
+        self.assertEqual(h.VERSION, "0.4.0")
+        self.assertEqual(h.USER_AGENT, "OroHermandadPC/0.4.0")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), tempfile.TemporaryDirectory() as home:
+            self.assertEqual(h.main(["--quitar-aviso"], home=home, protector=None), 0)
+        intro = out.getvalue()
+        for needle in ("los tuyos y los que tu addon recoge de los escaneos que tus compañeros comparten",
+                       "Cada personaje va solo con un código de 8 cifras", "los nombres de los personajes nunca salen del juego",
+                       "Ese código es seudónimo, no anónimo: quien conozca la lista de la hermandad podría calcularlo.",
+                       "Solo crea la carpeta Interface\\AddOns\\OroHermandad_Subidor (un aviso de dos archivos para el "
+                       "addon); no toca nada más de WoW.", "No sé dónde está WoW"):
+            self.assertIn(needle, intro)
 
     def test_stable_read_default_is_unchanged_and_allowed_opens_only_the_named_file(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1085,6 +1283,613 @@ class PackagingTests(unittest.TestCase):
             other.write_text("x = 1", encoding="utf-8")
             with self.assertRaises(sync.SyncError):
                 sync.stable_read(other, allowed=h.ALLOWED)
+
+
+# -----------------------------------------------------------------------------------------------------------
+# relay-v1: shared fixtures, guild mates in the upload, the marker addon
+# -----------------------------------------------------------------------------------------------------------
+def fixture(name):
+    return (FIXTURES / name).read_bytes()
+
+
+def fixture_json(name):
+    return json.loads(fixture(name).decode("utf-8"))
+
+
+def int_keys(value, parent=None):
+    """The JSON copy of an OroHermandadHist with the item IDs of items and dep back as integers (Lua [2770] keys)."""
+    if isinstance(value, dict):
+        return {(int(k) if parent in ("items", "dep") and k.isdigit() else k): int_keys(v, k) for k, v in value.items()}
+    return value
+
+
+def fnv1a32(data):
+    """FNV-1a 32 for the tests only: the uploader copies the addon's observer codes and never computes one."""
+    value = 0x811C9DC5
+    for byte in data:
+        value = ((value ^ byte) * 0x01000193) & 0xFFFFFFFF
+    return f"{value:08x}"
+
+
+CONSTANTS = json.loads((FIXTURES / "constants.json").read_text(encoding="utf-8"))
+FIXTURE_UPLOADS = (("hist-schema2.lua", "now", "upload-schema2.json"),
+                   ("hist-schema1.lua", "nowLegacy", "upload-schema2-from-hist1.json"),
+                   ("hist-schema2-second.lua", "nowSecond", "upload-schema2-second.json"))
+COMPANION = {name: fixture("companion/OroHermandad_Subidor/" + name)
+             for name in ("OroHermandad_Subidor.toc", "OroHermandad_Subidor.lua")}
+
+
+class RelayFixtureTests(unittest.TestCase):
+    def test_the_shared_fixtures_are_byte_identical_copies(self):
+        found = sorted(p.relative_to(FIXTURES).as_posix() for p in FIXTURES.rglob("*") if p.is_file())
+        self.assertEqual(found, sorted(FIXTURE_SHA256))
+        for name, digest in FIXTURE_SHA256.items():
+            self.assertEqual(hashlib.sha256(fixture(name)).hexdigest(), digest, name)
+
+    def test_observer_codes_are_fnv1a32_of_the_canonical_text(self):
+        data = fixture_json("obs-hash.json")
+        self.assertGreaterEqual(len(data["vectors"]), 18)
+        for vector in data["vectors"]:
+            self.assertEqual(fnv1a32(vector["canonical"].encode("utf-8")), vector["hash"], vector["note"])
+        for vector in data["fnv1a32_plain"]:
+            self.assertEqual(fnv1a32(vector["input"].encode("utf-8")), vector["hash"])
+        for tag in data["market_tags"]:
+            self.assertEqual(fnv1a32(tag["market"].encode("utf-8")), tag["tag"])
+        self.assertLessEqual(set(CONSTANTS["hashes"].values()), {v["hash"] for v in data["vectors"]})
+        self.assertIn("not anonymous", data["privacy"])
+        source = (HERE / "hermandad.py").read_text(encoding="utf-8")
+        for constant in ("16777619", "0x01000193", "2166136261", "0x811c9dc5", "0x811C9DC5"):
+            self.assertNotIn(constant, source)
+
+    def test_the_reader_parses_both_formats_and_skips_the_guild_table(self):
+        for lua_name, json_name in (("hist-schema2.lua", "hist-schema2.json"), ("hist-schema1.lua", "hist-schema1.json")):
+            with self.subTest(lua_name):
+                text = fixture(lua_name).decode("utf-8")
+                self.assertIn("Борис", text)                              # OroHermandadDB is in the file...
+                found = h.read_globals(text, {"OroHermandadHist"})
+                self.assertEqual(list(found), ["OroHermandadHist"])
+                self.assertEqual(found["OroHermandadHist"], int_keys(fixture_json(json_name)))
+                for name in NAMES:                                        # ...but nothing of it is ever built
+                    self.assertNotIn(name, repr(found))
+        hist = h.extract_hist(fixture("hist-schema2.lua").decode("utf-8"))
+        market = hist["markets"][CONSTANTS["market"]]
+        self.assertEqual(market["self"], "65c8ae44,27e0ee58")
+        self.assertEqual(sorted(market["obs"]), ["47da174e", "556e986d", "631b8919"])
+        self.assertEqual(sorted(market["obs"]["47da174e"]["items"]), [2770, 2772, 13446])
+
+    def test_upload_schema_2_is_exactly_the_shared_fixtures(self):
+        for lua_name, now, json_name in FIXTURE_UPLOADS:
+            with self.subTest(lua_name):
+                hist = h.extract_hist(fixture(lua_name).decode("utf-8"))
+                upload, notes = h.build_upload(hist, CONSTANTS[now])
+                expected = fixture_json(json_name)
+                self.assertEqual(upload, expected)
+                self.assertEqual(notes, [])
+                assert_schema_2_layout(self, upload)
+                payload, more = h.encode_payload(upload, h.observer_seen(hist))
+                self.assertEqual((json.loads(payload), more), (expected, []))
+                self.assertEqual(payload, encoded(upload))
+
+    def test_the_self_observer_comes_first_and_mates_only_by_code(self):
+        upload = h.build_upload(h.extract_hist(fixture("hist-schema2.lua").decode("utf-8")), CONSTANTS["now"])[0]
+        alliance, horde = upload["markets"]
+        hashes = CONSTANTS["hashes"]
+        self.assertEqual([(o["obs"], o["self"]) for o in alliance["observers"]],
+                         [(hashes["Jusep"], True), (hashes["Ána"], False), (hashes["Borja"], False), (hashes["Борис"], False)])
+        self.assertEqual(alliance["observers"][0]["aliases"], [hashes["Jusepín"]])
+        self.assertEqual(alliance["items"][-1], {"id": 13446, "name": "", "cat": "otro", "vendor": 0})  # only a mate has it
+        self.assertEqual(horde["observers"], [own(*horde["observers"][0]["items"])])        # no codes there: obs null
+        self.assertEqual(h.summary(upload), "2 mercados, 5 objetos, 3 compañeros")
+        second = h.build_upload(h.extract_hist(fixture("hist-schema2-second.lua").decode("utf-8")), CONSTANTS["nowSecond"])[0]
+        relayed = [o["obs"] for o in second["markets"][0]["observers"] if not o["self"]]
+        self.assertIn(hashes["Jusep"], relayed, "the other uploader's character goes as a mate; the panel binds it")
+
+    def test_character_and_guild_names_never_leave_the_pc(self):
+        for lua_name, now, _ in FIXTURE_UPLOADS:
+            hist = h.extract_hist(fixture(lua_name).decode("utf-8"))
+            payload = h.encode_payload(h.build_upload(hist, CONSTANTS[now])[0], h.observer_seen(hist))[0].decode("utf-8")
+            for word in NAMES + ("GritodeGuerra/Los Errantes", "lastAsk", "subidor", '"s"', "seen", "Jusepín"):
+                self.assertNotIn(word, payload, (lua_name, word))
+
+    def test_schema_1_sends_the_same_prices_as_the_0_3_0_uploader(self):
+        hist = h.extract_hist(fixture("hist-schema1.lua").decode("utf-8"))
+        new = h.build_upload(hist, CONSTANTS["nowLegacy"])[0]
+        old = fixture_json("upload-schema1.json")                         # what 0.3.0 sent for the same file
+        self.assertEqual((old["schema"], new["schema"], old["addon"], new["addon"]), (1, 2, "0.3.1", "0.3.1"))
+        self.assertEqual([m["market"] for m in new["markets"]], [m["market"] for m in old["markets"]])
+        for before, after in zip(old["markets"], new["markets"]):
+            self.assertEqual((before["cut"], before["deposits"]), (after["cut"], after["deposits"]))
+            self.assertEqual([{k: i[k] for k in ("id", "name", "cat", "vendor")} for i in before["items"]], after["items"])
+            self.assertEqual(after["observers"], [own(*({"id": i["id"], "days": i["days"], "points": i["points"]}
+                                                        for i in before["items"]))])
+
+
+MIRAGE = "Mirage Raceway-Alliance"
+
+
+def relay_hist():
+    """OroHermandadHist schema 2 at NOW (day 2504): this account (two characters) and what guild mates shared."""
+    return {"schema": 2, "addon": "0.4.0", "markets": {MIRAGE: {
+        "updated": NOW - 100, "cut": 500, "self": "aaaa0001,aaaa0002,AAAA0003,aaaa0001,nocodigo",
+        "items": {2589: {"n": "Paño de lino", "c": "tela", "v": 13, "d": "2503,90,120,100,400,3,o;2504,80,95,85,350,2,o",
+                         "p": f"{NOW - 7200},80,350,40"}},
+        "dep": {2589: "1:60"},
+        "obs": {
+            "bbbb0001": {"seen": NOW - 3600, "s": str(NOW - 3600), "items": {
+                2589: {"d": "2504,81,81,81,300,1,o", "p": f"{NOW - 3600},81,300,30"},
+                2772: {"d": "2489,9,9,9,1,1,o;2490,1500,1500,1500,40,1,o;2503,7,7,7,1,1,a;2504,1400,1400,1400,30,1,o;"
+                            "2506,8,8,8,1,1,o", "p": f"{NOW - 15 * 86400},1,1,1"}}},
+            "bbbb0002": {"seen": NOW - 7200, "s": "", "items": {14047: {"d": "2480,5,5,5,1,1,o", "p": ""}}},
+            "aaaa0002": {"seen": NOW, "s": str(NOW), "items": {2589: {"d": "2504,1,1,1,1,1,o", "p": ""}}},
+            "NOPE0001": {"seen": NOW, "items": {}}, "bbbb000g": {"seen": NOW, "items": {}}, "bbbb0003": "no es tabla",
+            "bbbb0004": {"seen": NOW, "nombre": "Zaraguinda", "items": {
+                "2589": {"d": "2504,1,1,1,1,1,o"}, 0: {"d": "2504,1,1,1,1,1,o"}, 14047: "no es tabla",
+                2592: {"d": "2504,2,2,2,1,1,o", "jugador": "Pelopaja"}}},
+        }}}}
+
+
+RELAY_OBSERVERS = [
+    own({"id": 2589, "days": [[2503, 90, 120, 100, 400, 3, "o"], [2504, 80, 95, 85, 350, 2, "o"]],
+         "points": [[NOW - 7200, 80, 350, 40]]}, obs="aaaa0001", aliases=["aaaa0002"]),
+    {"obs": "bbbb0001", "self": False, "items": [
+        {"id": 2589, "days": [[2504, 81, 81, 81, 300, 1, "o"]], "points": [[NOW - 3600, 81, 300, 30]]},
+        {"id": 2772, "days": [[2490, 1500, 1500, 1500, 40, 1, "o"], [2504, 1400, 1400, 1400, 30, 1, "o"]], "points": []}]},
+    {"obs": "bbbb0004", "self": False, "items": [{"id": 2592, "days": [[2504, 2, 2, 2, 1, 1, "o"]], "points": []}]}]
+
+
+class RelayUploadTests(Quiet):
+    def setUp(self):
+        super().setUp()
+        self.file = self.tmp / "WoW" / "_forever_" / "WTF" / "Account" / "CUENTA1" / "SavedVariables" / "OroHermandad.lua"
+        self.calls, self.answers, self.state = [], [], {}
+
+    def poster(self, url, key, payload, timeout):
+        self.calls.append(json.loads(payload))
+        return self.answers.pop(0) if self.answers else {"accepted": True, "duplicate": False, "rowsChanged": 1, "markets": []}
+
+    def uploader(self, state=None):
+        return h.GuildUploader(URL, KEY, self.tmp / "WoW", state=self.state if state is None else state,
+                               poster=self.poster, clock=lambda: NOW)
+
+    def test_mates_follow_the_rules_of_upload_schema_2(self):
+        upload, notes = h.build_upload(relay_hist(), NOW)
+        market = upload["markets"][0]
+        self.assertEqual(market["observers"], RELAY_OBSERVERS)
+        self.assertEqual(market["items"], [{"id": 2589, "name": "Paño de lino", "cat": "tela", "vendor": 13},
+                                           {"id": 2592, "name": "", "cat": "otro", "vendor": 0},
+                                           {"id": 2772, "name": "", "cat": "otro", "vendor": 0}])
+        self.assertEqual(market["deposits"], [[2589, 1, 60]])
+        self.assertEqual(notes, [f"{MIRAGE}: 3 compañeros con datos no válidos se han saltado"])
+        assert_schema_2_layout(self, upload)
+        for word in (b"Zaraguinda", b"Pelopaja", b"nombre", b"jugador", b"AAAA0003", b"nocodigo"):
+            self.assertNotIn(word, encoded(upload))
+        self.assertEqual(h.summary(upload), "1 mercado, 3 objetos, 2 compañeros")
+        self.assertEqual(h.observer_seen(relay_hist())[(MIRAGE, "bbbb0001")], NOW - 3600)
+
+    def test_a_market_with_only_mates_is_sent_and_one_without_anything_is_not(self):
+        hist = relay_hist()
+        market = hist["markets"][MIRAGE]
+        market.update(items={}, dep={}, self="aaaa0001,aaaa0002")
+        observers = h.build_upload(hist, NOW)[0]["markets"][0]["observers"]
+        self.assertEqual(observers, [own(obs="aaaa0001", aliases=["aaaa0002"])] + RELAY_OBSERVERS[1:])
+        market["self"] = "aaaa0001"                      # aaaa0002 is no longer one of this account's characters
+        self.assertIn("aaaa0002", [o["obs"] for o in h.build_upload(hist, NOW)[0]["markets"][0]["observers"]])
+        del market["self"]
+        self.assertEqual(h.build_upload(hist, NOW)[0]["markets"][0]["observers"][0], own())
+        del market["obs"]
+        self.assertEqual(h.build_upload(hist, NOW)[0]["markets"], [])
+
+    def test_aliases_and_the_cap_of_60_mates(self):
+        codes = [f"aaaa{n:04x}" for n in range(12)]
+        mates = {f"cccc{n:04x}": {"seen": NOW - 1000 + n // 2, "items": {2589: {"d": "2504,5,5,5,1,1,o"}}} for n in range(65)}
+        hist = {"schema": 2, "addon": "0.4.0", "markets": {MIRAGE: {"self": ",".join(codes), "items": {}, "obs": mates}}}
+        upload, notes = h.build_upload(hist, NOW)
+        observers = upload["markets"][0]["observers"]
+        self.assertEqual((observers[0]["obs"], observers[0]["aliases"]), (codes[0], codes[1:10]))
+        # The 60 newest; between cccc0004 and cccc0005 (same scan time) the smaller code stays.
+        self.assertEqual([o["obs"] for o in observers[1:]], sorted(f"cccc{n:04x}" for n in range(65) if n not in (0, 1, 2, 3, 5)))
+        self.assertEqual(notes, [f"{MIRAGE}: solo se envían los 60 compañeros con escaneos más recientes "
+                                 "(5 compañeros se quedan fuera)"])
+        self.assertEqual(len(observers), 61)
+
+    def test_the_item_cap_counts_the_ids_of_every_observer(self):
+        items = {i: {"n": f"Objeto {i}", "c": "otro", "v": 1, "d": "2500,5,5,5,0,1,o"} for i in range(1, 291)}
+        mates = {"dddd0001": {"seen": NOW, "items": {1000 + i: {"d": "2504,5,5,5,1,1,o"} for i in range(1, 21)}}}
+        hist = {"schema": 2, "addon": "0.4.0", "markets": {MIRAGE: {"items": items, "obs": mates, "dep": {290: "1:5"}}}}
+        upload, notes = h.build_upload(hist, NOW)
+        market = upload["markets"][0]
+        self.assertEqual(len(market["items"]), 300)
+        self.assertEqual(sorted(series_of(market, "dddd0001")), [1000 + i for i in range(1, 21)])   # the newest prices
+        self.assertEqual(sorted(series_of(market)), list(range(1, 281)))                         # ties: smaller IDs
+        self.assertEqual(market["deposits"], [])
+        self.assertEqual(notes, [f"{MIRAGE}: 10 objetos no caben en un envío (máximo 300); van los que tienen precios "
+                                 "más recientes"])
+
+    def test_progress_is_kept_per_observer_and_forgets_what_the_panel_skipped(self):
+        posted = {"markets": [
+            {"market": "A-Alliance", "observers": [
+                own({"id": 1, "days": [[2500, 1, 1, 1, 0, 1, "o"]], "points": [[NOW, 1, 1, 0]]}, obs="aaaa0001"),
+                {"obs": "bbbb0001", "self": False, "items": [{"id": 1, "days": [[2503, 1, 1, 1, 0, 1, "o"]], "points": []},
+                                                              {"id": 2, "days": [], "points": [[NOW - 60, 1, 1, 0]]}]},
+                {"obs": "bbbb0002", "self": False, "items": [{"id": 3, "days": [[2504, 1, 1, 1, 0, 1, "o"]], "points": []}]}]},
+            {"market": "B-Horde", "observers": [own(), {"obs": "cccc0001", "self": False, "items": [
+                {"id": 4, "days": [[2504, 1, 1, 1, 0, 1, "o"]], "points": []}]}]}]}
+        old = {"A-Alliance": {"day": 2502, "t": NOW - 99, "items": [7], "obs": {
+                   "bbbb0001": {"day": 2501, "t": NOW - 500, "items": [1, 9]},
+                   "bbbb0009": {"day": 2490, "t": 0, "items": [2, 8]},     # not in this upload: kept
+                   "bbbb0003": {"day": 2490, "t": 0, "items": [5]},        # refused this time: forgotten
+                   "MALO": {"day": 1, "t": 1, "items": []}, "bbbb0004": {"day": -1}}},
+               "B-Horde": {"day": 2500, "t": 0, "items": [4]}}
+        result = {"markets": [
+            {"market": "A-Alliance", "skippedItems": [2], "skippedObservers": [
+                {"obs": "bbbb0002", "reason": "CUOTA"}, {"obs": "bbbb0003", "reason": "LIMITE_DE_OBSERVADORES"}, "x"]},
+            {"market": "B-Horde", "skipped": "LIMITE_DE_MERCADOS"}]}
+        self.assertEqual(h.accepted_progress(old, posted, result), {"A-Alliance": {
+            "day": 2502, "t": NOW, "items": [1, 7], "obs": {
+                "bbbb0001": {"day": 2503, "t": NOW - 60, "items": [1, 9]},
+                "bbbb0009": {"day": 2490, "t": 0, "items": [8]}}}})
+        fresh = h.accepted_progress(None, posted, {})
+        self.assertEqual(fresh["A-Alliance"]["obs"], {"bbbb0001": {"day": 2503, "t": NOW - 60, "items": [1, 2]},
+                                                     "bbbb0002": {"day": 2504, "t": 0, "items": [3]}})
+        self.assertEqual(fresh["B-Horde"], {"day": 0, "t": 0, "items": [], "obs": {"cccc0001": {"day": 2504, "t": 0, "items": [4]}}})
+        with patch.object(h, "MAX_OBS_PROGRESS", 1):
+            self.assertEqual(list(h.accepted_progress(None, posted, {})["A-Alliance"]["obs"]), ["bbbb0002"])
+        self.assertIsNone(h._progress(fresh, "A-Alliance", "bbbb0009"))
+        self.assertEqual(h._progress(fresh, "A-Alliance", "bbbb0002"), (2504, 0, {3}))
+
+    def test_after_an_accepted_upload_each_mate_only_sends_what_is_new(self):
+        hist = relay_hist()
+        write(self.file, saved_variables(hist))
+        uploader = self.uploader()
+        self.assertEqual([e.kind for e in uploader.cycle()["events"]], ["uploaded"])
+        self.assertEqual(self.calls[-1]["markets"][0]["observers"], RELAY_OBSERVERS, "the first upload is complete")
+        self.assertEqual(self.state[str(self.file)]["markets"], {MIRAGE: {
+            "day": 2504, "t": NOW - 7200, "items": [2589], "obs": {
+                "bbbb0001": {"day": 2504, "t": NOW - 3600, "items": [2589, 2772]},
+                "bbbb0004": {"day": 2504, "t": 0, "items": [2592]}}}})
+
+        # A mate scans again; the panel keeps everything but has no write quota left for bbbb0004.
+        mate = hist["markets"][MIRAGE]["obs"]["bbbb0001"]
+        mate["seen"] = NOW - 600
+        mate["items"][2589]["p"] += f";{NOW - 600},79,310,31"
+        mate["items"][2589]["d"] = "2504,79,81,79,310,2,o"
+        self.answers.append({"accepted": True, "duplicate": False, "rowsChanged": 4, "markets": [
+            {"market": MIRAGE, "skippedItems": [], "skipped": None, "observers": 1,
+             "skippedObservers": [{"obs": "bbbb0004", "reason": "CUOTA"}]}]})
+        write(self.file, saved_variables(hist), age=50)
+        restarted = self.uploader(state=json.loads(json.dumps(self.state)))
+        events = restarted.cycle()["events"]
+        self.assertEqual([e.kind for e in events], ["uploaded"])
+        sent = self.calls[-1]["markets"][0]
+        self.assertEqual(series_of(sent, "bbbb0001"), {
+            2589: {"id": 2589, "days": [[2504, 79, 81, 79, 310, 2, "o"]],
+                   "points": [[NOW - 3600, 81, 300, 30], [NOW - 600, 79, 310, 31]]},
+            2772: {"id": 2772, "days": [[2504, 1400, 1400, 1400, 30, 1, "o"]], "points": []}},
+            "a known item: its last three days and the points a scan can still change")
+        self.assertEqual(list(series_of(sent)[2589]["days"][0][:1]), [2503])
+        self.assertIn(f"Cuenta CUENTA1: en {MIRAGE}, 1 compañero no se ha guardado: se ha acabado por hoy la parte de la "
+                      "cuota de escritura del panel para compañeros: irán a partir de la 01:05 (hora de España).",
+                      h.describe(events[0]))
+        self.assertEqual(restarted.state[str(self.file)]["retry"], (NOW // 86400 + 1) * 86400 + 300)
+        progress = restarted.state[str(self.file)]["markets"][MIRAGE]
+        self.assertEqual(progress["obs"], {"bbbb0001": {"day": 2504, "t": NOW - 600, "items": [2589, 2772]}})
+
+        # The next time the file changes, the mate the panel skipped goes complete again.
+        write(self.file, saved_variables(hist) + "\n", age=40)
+        restarted.cycle()
+        self.assertEqual(series_of(self.calls[-1]["markets"][0], "bbbb0004"), {2592: RELAY_OBSERVERS[2]["items"][0]})
+
+    def test_a_partial_upload_sends_the_rest_in_the_next_cycle(self):
+        hist = relay_hist()
+        hist["markets"][MIRAGE]["items"][2589]["d"] = ";".join(f"{d},90,120,100,400,3,o" for d in range(2490, 2505))
+        hist["markets"][MIRAGE]["obs"]["bbbb0001"]["items"][2589]["p"] = f"{NOW - 7200},82,300,30;{NOW - 3600},81,300,30"
+        write(self.file, saved_variables(hist))
+        full = len(encoded(h.build_upload(hist, NOW)[0]))
+        with patch.object(h, "MAX_BODY_BYTES", full - 1):
+            uploader = self.uploader()
+            event = uploader.cycle()["events"][0]
+            self.assertEqual((event.kind, event.partial), ("uploaded", True))
+            first = self.calls[-1]["markets"][0]
+            self.assertEqual(series_of(first, "bbbb0001")[2589]["points"], [], "the mates' points stay out")
+            self.assertEqual(series_of(first)[2589]["points"], [[NOW - 7200, 80, 350, 40]], "this account's stay in")
+            self.assertEqual(len(series_of(first)[2589]["days"]), 15)
+            self.assertEqual(h.describe(event)[-1], "Cuenta CUENTA1: aviso: el envío pasaba de 2 MiB: esta vez van sin "
+                                                    "los puntos de los compañeros.")
+            saved = self.state[str(self.file)]
+            self.assertEqual((saved["file"], saved["payload"]), (None, None), "the file does not count as sent")
+            self.assertIn("bbbb0001", saved["markets"][MIRAGE]["obs"])
+            event = uploader.cycle()["events"][0]                      # the same file, read again
+            self.assertEqual((event.kind, event.partial), ("uploaded", False))
+            second = self.calls[-1]["markets"][0]
+            self.assertEqual([p[0] for p in series_of(second, "bbbb0001")[2589]["points"]], [NOW - 7200, NOW - 3600])
+            self.assertEqual([d[0] for d in series_of(second)[2589]["days"]], [2502, 2503, 2504])
+            self.assertEqual(self.state[str(self.file)]["file"], hashlib.sha256(self.file.read_bytes()).hexdigest())
+            self.assertEqual(uploader.cycle()["events"][0].kind, "unchanged")
+            self.assertEqual(len(self.calls), 2)
+            # A partial upload that moves nothing forward counts as sent, so it can never repeat itself.
+            self.answers.append({"accepted": True, "duplicate": True})
+            event = self.uploader(state={}).cycle()["events"][0]
+            self.assertEqual((event.kind, event.partial), ("duplicate", False))
+
+    def test_series_and_body_limits_leave_the_mates_with_the_oldest_scans_for_later(self):
+        hist = relay_hist()
+        upload, seen = h.build_upload(hist, NOW)[0], h.observer_seen(hist)
+        with patch.object(h, "MAX_SERIES", 2):
+            payload, notes = h.encode_payload(upload, seen)
+        self.assertEqual([o["obs"] for o in json.loads(payload)["markets"][0]["observers"]], ["aaaa0001", "bbbb0004"])
+        self.assertEqual(notes, ["1 compañero no cabe en este envío: irán en el siguiente"])
+        steps, limit = [], len(encoded(upload)) - 1
+        for expected_notes in (["el envío pasaba de 2 MiB: esta vez van sin los puntos de los compañeros"],
+                               ["el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo"],
+                               ["el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo",
+                                "1 compañero no cabe en este envío: irán en el siguiente"],
+                               ["el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo",
+                                "2 compañeros no caben en este envío: irán en el siguiente"]):
+            with patch.object(h, "MAX_BODY_BYTES", limit):
+                payload, notes = h.encode_payload(upload, seen)
+            self.assertLessEqual(len(payload), limit)
+            self.assertEqual(notes, expected_notes)
+            steps.append(json.loads(payload)["markets"][0]["observers"])
+            limit = len(payload) - 1
+        self.assertEqual(series_of({"observers": steps[0]})[2589]["points"], [[NOW - 7200, 80, 350, 40]])
+        self.assertEqual(series_of({"observers": steps[0]}, "bbbb0001")[2589]["points"], [])
+        self.assertTrue(all(s["points"] == [] for o in steps[1] for s in o["items"]))
+        self.assertEqual([o["obs"] for o in steps[2]], ["aaaa0001", "bbbb0004"], "bbbb0001 has the oldest scan")
+        self.assertEqual([o["obs"] for o in steps[3]], ["aaaa0001"])
+        with patch.object(h, "MAX_BODY_BYTES", limit), self.assertRaises(h.SyncError) as raised:
+            h.encode_payload(upload, seen)
+        self.assertIn("ni los precios de los compañeros", str(raised.exception))
+
+    def test_mates_left_for_another_upload_envio_go_in_the_next_cycle(self):
+        hist = relay_hist()
+        write(self.file, saved_variables(hist))
+        self.answers.append({"accepted": True, "duplicate": False, "rowsChanged": 9, "markets": [
+            {"market": MIRAGE, "skippedItems": [], "skipped": None, "observers": 1,
+             "skippedObservers": [{"obs": "bbbb0004", "reason": "ENVIO"}]}]})
+        uploader = self.uploader()
+        event = uploader.cycle()["events"][0]
+        self.assertEqual((event.kind, event.partial, event.retry), ("uploaded", True, None))
+        saved = self.state[str(self.file)]
+        self.assertEqual((saved["file"], saved["payload"]), (None, None), "the file does not count as sent")
+        self.assertNotIn("bbbb0004", saved["markets"][MIRAGE]["obs"])
+        self.assertIn(f"Cuenta CUENTA1: en {MIRAGE}, 1 compañero no se ha guardado: no caben en un solo envío: van en "
+                      "el siguiente, enseguida.", h.describe(event))
+        event = uploader.cycle()["events"][0]          # the same file, read again at once
+        self.assertEqual((event.kind, event.partial), ("uploaded", False))
+        self.assertEqual(series_of(self.calls[-1]["markets"][0], "bbbb0004"), {2592: RELAY_OBSERVERS[2]["items"][0]},
+                         "the mate left out goes complete")
+        self.assertEqual(self.state[str(self.file)]["file"], hashlib.sha256(self.file.read_bytes()).hexdigest())
+        self.assertEqual(uploader.cycle()["events"][0].kind, "unchanged")
+        self.assertEqual(len(self.calls), 2)
+        # ENVIO in an upload that moved nothing forward counts as sent: it can never repeat itself.
+        self.answers.append({"accepted": True, "duplicate": True, "markets": [
+            {"market": MIRAGE, "skippedObservers": [{"obs": "bbbb0004", "reason": "ENVIO"}]}]})
+        event = self.uploader(state={}).cycle()["events"][0]
+        self.assertEqual((event.kind, event.partial), ("duplicate", False))
+
+    def test_mates_left_for_the_next_daily_quota_cuota_go_again_after_midnight_utc(self):
+        hist = relay_hist()
+        write(self.file, saved_variables(hist))
+        self.answers.append({"accepted": True, "duplicate": False, "rowsChanged": 9, "markets": [
+            {"market": MIRAGE, "skippedItems": [], "skipped": None, "observers": 1,
+             "skippedObservers": [{"obs": "bbbb0004", "reason": "CUOTA"}]}]})
+        clock = [NOW]
+        uploader = h.GuildUploader(URL, KEY, self.tmp / "WoW", state=self.state, poster=self.poster, clock=lambda: clock[0])
+        event = uploader.cycle()["events"][0]
+        retry = (NOW // 86400 + 1) * 86400 + 300
+        self.assertEqual((event.kind, event.partial, event.retry), ("uploaded", False, retry))
+        self.assertEqual(self.state[str(self.file)]["retry"], retry)
+        self.assertEqual(self.state[str(self.file)]["file"], hashlib.sha256(self.file.read_bytes()).hexdigest())
+        # Until then the same file is not sent again (not even after a restart, nor if WoW rewrites it the same).
+        clock[0] = retry - 1
+        self.assertEqual(uploader.cycle()["events"][0].kind, "unchanged")
+        self.assertEqual(h.GuildUploader(URL, KEY, self.tmp / "WoW", state=json.loads(json.dumps(self.state)),
+                                         poster=self.poster, clock=lambda: retry - 1).cycle()["events"][0].kind, "unchanged")
+        self.assertEqual(len(self.calls), 1)
+        # From then, the same file goes again with the mate the panel left out, once.
+        clock[0] = retry + 1
+        event = uploader.cycle()["events"][0]
+        self.assertEqual((event.kind, event.retry), ("uploaded", None))
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(series_of(self.calls[-1]["markets"][0], "bbbb0004"), {2592: RELAY_OBSERVERS[2]["items"][0]})
+        self.assertNotIn("retry", self.state[str(self.file)])
+        self.assertEqual(uploader.cycle()["events"][0].kind, "unchanged")
+        self.assertEqual(len(self.calls), 2)
+
+    def test_spain_clock_follows_the_eu_summer_time(self):
+        self.assertEqual(h.spain_clock(1796515200), "01:00")            # 2026-12-06 00:00 UTC (winter)
+        self.assertEqual(h.spain_clock(1782864000), "02:00")            # 2026-07-01 00:00 UTC (summer)
+        self.assertEqual(h.spain_clock(1774746000 - 1), "01:59")        # 2026-03-29 00:59:59 UTC, before the change
+        self.assertEqual(h.spain_clock(1774746000), "03:00")            # 01:00 UTC on the last Sunday of March
+        self.assertEqual(h.spain_clock(1792890000 - 1), "02:59")        # 2026-10-25 00:59:59 UTC, still summer
+        self.assertEqual(h.spain_clock(1792890000), "02:00")            # 01:00 UTC on the last Sunday of October
+
+    def test_describe_counts_mates_and_explains_what_the_panel_skipped(self):
+        event = h.Event(h.Source("CUENTA1", self.file), "uploaded", upload=h.build_upload(relay_hist(), NOW)[0], result={
+            "accepted": True, "rowsChanged": 25, "uploadsLeft": 3, "markets": [
+                {"market": MIRAGE, "skipped": None, "skippedItems": [], "observers": 0, "selfConflicts": ["aaaa0002"],
+                 "skippedObservers": [{"obs": "bbbb0001", "reason": "CUOTA"}, {"obs": "bbbb0006", "reason": "ENVIO"},
+                                      {"obs": "bbbb0007", "reason": "ENVIO"},
+                                      {"obs": "bbbb0004", "reason": "LIMITE_DE_OBSERVADORES"},
+                                      {"obs": "bbbb0005", "reason": "OTRO\nMOTIVO"}, "x"]}]})
+        self.assertEqual(h.describe(event), [
+            "Cuenta CUENTA1: envío aceptado (1 mercado, 3 objetos, 2 compañeros): 25 cambios. Te quedan 3 envíos hoy.",
+            f"Cuenta CUENTA1: en {MIRAGE}, 1 compañero no se ha guardado: se ha acabado por hoy la parte de la cuota de "
+            "escritura del panel para compañeros: irán mañana.",
+            f"Cuenta CUENTA1: en {MIRAGE}, 2 compañeros no se han guardado: no caben en un solo envío: van en el siguiente, "
+            "enseguida.",
+            f"Cuenta CUENTA1: en {MIRAGE}, 1 compañero no se ha guardado: el panel ya tiene el máximo de compañeros.",
+            f"Cuenta CUENTA1: en {MIRAGE}, 1 compañero no se ha guardado: OTRO MOTIVO.",
+            f"Cuenta CUENTA1: en {MIRAGE}, 1 compañero no se ha guardado: motivo desconocido.",
+            f"Cuenta CUENTA1: en {MIRAGE}, un personaje de esta cuenta ya está vinculado a otro miembro del panel."])
+
+
+class MarkerTests(Quiet):
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp / "World of Warcraft"
+        self.forever = self.root / "_forever_"
+        self.addons = self.forever / "Interface" / "AddOns"
+        self.marker = self.addons / h.MARKER_FOLDER
+        self.accounts = self.forever / "WTF" / "Account"
+        write(self.accounts / "CUENTA1" / "SavedVariables" / "OroHermandad.lua", saved_variables(sample_hist()))
+        self.install_addon(b"## Interface: 16001\n## Title: Oro de Hermandad\n## Version: 0.4.0\n")
+
+    def install_addon(self, toc):
+        (self.addons / "OroHermandad").mkdir(parents=True, exist_ok=True)
+        (self.addons / "OroHermandad" / "OroHermandad.toc").write_bytes(toc)
+
+    def files(self):
+        return {p.name: p.read_bytes() for p in sorted(self.marker.iterdir())}
+
+    def symlink(self, target, link):
+        try:
+            os.symlink(target, link, target_is_directory=Path(target).is_dir())
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"sin enlaces simbólicos aquí: {error}")
+
+    def test_the_marker_is_exactly_the_fixed_template(self):
+        self.assertEqual(h.ensure_marker(self.root), "created")
+        self.assertEqual(self.files(), COMPANION)
+        self.assertEqual(h.marker_files(), COMPANION)
+        self.assertEqual(sorted(p.name for p in self.addons.iterdir()), ["OroHermandad", "OroHermandad_Subidor"])
+
+    def test_the_marker_is_a_valid_toc_that_only_declares_itself(self):
+        files = h.marker_files("11507, 16001")
+        text = files[h.MARKER_TOC].decode("ascii")
+        self.assertNotIn("\r", text)
+        self.assertTrue(text.endswith(".lua\n"))
+        lines = text.split("\n")[:-1]
+        tags = {}
+        for line in lines[:-1]:
+            match = re.fullmatch(r"## ([A-Za-z]+): (\S.*)", line)
+            self.assertIsNotNone(match, line)
+            tags[match.group(1)] = match.group(2)
+        self.assertEqual(list(tags), ["Interface", "Title", "Notes", "Author", "Version", "OptionalDeps"])
+        self.assertEqual((tags["Interface"], tags["OptionalDeps"], tags["Version"]), ("11507, 16001", "OroHermandad", "1"))
+        self.assertEqual(lines[-1], h.MARKER_LUA)
+        self.assertNotIn("SavedVariables", text)
+        code = files[h.MARKER_LUA].decode("ascii")
+        self.assertTrue(code.endswith("\n") and "\r" not in code)
+        self.assertEqual([line for line in code.split("\n") if line and not line.startswith("--")],
+                         ["OroHermandadSubidor = {formato = 1}"])
+        for bad in ("", "abc", "1600", "1234567", "16001;", "16001\n## SavedVariables: X", "16001,", "16001\t,11507", " 16001"):
+            self.assertEqual(h.marker_files(bad), COMPANION, bad)
+
+    def test_the_interface_number_is_copied_from_the_addon(self):
+        for toc, expected in ((b"## Interface: 11507, 16001\n", "11507, 16001"),
+                              (b"\xef\xbb\xbf## Interface:16002\r\n## Title: x\r\n", "16002"),
+                              (b"## Interface-Classic: 11507\n## Interface: 16003 \n", "16003"),
+                              (b"## Interface: 99999 , 123456\n", "99999 , 123456"),
+                              (b"## Title: x\n", "16001"), (b"## Interface: 1600\n", "16001"),
+                              (b"## Interface: 16004 -- nota\n", "16001"), (b"\xff\xfe\x00\x01", "16001")):
+            with self.subTest(toc=toc):
+                self.install_addon(toc)
+                self.assertEqual(h.marker_interface(self.addons / "OroHermandad" / "OroHermandad.toc"), expected)
+                self.assertIn(h.ensure_marker(self.root), ("created", "updated", "ok"))
+                self.assertEqual((self.marker / h.MARKER_TOC).read_bytes(), h.marker_files(expected)[h.MARKER_TOC])
+        self.assertEqual(h.marker_interface(self.tmp / "no-existe.toc"), "16001")
+
+    def test_nothing_is_written_without_the_addon_or_a_known_folder(self):
+        (self.addons / "OroHermandad" / "OroHermandad.toc").unlink()
+        self.assertEqual(h.ensure_marker(self.root), "no-addon")
+        self.assertFalse(os.path.lexists(self.marker))
+        shutil.rmtree(self.forever / "Interface")
+        self.assertEqual(h.ensure_marker(self.root), "no-addon")
+        self.assertFalse((self.forever / "Interface").exists())
+        for unknown in (self.tmp / "nada", None):
+            self.assertEqual(h.ensure_marker(unknown), "unknown")
+            self.assertEqual(h.remove_marker(unknown), "unknown")
+        self.assertEqual(h.remove_marker(self.root), "absent")
+
+    def test_the_forever_folder_is_found_from_every_folder_the_player_can_pick(self):
+        for folder in (self.root, self.forever, self.forever / "WTF", self.accounts, self.accounts / "CUENTA1" / "SavedVariables"):
+            self.assertEqual(h.forever_folder(folder), self.forever, folder)
+        character = self.accounts / "CUENTA1" / "Reino" / "Pj" / "SavedVariables"
+        character.mkdir(parents=True)
+        self.assertIsNone(h.forever_folder(character))
+        self.assertEqual(h.ensure_marker(self.accounts / "CUENTA1" / "SavedVariables"), "created")
+
+    def test_written_once_and_rewritten_only_when_different(self):
+        addon_before = (self.addons / "OroHermandad" / "OroHermandad.toc").read_bytes()
+        self.assertEqual(h.ensure_marker(self.root), "created")
+        with patch.object(h, "_replace_file", side_effect=AssertionError("no debe reescribir lo que ya está bien")):
+            self.assertEqual(h.ensure_marker(self.root), "ok")
+        (self.marker / h.MARKER_LUA).write_bytes(b"OroHermandadSubidor = {formato = 2}\n")
+        self.assertEqual(h.ensure_marker(self.root), "updated")
+        self.assertEqual(self.files(), COMPANION)
+        (self.marker / h.MARKER_TOC).unlink()
+        self.assertEqual(h.ensure_marker(self.root), "created", "without its TOC the game did not know it")
+        self.install_addon(b"## Interface: 16002\n")
+        self.assertEqual(h.ensure_marker(self.root), "updated")
+        self.assertTrue((self.marker / h.MARKER_TOC).read_bytes().startswith(b"## Interface: 16002\n"))
+        self.assertEqual(sorted(self.files()), [h.MARKER_LUA, h.MARKER_TOC], "no temporary file is left")
+        self.install_addon(addon_before)
+        self.assertEqual(h.ensure_marker(self.root), "updated")
+        self.assertEqual(self.files(), COMPANION)
+        self.assertEqual((self.addons / "OroHermandad" / "OroHermandad.toc").read_bytes(), addon_before)
+
+    def test_links_out_of_the_addons_folder_are_refused(self):
+        outside = self.tmp / "fuera"
+        outside.mkdir()
+        self.symlink(outside, self.marker)
+        self.assertEqual(h.ensure_marker(self.root), "unsafe")
+        self.assertEqual(h.remove_marker(self.root), "unsafe")
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertTrue(self.marker.is_symlink())
+        self.marker.unlink()
+        self.marker.mkdir()
+        victim = outside / "victima.txt"
+        victim.write_text("no tocar", encoding="utf-8")
+        self.symlink(victim, self.marker / h.MARKER_TOC)
+        self.assertEqual(h.ensure_marker(self.root), "unsafe")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "no tocar")
+        (self.marker / h.MARKER_TOC).unlink()
+        self.symlink(victim, self.marker / (h.MARKER_TOC + ".tmp"))      # a temporary file is never written through
+        self.assertEqual(h.ensure_marker(self.root), "created")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "no tocar")
+        self.assertEqual(self.files(), COMPANION)
+        self.symlink(victim, self.marker / (h.MARKER_LUA + ".tmp"))
+        self.assertEqual(h.remove_marker(self.root), "removed")          # a link is removed, never what it points to
+        self.assertFalse(os.path.lexists(self.marker))
+        self.assertEqual(victim.read_text(encoding="utf-8"), "no tocar")
+        shutil.rmtree(self.addons)
+        self.addons.parent.mkdir(parents=True, exist_ok=True)
+        shared = self.tmp / "AddOnsCompartidos"
+        (shared / "OroHermandad").mkdir(parents=True)
+        (shared / "OroHermandad" / "OroHermandad.toc").write_bytes(b"## Interface: 16001\n")
+        self.symlink(shared, self.addons)                                # a linked AddOns folder itself is fine
+        self.assertEqual(h.ensure_marker(self.root), "created")
+        self.assertEqual({p.name: p.read_bytes() for p in (shared / h.MARKER_FOLDER).iterdir()}, COMPANION)
+
+    def test_write_problems_are_reported_and_never_raised(self):
+        with patch.object(h, "_replace_file", side_effect=PermissionError("denegado")):
+            self.assertEqual(h.ensure_marker(self.root), "denied")
+        with patch.object(h, "_replace_file", side_effect=OSError("disco lleno")):
+            self.assertEqual(h.ensure_marker(self.root), "error")
+        with patch.object(Path, "mkdir", side_effect=PermissionError("denegado")):
+            self.assertEqual(h.ensure_marker(self.root), "denied")
+        self.assertEqual(h.ensure_marker(self.root), "created")
+        with patch.object(h.os, "unlink", side_effect=PermissionError("denegado")):
+            self.assertEqual(h.remove_marker(self.root), "denied")
+        self.assertEqual(self.files(), COMPANION)
+        for status in ("denied", "error", "unsafe", "unknown"):
+            self.assertIn("En el juego escribe una vez /oro subidor on.", h.MARKER_LINES[status])
+        self.assertEqual(h.MARKER_LINES["denied"], "No he podido crear el aviso para el addon (sin permiso en la carpeta de "
+                                                   "WoW). En el juego escribe una vez /oro subidor on.")
+        self.assertNotIn("ok", h.MARKER_LINES)
+        self.assertNotIn("no-addon", h.MARKER_LINES)
+
+    def test_removal_takes_only_the_two_files(self):
+        self.assertEqual(h.ensure_marker(self.root), "created")
+        (self.marker / "notas.txt").write_text("mías", encoding="utf-8")
+        self.assertEqual(h.remove_marker(self.root), "removed")
+        self.assertEqual([p.name for p in self.marker.iterdir()], ["notas.txt"])
+        (self.marker / "notas.txt").unlink()
+        self.assertEqual(h.remove_marker(self.root), "removed")          # the folder, now empty
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(h.remove_marker(self.root), "absent")
+        self.assertTrue((self.addons / "OroHermandad" / "OroHermandad.toc").is_file())
 
 
 if __name__ == "__main__":
