@@ -317,3 +317,39 @@ dialog::backdrop{background:#000a}
   .tabs .wide{display:none}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+
+/* ---- One website: the home tab, the player's list and the owner's portfolio */
+.hoy{display:flex;flex-direction:column;gap:16px}
+.hoy-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.hoy-grid h2{margin-bottom:6px}
+.hoy-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.hoy-list li{display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px;min-height:28px;font-size:13px}
+.hoy-list .item-link{flex:1 1 130px;min-width:0;text-align:left}
+#hoy-cartera{display:flex;flex-direction:column;gap:8px}
+#hoy-cartera p{margin:0}
+.hoy .gain,.cartera-table .gain{color:var(--green)}
+.hoy .loss,.cartera-table .loss{color:var(--red)}
+.star{flex:none;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;margin-right:2px;padding:0;background:none;border:0;border-radius:var(--radius);color:var(--muted);font-size:16px;line-height:1;cursor:pointer}
+.star:hover{color:var(--gold-bright);background:var(--surface-2)}
+.star.on{color:var(--gold-bright)}
+.detail-actions{margin:8px 0}
+.cartera-intro{margin:0 0 12px;font-size:13px}
+.cartera-metrics{list-style:none;margin:0 0 16px;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.metric-card{display:flex;flex-direction:column;gap:3px;min-width:0;background:var(--surface);border:1px solid var(--border);border-top:3px solid var(--muted);border-radius:var(--radius);padding:10px 12px}
+.metric-card strong{font-size:18px}
+.metric-card.is-up{border-top-color:var(--chart-good)}
+.metric-card.is-down{border-top-color:var(--chart-up)}
+.cartera-block{margin-bottom:16px}
+.cartera-block h2{margin-bottom:8px}
+.cartera-table .name-cell{white-space:normal}
+details.cartera-block summary{cursor:pointer;font-weight:600}
+.cartera-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end;margin:12px 0 8px}
+.cartera-form label{display:flex;flex-direction:column;gap:4px;font-size:13px}
+.feedback.success{color:var(--green)}
+.movement{width:min(520px,calc(100vw - 32px))}
+.movement form{display:flex;flex-direction:column;gap:10px}
+.movement label{display:flex;flex-direction:column;gap:4px;font-size:13px}
+.movement-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.movement-fields[hidden]{display:none}
+.movement p{margin:0}
+.movement p:empty{display:none}

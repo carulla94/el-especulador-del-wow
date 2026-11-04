@@ -103,6 +103,9 @@ export default {
     try {
       const url = new URL(request.url), path = url.pathname, setupIssue = configurationIssue(env);
       if (path === "/api/health" && request.method === "GET") return secure(json({ok:true,version:VERSION,configured:setupIssue === null,configurationIssue:setupIssue}));
+      // One website: the panel is everybody's home page, and the owner's portfolio is a tab inside it (public/cartera.js).
+      // The older owner page stays at /index.html, behind the owner's session, for Auctioneer and restoring backups.
+      if (path === "/" && ["GET","HEAD"].includes(request.method)) return secure(Response.redirect(url.origin+"/hermandad",302));
       // The guild panel is public at the asset level (members have no owner session); its data stays behind
       // /api/guild/*. /especular.js is src/especular.mjs, copied by the build (scripts/prepare-downloads.mjs).
       const publicAssets = new Set(["/login", "/login.html", "/login.js", "/login.css", "/styles.css", "/auction-hall.svg",

@@ -1191,3 +1191,21 @@ test("the daily retention commits on its own, so a refused upload neither undoes
   assert.equal(next.status, 200, await next.clone().text());
   assert.ok(used() < 1200);
 });
+
+test("one website: / leads everybody to the panel, and the portfolio tab is served only to the owner", async t => {
+  const f = fixture(t);
+  const who = await f.owner();
+  const ana = await f.member(who, "Ana");
+  const session = await f.login(ana.key);
+  for (const cookie of [undefined, session.cookie]) {
+    const home = await f.call("/", {cookie});
+    assert.equal(home.status, 302);
+    assert.equal(home.headers.get("Location"), BASE + "/hermandad");
+    assert.equal((await f.call("/cartera.js", {cookie})).status, 302, "a member never downloads the owner's tab");
+    assert.equal((await f.call("/index.html", {cookie})).status, 302);
+    assert.equal((await f.call("/api/state", {cookie})).status, 401, "a guild session opens nothing of the portfolio");
+  }
+  assert.equal((await f.call("/", {cookie: who.cookie})).headers.get("Location"), BASE + "/hermandad", "the owner lands on the same panel");
+  assert.equal((await f.call("/cartera.js", {cookie: who.cookie})).status, 200);
+  assert.equal((await f.call("/index.html", {cookie: who.cookie})).status, 200, "the older page stays for Auctioneer and restoring backups");
+});

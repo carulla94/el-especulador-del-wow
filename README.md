@@ -1,6 +1,6 @@
 # El Especulador del WoW · Cloudflare y GitHub Pages
 
-Aplicación para WoW Forever, Europa, PvP y Alianza, con acceso por contraseña. Versión cloud 0.3.0. Incluye el [panel de la hermandad](#panel-de-la-hermandad), con los precios que comparte toda la hermandad.
+Aplicación para WoW Forever, Europa, PvP y Alianza, con acceso por contraseña. Versión cloud 0.3.0. Es una sola web: el [panel de la hermandad](#panel-de-la-hermandad), con los precios que comparte toda la hermandad, y para el propietario su cartera como una pestaña más («Mi cartera»).
 
 La interfaz, contabilidad, inventario, cálculos y datos persistentes se ejecutan en Cloudflare Workers con SQLite en un Durable Object. Puedes importar los archivos de Auctioneer desde el navegador o emparejar el sincronizador del PC para enviar sus cambios por HTTPS.
 
@@ -87,6 +87,12 @@ Referencia oficial: [Cloudflare con GitHub Actions](https://developers.cloudflar
 Las claves del PC solo permiten enviar datos de mercado, no leer movimientos, exportar copias o registrar operaciones. Puedes revocarlas desde la app sin borrar los escaneos ya recibidos.
 
 ## Panel de la hermandad
+
+Todo el mundo entra por el mismo sitio: `/` lleva a `/hermandad`, y el mismo campo admite la clave `gld_…` de un miembro o la contraseña del propietario. Pestañas: **Hoy** (lo primero que hay que mirar), **Mercado**, **Qué compensa**, **Balance** (aparece cuando ya hay dos semanas de precios), **Mi cartera** (solo el propietario) y **Hermandad** (miembros, unirse y descargas).
+
+**Mi cartera** es `public/cartera.js`, que el Worker solo sirve con la sesión del propietario. Sigue usando su propio Durable Object (`Portfolio`) y su API (`/api/state`, `/api/transactions`, `/api/settings`): lee los precios del panel para valorar el inventario, pero nada de la cartera se envía a la hermandad. La página antigua sigue en `/index.html` para Auctioneer y para restaurar copias.
+
+Para verlo en local con datos de ejemplo: `node scripts/prepare-downloads.mjs` y `node scripts/dev-local.mjs --demo` (treinta días de precios, con chollos) o `--demo=lanzamiento` (solo hoy, como el primer día). Entra con la contraseña de pruebas que aparece en `scripts/dev-local.mjs` y en la consola se imprime una clave de miembro.
 
 `/hermandad` es una página aparte, fuera del juego, con el mercado que ve **toda la hermandad** con el addon Oro de Hermandad (cada addon 0.4 comparte sus escaneos en el juego y basta con que 1 o 2 personas tengan el subidor del PC para que lleguen al panel, ver [Retransmisión](#retransmisión-con-1-o-2-subidores-basta)): chollos del día con la compra y reventa calculadas (comisión del 5 % y depósitos incluidos), una tabla de materiales y consumibles por categoría que se puede ordenar, filtrar y exportar a CSV para Excel, la vista «Qué compensa» (qué farmear, qué comprar para revender, qué fundir y un mapa de cada objeto según lo barato que está y cuánto varía su precio), el balance semanal, el detalle de cada objeto con 60 días de precios, el patrón por día de la semana cuando hay datos suficientes y una calculadora editable. Las reglas son las de `src/especular.mjs`, gemelo exacto del `Spec.lua` del addon; el contrato compartido está en `test-vectors/especular-v1.json`. Durante el lanzamiento el panel lo dice claramente: «Aprendiendo precios» los primeros 7 días y sin chollos hasta el 18 de noviembre.
 

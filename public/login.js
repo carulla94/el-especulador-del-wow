@@ -26,7 +26,7 @@
       catch { throw new Error("La app no ha devuelto una respuesta válida. Vuelve a intentarlo."); }
       if (!response.ok || data.error) throw new Error(data.error || "No se ha podido iniciar sesión.");
       password.value = "";
-      window.location.replace("/");
+      window.location.replace("/hermandad");
     } catch (error) {
       feedback.textContent = error instanceof TypeError ? "No se puede conectar con la app. Comprueba tu conexión y vuelve a intentarlo." : error.message;
       password.focus();
