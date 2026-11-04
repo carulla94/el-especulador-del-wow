@@ -479,12 +479,12 @@ test("the page is CSP-safe: one module script, no inline code, no external reque
   assert.doesNotMatch(html, /style="/);
   const external = [...html.matchAll(/(?:href|src)="(https?:[^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(external, [H.RELEASES_URL], "the only external URL is the addon release link (a link, not a request)");
-  assert.match(html, /href="https:\/\/github\.com\/carulla94\/el-especulador-del-wow\/releases" target="_blank" rel="noopener noreferrer"/);
+  assert.match(html, /href="https:\/\/github\.com\/carulla94\/el-especulador-del-wow\/releases\/latest\/download\/OroHermandad\.zip" rel="noopener noreferrer"/);
   assert.match(html, /href="\/api\/guild\/download\/sincronizador" download/);
   assert.doesNotMatch(css, /@import|url\((?!["']?data:)/);
   const code = js.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   assert.doesNotMatch(code, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function/);
-  assert.deepEqual([...js.matchAll(/import\(\s*["']([^"']+)["']\s*\)/g)].map(m => m[1]), ["./especular.js"]);
+  assert.deepEqual([...js.matchAll(/import\(\s*["']([^"']+)["']\s*\)/g)].map(m => m[1]), ["./cartera.js", "./especular.js"], "the portfolio tab loads apart, only for the owner");
   assert.doesNotMatch(js, /^\s*import\s/m, "no static import: the builders load in Node without the generated copy");
   for (const [, url] of js.matchAll(/request\(\s*[`"']([^`"'$]+)/g)) assert.match(url, /^\/api\/guild\//);
   assert.doesNotMatch(js, /fetch\(\s*["'`]https?:/);
@@ -498,7 +498,7 @@ test("every element the page script looks up exists in the HTML", () => {
   assert.ok(wanted.size > 40);
   for (const id of wanted) assert.ok(ids.has(id), `#${id} is missing from hermandad.html`);
   assert.equal(new Set([...html.matchAll(/\sid="([^"]+)"/g)].map(m => m[1])).size, [...html.matchAll(/\sid="([^"]+)"/g)].length, "ids are unique");
-  for (const screen of ["loading", "login", "fatal", "mercado", "compensa", "balance", "miembros", "unirse"]) assert.match(html, new RegExp(`id="screen-${screen}" data-screen`));
+  for (const screen of ["loading", "login", "fatal", "hoy", "mercado", "compensa", "balance", "cartera", "miembros", "unirse"]) assert.match(html, new RegExp(`id="screen-${screen}" data-screen`));
   assert.match(html, /<a href="#compensa" data-tab="compensa">/);
   const headers = [...html.matchAll(/<th scope="col"(?: data-sort="(\w+)")?/g)].filter((m, i) => i < 11).map(m => m[1] ?? null);
   assert.deepEqual(headers, ["name", "hoy", "N", "d1", "d7", "range", null, "Q", "members", "conf", "verdict"]);

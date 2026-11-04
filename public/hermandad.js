@@ -13,7 +13,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const WEEKDAYS_SHORT = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"];
 const WEEKDAYS_LONG = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"];
-export const RELEASES_URL = "https://github.com/carulla94/el-especulador-del-wow/releases";
+export const RELEASES_URL = "https://github.com/carulla94/el-especulador-del-wow/releases/latest/download/OroHermandad.zip";
 export const CATEGORY_ORDER = ["metal", "piedra", "gema", "hierba", "piel", "tela", "pocion", "elixir", "frasco", "comida",
   "venda", "encantar", "elemental", "otro"];
 export const DURATIONS = [{value: 1, label: "Corta"}, {value: 2, label: "Media"}, {value: 3, label: "Larga"}];
@@ -217,13 +217,14 @@ export const SORTS = Object.freeze({
   conf: e => CONF_RANK[e.conf] ?? null,
   verdict: e => VERDICT_RANK[e.verdict] ?? null
 });
-/** Filters: q (name or ID), cat (category key or ""), show ("" | "chollos" | "caros" | "precio"), conf ("" | "media" |
- * "alta"). */
-export function filterItems(items, {q = "", cat = "", show = "", conf = ""} = {}) {
+/** Filters: q (name or ID), cat (category key or ""), show ("" | "favoritos" | "chollos" | "caros" | "precio"), conf
+ * ("" | "media" | "alta"). favorites: the Set of IDs of the player's list, for show "favoritos". */
+export function filterItems(items, {q = "", cat = "", show = "", conf = "", favorites = null} = {}) {
   const needle = String(q).trim().toLocaleLowerCase("es");
   return (items ?? []).filter(e => {
     if (cat && e.cat !== cat) return false;
     if (needle && !(e.name || "").toLocaleLowerCase("es").includes(needle) && String(e.id) !== needle) return false;
+    if (show === "favoritos" && !favorites?.has(e.id)) return false;
     if (show === "chollos" && e.verdict !== "CHOLLO") return false;
     if (show === "caros" && e.verdict !== "CARO") return false;
     if (show === "precio" && !e.price) return false;
@@ -231,6 +232,23 @@ export function filterItems(items, {q = "", cat = "", show = "", conf = ""} = {}
     if (conf === "alta" && e.conf !== "ALTA") return false;
     return true;
   });
+}
+/** The player's list as stored in the browser: a JSON array of item IDs. Anything else reads as an empty list. */
+export function parseFavorites(text) {
+  try {
+    const list = JSON.parse(text ?? "[]");
+    return Array.isArray(list) ? [...new Set(list.filter(id => isInt(id) && id > 0))].slice(0, 200) : [];
+  } catch { return []; }
+}
+/** The items of the player's list that this market has, in market order. */
+export function favoriteRows(summary, favorites) {
+  return (summary?.items ?? []).filter(e => favorites?.has(e.id));
+}
+/** What moved most today against yesterday, with a price today: {fallers, risers}, the biggest change first. */
+export function dayMovers(summary, count = 5) {
+  const moved = (summary?.items ?? []).filter(e => isInt(e.d1) && e.d1 !== 0 && isInt(e.price?.lo) && e.verdict !== "FUERA_DE_RANGO");
+  const by = (a, b) => a.d1 - b.d1 || a.id - b.id;
+  return {fallers: moved.filter(e => e.d1 < 0).sort(by).slice(0, count), risers: moved.filter(e => e.d1 > 0).sort((a, b) => by(b, a)).slice(0, count)};
 }
 /** Sorts a copy. key "" keeps the server order (category order, then ID). Unknown values always go last. */
 export function sortItems(items, {key = "", dir = "asc"} = {}) {
@@ -722,9 +740,13 @@ export function marketMapSVG({items = [], width = 720, height = 360} = {}) {
 function boot(doc, win) {
   const $ = selector => doc.querySelector(selector);
   const state = {me: null, csrf: "", market: null, summary: null, detail: null, filters: {q: "", cat: "", show: "", conf: ""},
-    sort: {key: "", dir: "asc"}, view: "mercado", lastUpload: null, pollTimer: null, members: null, busy: false,
-    compensa: {prof: "", skill: "", budget: "", rare: false, cat: ""}};
+    sort: {key: "", dir: "asc"}, view: "hoy", lastUpload: null, pollTimer: null, members: null, busy: false,
+    compensa: {prof: "", skill: "", budget: "", rare: false, cat: ""}, favorites: new Set()};
   let toastTimer;
+  let cartera = null;
+  /** The portfolio tab, while the owner is the one signed in: this page may stay open after they log out. */
+  const owned = () => state.me?.isOwner ? cartera : null;
+  try { state.favorites = new Set(parseFavorites(win.localStorage.getItem("hermandad.lista"))); } catch { /* private mode */ }
 
   // ---- tiny DOM helpers
   function el(tag, props = {}, ...children) {
@@ -779,19 +801,25 @@ function boot(doc, win) {
     return body;
   }
   function handle(error) {
-    if (error?.status === 401) return showLogin("Tu sesión ha terminado o tu clave ya no es válida. Vuelve a entrar con tu clave de la hermandad.");
+    if (error?.status === 401) return showLogin("Tu sesión ha terminado o tu clave ya no es válida. Vuelve a entrar con tu clave o contraseña.");
     if (error?.status === 503) return showFatal(error.message);
     toast(error?.message || "No se ha podido completar la operación.", true);
   }
 
   // ---- views
-  const VIEWS = ["mercado", "compensa", "balance", "miembros", "unirse"];
+  const VIEWS = ["hoy", "mercado", "compensa", "balance", "cartera", "hermandad"];
+  const VIEW_ALIASES = {miembros: "hermandad", unirse: "hermandad"};
+  const VIEWS_WITH_MARKET = ["hoy", "mercado", "compensa", "balance", "cartera"];
   function showOnly(id) {
-    for (const section of doc.querySelectorAll("[data-screen]")) section.hidden = section.id !== id;
+    const ids = [].concat(id);
+    for (const section of doc.querySelectorAll("[data-screen]")) section.hidden = !ids.includes(section.id);
   }
   function showLogin(message = "") {
     stopPolling();
     state.me = null; state.csrf = "";
+    cartera?.unmount();
+    $("#tab-cartera").hidden = true; $("#hoy-cartera").hidden = true;
+    if ($("#movement").open) $("#movement").close();
     $("#account").hidden = true; $("#tabs").hidden = true; $("#market-bar").hidden = true;
     showOnly("screen-login");
     $("#key-value").value = ""; $("#key-panel").hidden = true;
@@ -809,18 +837,20 @@ function boot(doc, win) {
     const hash = win.location.hash.replace(/^#/, "");
     const item = /^objeto-(\d{1,10})$/.exec(hash);
     // An item opens over the current view; any other hash picks a view.
-    let view = item ? state.view : VIEWS.includes(hash) ? hash : "mercado";
-    if (view === "miembros" && !state.me?.canAdmin) view = "mercado";
+    const wanted = VIEW_ALIASES[hash] ?? hash;
+    let view = item ? state.view : VIEWS.includes(wanted) ? wanted : "hoy";
+    if (view === "cartera" && !state.me?.isOwner) view = "hoy";
     state.view = view;
     for (const tab of doc.querySelectorAll("#tabs a")) {
       const active = tab.dataset.tab === view;
       tab.classList.toggle("active", active);
       if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
     }
-    showOnly("screen-" + view);
-    $("#market-bar").hidden = !(view === "mercado" || view === "compensa" || view === "balance");
-    if (view === "miembros") loadMembers();
+    showOnly(view === "hermandad" ? (state.me?.canAdmin ? ["screen-miembros", "screen-unirse"] : ["screen-unirse"]) : "screen-" + view);
+    $("#market-bar").hidden = !VIEWS_WITH_MARKET.includes(view);
+    if (view === "hermandad" && state.me?.canAdmin) loadMembers();
     if (view === "compensa") renderCompensa();
+    if (view === "cartera") owned()?.load();
     if (item && state.summary) openDetail(Number(item[1]));
     else if (!item && $("#detail").open) $("#detail").close();
   }
@@ -830,11 +860,14 @@ function boot(doc, win) {
     event.preventDefault();
     const input = $("#login-key"), button = $("#login-submit");
     const key = input.value.trim();
-    if (!/^gld_[A-Za-z0-9_-]{43}$/.test(key)) { $("#login-feedback").textContent = "La clave empieza por gld_ y tiene 47 caracteres. Cópiala entera, sin espacios."; input.focus(); return; }
+    // One field for everybody: a guild key never reaches the owner's login, and a password never reaches the guild's.
+    const isKey = key.startsWith("gld_");
+    if (!key) { $("#login-feedback").textContent = "Escribe tu clave de la hermandad o tu contraseña."; input.focus(); return; }
+    if (isKey && !/^gld_[A-Za-z0-9_-]{43}$/.test(key)) { $("#login-feedback").textContent = "La clave empieza por gld_ y tiene 47 caracteres. Cópiala entera, sin espacios."; input.focus(); return; }
     button.disabled = true; $("#login-feedback").textContent = "";
     try {
-      const answer = await request("/api/guild/login", {key});
-      state.csrf = answer.csrf;
+      if (isKey) state.csrf = (await request("/api/guild/login", {key})).csrf;
+      else await ownerLogin(input.value);
       input.value = "";
       await start();
     } catch (error) {
@@ -842,10 +875,28 @@ function boot(doc, win) {
       input.focus();
     } finally { button.disabled = false; }
   });
+  async function ownerLogin(password) {
+    let response;
+    try {
+      response = await win.fetch("/api/login", {method: "POST", credentials: "same-origin", cache: "no-store",
+        headers: {"Content-Type": "application/json", Accept: "application/json"}, body: JSON.stringify({password})});
+    } catch { throw new PanelError("No se puede conectar con el panel. Comprueba tu conexión y vuelve a intentarlo.", 0); }
+    let body = null;
+    try { body = await response.json(); } catch { /* handled below */ }
+    if (!response.ok || !body || body.error) throw new PanelError(body?.error || `No se ha podido entrar (${response.status}).`, response.status);
+  }
+  /** The owner's session has its own CSRF token, which only the owner's state gives. */
+  async function ownerLogout() {
+    const options = {credentials: "same-origin", cache: "no-store", headers: {Accept: "application/json"}};
+    const owner = await (await win.fetch("/api/state", options)).json();
+    await win.fetch("/api/logout", {...options, method: "POST", headers: {"Content-Type": "application/json", "X-CSRF-Token": owner.token ?? ""}, body: "{}"});
+  }
   $("#login-show").addEventListener("change", event => { $("#login-key").type = event.target.checked ? "text" : "password"; });
   $("#logout").addEventListener("click", async () => {
+    const owner = state.me?.isOwner;
     try { await request("/api/guild/logout", {}); } catch { /* the cookie may already be gone */ }
-    showLogin("Has cerrado la sesión del panel.");
+    if (owner) { try { await ownerLogout(); } catch { /* the session may already be gone */ } }
+    showLogin("Has cerrado la sesión.");
   });
 
   async function start() {
@@ -853,6 +904,7 @@ function boot(doc, win) {
     try { me = await request("/api/guild/me"); }
     catch (error) { return error.status === 401 ? showLogin("") : showFatal(error.message); }
     applyMe(me);
+    if (me.isOwner) await mountCartera();
     let saved = null;
     try { saved = win.localStorage.getItem("hermandad.market"); } catch { /* private mode */ }
     const names = me.markets.map(m => m.market);
@@ -862,14 +914,22 @@ function boot(doc, win) {
     route();
     startPolling();
   }
+  /** The portfolio tab loads only for the owner: the Worker refuses this file without the owner's session. */
+  async function mountCartera() {
+    try {
+      if (!cartera) {
+        const module = await import("./cartera.js");
+        cartera = module.mountCartera({doc, win, $, el, money, toast, handle, formatGSC, parseGSC, formatWhen, plural, itemButton, summary: () => state.summary});
+      }
+      await cartera.load();
+    } catch { toast("No se ha podido cargar tu cartera. Recarga la página.", true); }
+  }
   function applyMe(me) {
     state.me = me; state.csrf = me.csrf || state.csrf;
     $("#account").hidden = false; $("#tabs").hidden = false;
-    $("#tab-members").hidden = !me.canAdmin;
+    $("#tab-cartera").hidden = !me.isOwner;
     const who = me.isOwner ? "Propietario" : `${me.member?.label ?? "Miembro"} · ${me.role === "admin" ? "administra" : "miembro"}`;
     $("#who").textContent = who;
-    $("#logout").hidden = me.isOwner;
-    $("#owner-back").hidden = !me.isOwner;
     $("#panel-url").value = win.location.origin + "/hermandad";
   }
 
@@ -914,7 +974,7 @@ function boot(doc, win) {
   // The previous render stays (dimmed) while it reloads, so nothing jumps.
   async function loadMarket() {
     if (!state.market) { state.summary = null; renderMarket(); return; }
-    const frames = [$("#screen-mercado"), $("#screen-compensa")];
+    const frames = [$("#screen-hoy"), $("#screen-mercado"), $("#screen-compensa")];
     for (const frame of frames) { frame.setAttribute("aria-busy", "true"); frame.classList.add("refreshing"); }
     try {
       const summary = await request(`/api/guild/market?market=${encodeURIComponent(state.market)}`);
@@ -956,6 +1016,8 @@ function boot(doc, win) {
       $("#market-empty-admin").hidden = !state.me?.canAdmin;
       $("#banners").replaceChildren();
       $("#compensa-banners").replaceChildren();
+      $("#tab-balance").hidden = true;
+      renderHoy();
       return;
     }
     renderExports();
@@ -964,12 +1026,14 @@ function boot(doc, win) {
       el("p", {}, el("strong", {text: b.title + ". "}), b.text)));
     $("#banners").replaceChildren(...banners());
     $("#compensa-banners").replaceChildren(...banners());
+    $("#hoy-banners").replaceChildren(...banners());
     $("#caveat").textContent = `Recuerda: ${s.caveat}. Los cálculos son estimaciones con los precios que la hermandad ha visto; confírmalos siempre en la subasta.`;
     $("#compensa-caveat").textContent = $("#caveat").textContent;
     renderChollos();
     renderCategoryFilter();
     renderTable();
     renderBalance();
+    renderHoy();
     if (state.view === "compensa") renderCompensa();
   }
 
@@ -995,6 +1059,7 @@ function boot(doc, win) {
         el("p", {class: "chollo-price"}, money(e.price?.lo), el("span", {class: "muted", text: ` · ${(e.statusText || "").replace(/^Chollo: /, "")}`})),
         el("p", {class: "seen muted", text: `Visto por ${f?.who ?? e.price?.member ?? "un compañero"}, ${formatWhen(f?.at ?? e.price?.at, Date.now())} · normal ${formatGSC(e.N)}`}),
         figures,
+        owned() ? el("p", {class: "row"}, el("button", {type: "button", class: "button subtle small", text: "Registrar compra", onclick: () => owned()?.openMovement("buy", {itemId: e.id, name: e.name, unit: e.price?.lo})})) : null,
         el("p", {class: "flip-text", text: f?.accept
           ? `Objetivo de reventa ${formatGSC(f.Rs)} · tras la comisión del ${rules().texts.pct(f.cutBp ?? s.cutBp)} % y un depósito perdido${f.depositEstimated ? " (estimado)" : ""}`
           : rules().texts.flip(f, formatGSC)}),
@@ -1026,7 +1091,7 @@ function boot(doc, win) {
     });
   }
   $("#csv-view").addEventListener("click", () => {
-    const rows = sortItems(filterItems(state.summary?.items, state.filters), state.sort);
+    const rows = sortItems(filterItems(state.summary?.items, {...state.filters, favorites: state.favorites}), state.sort);
     download(csvRows(SUMMARY_COLUMNS, rows), `Hermandad_${(state.market ?? "").replace(/[^A-Za-z0-9_-]+/g, "_")}_vista_${state.summary?.date ?? ""}.csv`);
   });
   function download(text, name) {
@@ -1037,7 +1102,7 @@ function boot(doc, win) {
   }
   function renderTable() {
     const s = state.summary;
-    const rows = sortItems(filterItems(s.items, state.filters), state.sort);
+    const rows = sortItems(filterItems(s.items, {...state.filters, favorites: state.favorites}), state.sort);
     for (const th of doc.querySelectorAll("#market-table th[data-sort]")) {
       const active = th.dataset.sort === state.sort.key;
       th.setAttribute("aria-sort", active ? (state.sort.dir === "asc" ? "ascending" : "descending") : "none");
@@ -1052,9 +1117,31 @@ function boot(doc, win) {
       g.cat ? el("tr", {class: "group"}, el("th", {colspan: "11", scope: "colgroup", text: `${g.items[0].catLabel ?? g.cat} · ${g.items.length}`})) : null,
       ...g.items.map(row)]).filter(Boolean));
   }
+  // ---- the player's list: the stars, kept in this browser
+  function paintStar(node, id) {
+    const on = state.favorites.has(id), name = node.dataset.name;
+    node.classList.toggle("on", on);
+    node.textContent = on ? "★" : "☆";
+    node.setAttribute("aria-pressed", on ? "true" : "false");
+    node.setAttribute("aria-label", on ? `Quitar ${name} de mi lista` : `Añadir ${name} a mi lista`);
+    node.title = on ? "Quitar de mi lista" : "Añadir a mi lista";
+  }
+  function starButton(id, name) {
+    const node = el("button", {type: "button", class: "star", "data-star": String(id), "data-name": name || `Objeto ${id}`, onclick: () => toggleFavorite(id)});
+    paintStar(node, id);
+    return node;
+  }
+  function toggleFavorite(id) {
+    if (state.favorites.has(id)) state.favorites.delete(id); else state.favorites.add(id);
+    try { win.localStorage.setItem("hermandad.lista", JSON.stringify([...state.favorites])); } catch { /* private mode */ }
+    for (const node of doc.querySelectorAll(`[data-star="${id}"]`)) paintStar(node, id);
+    if (state.summary) { if (state.filters.show === "favoritos") renderTable(); renderHoy(); }
+  }
+
   function row(e) {
     const range = isInt(e.min14) ? el("span", {class: "range"}, money(e.min14), el("span", {class: "muted", text: " – "}), money(e.max14)) : el("span", {class: "none", text: "—"});
     const nameCell = el("th", {scope: "row", class: "name-cell"},
+      starButton(e.id, e.name),
       el("button", {type: "button", class: "item-link", text: e.name || `Objeto ${e.id}`, onclick: () => navigateItem(e.id)}),
       state.sort.key ? el("span", {class: "cat-tag", text: e.catLabel ?? e.cat}) : null);
     const today = e.price ? el("td", {class: "num", title: `Más bajo visto hoy por ${e.price.member ?? "un compañero"}, ${formatWhen(e.price.at, Date.now())}`}, money(e.price.lo)) : el("td", {class: "num"}, el("span", {class: "none", text: "—"}));
@@ -1075,6 +1162,7 @@ function boot(doc, win) {
   function renderBalance() {
     const b = state.summary.balance;
     const known = b.categories.filter(c => isInt(c.index));
+    $("#tab-balance").hidden = known.length === 0;
     $("#balance-none").hidden = known.length > 0;
     $("#balance-grid").hidden = known.length === 0;
     if (!known.length) return;
@@ -1118,22 +1206,30 @@ function boot(doc, win) {
     resizeTimer = setTimeout(() => { if (state.view === "compensa" && state.summary && $("#map-holder").clientWidth !== mapWidth) renderMap(); }, 150);
   });
 
-  function renderCompensa() {
+  /** The rows of "Qué compensa" with the player's filters; the home tab shows the same three best cards. */
+  function compensaRows() {
     const s = state.summary, filters = state.compensa;
-    if (!s) return;
     const skillText = filters.skill.trim(), budgetText = filters.budget.trim();
     const skill = /^\d{1,3}$/.test(skillText) ? Number(skillText) : null;
     const typed = budgetText ? parseGSC(budgetText) : null, typedOk = typed !== null && typed >= 1 && typed <= 100000000000;
-    $("#resale-budget").placeholder = formatGSC(s.budget);
-    $("#resale-feedback").textContent = budgetText && !typedOk ? "Presupuesto: escribe un importe como 100g." : "";
     const budget = typedOk ? typed : s.budget;
-    const farm = farmRows(s, {prof: filters.prof, skill, rare: filters.rare}), resale = resaleRows(s, {budget}), smelt = smeltRows(s, {budget});
-    $("#best-cards").replaceChildren(...bestCards(s, farm, resale, smelt).map(c => el("li", {class: "best-card" + (c.good ? " is-good" : "")},
+    return {budgetBad: !!budgetText && !typedOk, farm: farmRows(s, {prof: filters.prof, skill, rare: filters.rare}), resale: resaleRows(s, {budget}), smelt: smeltRows(s, {budget})};
+  }
+  function bestCardNode(c, onJump) {
+    return el("li", {class: "best-card" + (c.good ? " is-good" : "")},
       el("span", {class: "eyebrow", text: c.label}),
       c.id !== null ? itemButton(c.id, c.name, "item-link best-name") : el("span", {class: "best-name", text: c.name}),
       isInt(c.amount) ? el("span", {class: "best-amount"}, money(c.amount), " ", el("small", {text: c.per})) : null,
       el("span", {class: "best-note", text: c.note}),
-      el("button", {type: "button", class: "jump", text: "Ver el detalle", onclick: () => $(c.target).scrollIntoView()}))));
+      el("button", {type: "button", class: "jump", text: "Ver el detalle", onclick: onJump}));
+  }
+  function renderCompensa() {
+    const s = state.summary, filters = state.compensa;
+    if (!s) return;
+    $("#resale-budget").placeholder = formatGSC(s.budget);
+    const {budgetBad, farm, resale, smelt} = compensaRows();
+    $("#resale-feedback").textContent = budgetBad ? "Presupuesto: escribe un importe como 100g." : "";
+    $("#best-cards").replaceChildren(...bestCards(s, farm, resale, smelt).map(c => bestCardNode(c, () => $(c.target).scrollIntoView())));
     renderFarm(farm);
     renderResale(resale);
     renderSmelt(smelt);
@@ -1289,6 +1385,36 @@ function boot(doc, win) {
     if (/^#objeto-/.test(win.location.hash)) win.history.replaceState(null, "", "#" + (state.view || "mercado"));
   });
   $("#detail-close").addEventListener("click", () => $("#detail").close());
+  // ---- "Hoy": the home tab, what to look at first
+  function renderHoy() {
+    const s = state.summary;
+    $("#hoy-empty").hidden = !!s;
+    $("#hoy-content").hidden = !s;
+    if (!s) {
+      $("#hoy-empty-text").textContent = $("#market-empty-text").textContent;
+      $("#hoy-banners").replaceChildren();
+      return;
+    }
+    const {farm, resale, smelt} = compensaRows();
+    $("#hoy-best").replaceChildren(...bestCards(s, farm, resale, smelt).map(c => bestCardNode(c, () => {
+      win.location.hash = "compensa";
+      route();
+      $(c.target).scrollIntoView();
+    })));
+    const line = e => el("li", {}, itemButton(e.id, nameOf(e)), money(e.price?.lo ?? null), pctNode(e.d1));
+    const lines = (rows, empty) => rows.length ? rows.map(line) : [el("li", {class: "muted", text: empty})];
+    const {fallers, risers} = dayMovers(s);
+    const noYesterday = "Hace falta un día más de precios para comparar con ayer.";
+    const anyYesterday = s.items.some(e => isInt(e.d1));
+    $("#hoy-fallers").replaceChildren(...lines(fallers, anyYesterday ? "Nada ha bajado frente a ayer." : noYesterday));
+    $("#hoy-risers").replaceChildren(...lines(risers, anyYesterday ? "Nada ha subido frente a ayer." : noYesterday));
+    const mine = favoriteRows(s, state.favorites);
+    $("#hoy-list-empty").hidden = mine.length > 0;
+    $("#hoy-list").replaceChildren(...mine.map(e => el("li", {}, starButton(e.id, e.name), itemButton(e.id, nameOf(e)), money(e.price?.lo ?? null), pctNode(e.d1))));
+    $("#hoy-caveat").textContent = `Recuerda: ${s.caveat}. Los cálculos son estimaciones con los precios que la hermandad ha visto; confírmalos siempre en la subasta.`;
+    owned()?.render();
+  }
+
   async function openDetail(id) {
     const dialog = $("#detail");
     const fromSummary = state.summary?.items.find(e => e.id === id);
@@ -1316,6 +1442,9 @@ function boot(doc, win) {
     const children = [
       el("p", {class: "detail-meta muted", text: `${item.catLabel} · ID ${item.id}${item.watch ? " · lista fija de la hermandad" : " · objeto vigilado por algún miembro"}${item.vendor ? ` · se vende al vendedor por ${formatGSC(item.vendor)}` : ""}`}),
       el("div", {class: "detail-status"}, el("span", {class: "badge verdict-" + a.verdict, text: detail.verdictLabel}), el("span", {text: detail.statusText}), el("span", {class: "muted", text: " · " + detail.confText})),
+      el("div", {class: "row detail-actions"}, starButton(item.id, item.name),
+        owned() ? el("button", {type: "button", class: "button primary small", text: "Registrar compra", onclick: () => owned()?.openMovement("buy", {itemId: item.id, name: item.name, unit: price?.lo})}) : null,
+        owned() ? el("button", {type: "button", class: "button secondary small", text: "Registrar venta", onclick: () => owned()?.openMovement("sell", {itemId: item.id, name: item.name, unit: price?.lo})}) : null),
       el("div", {class: "stats"},
         stat("Más bajo hoy", money(price?.lo), price ? `${price.member ?? "un compañero"}, ${formatWhen(price.at, Date.now())}` : "nadie lo ha visto hoy"),
         stat("Normal 14 d", money(b.N), b.n ? plural(b.n, "día", "días") + " con datos" : null),

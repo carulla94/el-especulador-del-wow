@@ -132,7 +132,9 @@ test("anonymous requests see login but cannot read account or downloads", async 
   const f = fixture(t);
   const root = await f.call("/");
   assert.equal(root.status, 302);
-  assert.equal(root.headers.get("Location"), BASE + "/login");
+  assert.equal(root.headers.get("Location"), BASE + "/hermandad", "the panel is the home page of the website");
+  assert.equal((await f.call("/index.html")).status, 302, "the older owner page still needs the owner's session");
+  assert.equal((await f.call("/cartera.js")).status, 302, "members never download the owner's portfolio tab");
   assert.equal((await f.call("/api/state")).status, 401);
   assert.equal((await f.call("/api/export")).status, 401);
   assert.equal((await f.call("/api/connector")).status, 401);
