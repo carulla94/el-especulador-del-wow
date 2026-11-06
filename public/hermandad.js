@@ -579,6 +579,13 @@ export function salePrice(e) {
   for (const v of (e?.spark ?? []).slice(-3).reverse()) if (isInt(v)) return {price: v, source: "reciente"};
   return null;
 }
+/** The price to value what you would buy: today's lowest, else the day value of the last three days, so the morning before
+ * anyone scans still has an estimate. {price, source: "hoy" | "reciente", qty5}, or null; qty5 is only known today. */
+export function buyPrice(e) {
+  if (isInt(e?.price?.lo)) return {price: e.price.lo, source: "hoy", qty5: e.price.qty5 ?? null};
+  for (const v of (e?.spark ?? []).slice(-3).reverse()) if (isInt(v)) return {price: v, source: "reciente", qty5: null};
+  return null;
+}
 const SOURCE_TEXT = {prudente: "reventa prudente", hoy: "precio de hoy, aún sin precio normal", reciente: "precio de los últimos días, aún sin precio normal"};
 export const sourceText = source => SOURCE_TEXT[source] ?? "";
 /** Each node or mob valued like the addon's routes: every material it gives, after the cut. A node whose main material has
@@ -631,8 +638,9 @@ export function resaleRows(summary, {budget = null} = {}) {
 }
 /** Each smelting recipe, buying every reagent today (at the merchant when that is not dearer) and selling the bar with the
  * rules of a purchase to resell: especular.flip with the cost per bar as the price, so the same cut, lost deposit, margin,
- * liquidity and budget limits apply. During the launch guard, without a normal price or with the bar falling it never
- * says that it pays. Returns {rows (those that pay first, then by profit per bar), unpriced}. */
+ * liquidity and budget limits apply. A reagent nobody has scanned today costs its price of the last days (stale). During
+ * the launch guard, without a normal price, with a stale reagent or with the bar falling it never says that it pays.
+ * Returns {rows (those that pay first, then by profit per bar), unpriced}. */
 export function smeltRows(summary, {budget = null} = {}) {
   const {flip, idiv, ceilDiv, UNITS_MAX} = rules();
   const items = itemsById(summary), rows = [];
@@ -642,23 +650,24 @@ export function smeltRows(summary, {budget = null} = {}) {
     let cost = 0, crafts = UNITS_MAX;
     const parts = [];
     for (const [id, need] of recipe.reagents) {
-      const e = items.get(id), auction = e?.price?.lo ?? null, vendor = VENDOR_ITEMS[id] ?? null;
-      const fromVendor = vendor !== null && (!isInt(auction) || vendor.buy <= auction);
-      const unit = fromVendor ? vendor.buy : auction;
+      const e = items.get(id), auction = buyPrice(e), vendor = VENDOR_ITEMS[id] ?? null;
+      const fromVendor = vendor !== null && (!auction || vendor.buy <= auction.price);
+      const unit = fromVendor ? vendor.buy : auction?.price ?? null;
       if (!isInt(unit)) { cost = null; break; }
       cost += unit * need;
-      if (!fromVendor) crafts = Math.min(crafts, Math.max(1, Math.floor((e.price.qty5 ?? 1) / need)));
-      parts.push({id, name: e?.name || vendor?.name || `Objeto ${id}`, need, unit, fromVendor});
+      if (!fromVendor) crafts = Math.min(crafts, Math.max(1, Math.floor((auction.qty5 ?? 1) / need)));
+      parts.push({id, name: e?.name || vendor?.name || `Objeto ${id}`, need, unit, fromVendor, source: fromVendor ? "mercader" : auction.source});
     }
     if (!sale || cost === null) { unpriced++; continue; }
+    const stale = parts.some(p => p.source === "reciente");
     const unitCost = ceilDiv(cost, recipe.qty);
     const f = flip({Rs: sale.price, Q: product.Q}, [[unitCost, Math.min(crafts * recipe.qty, UNITS_MAX)]],
       {cutBp: summary.cutBp, D: product.deposit?.D ?? null, vendor: product.vendor, budget: budget ?? summary.budget});
     if (f.reason === "FUERA_DE_RANGO") { unpriced++; continue; }
     const unitProfit = f.netUnit - f.risk - unitCost;
-    const guarded = summary.phase !== "normal" || sale.source !== "prudente", falling = product.trend === "bajando";
+    const guarded = summary.phase !== "normal" || sale.source !== "prudente" || stale, falling = product.trend === "bajando";
     const pays = f.accept && !guarded && !falling;
-    rows.push({id: product.id, name: nameOf(product), skill: recipe.skill, qty: recipe.qty, parts, sale: sale.price, source: sale.source, unitCost, unitProfit, marginBp: idiv(unitProfit * 10000, unitCost + f.risk),
+    rows.push({id: product.id, name: nameOf(product), skill: recipe.skill, qty: recipe.qty, parts, stale, sale: sale.price, source: sale.source, unitCost, unitProfit, marginBp: idiv(unitProfit * 10000, unitCost + f.risk),
       flip: f, pays, label: pays ? "Compensa" : guarded ? "Orientativo" : falling ? "Mercado bajando" : "No compensa", trend: product.trend, d7: product.d7});
   }
   rows.sort((a, b) => Number(b.pays) - Number(a.pays) || b.unitProfit - a.unitProfit || a.id - b.id);
@@ -682,7 +691,8 @@ export function bestCards(summary, farm, resale, smelt) {
       note: `Lote de ${pays.flip.units}: ganas ≈ ${formatGSC(pays.flip.profit)}`}
       : {key: "smelt", label: "Qué fundir", target: "#smelt-section", good: false, name: topSmelt?.label === "Orientativo" ? topSmelt.name : "Hoy, nada", id: topSmelt?.label === "Orientativo" ? topSmelt.id : null,
         amount: topSmelt?.label === "Orientativo" ? topSmelt.unitProfit : null, per: topSmelt?.label === "Orientativo" ? "por lingote" : "",
-        note: !topSmelt ? "Faltan precios de hoy de los materiales." : topSmelt.label === "Orientativo" ? "Orientativo: con precios de lanzamiento no es una recomendación de compra." : `Lo mejor: ${topSmelt.name}, ${formatGSC(topSmelt.unitProfit)} por lingote.`}];
+        note: !topSmelt ? "Faltan precios recientes de los materiales." : topSmelt.label !== "Orientativo" ? `Lo mejor: ${topSmelt.name}, ${formatGSC(topSmelt.unitProfit)} por lingote.`
+          : topSmelt.stale ? "Orientativo: hoy aún no se han escaneado los materiales y se usa su precio de los últimos días." : "Orientativo: con precios de lanzamiento no es una recomendación de compra."}];
 }
 
 /** The balance map: one mark per item with a normal price and a price today, x its price against normal (dBp) and y how
@@ -1302,18 +1312,21 @@ function boot(doc, win) {
     const s = state.summary, rows = smelt.rows, maxAbs = Math.max(100, ...rows.map(r => Math.abs(r.unitProfit)));
     const badge = r => el("span", {class: "badge " + (r.pays ? "verdict-CHOLLO" : r.label === "Mercado bajando" ? "verdict-BAJADA" : "off"), text: r.label});
     const signed = copper => el("span", {}, copper > 0 ? "+" : "", money(copper));
-    const uses = r => r.parts.map(p => `${p.need} × ${p.name} a ${formatGSC(p.unit)}${p.fromVendor ? " (mercader)" : ""}`).join(" + ");
-    $("#smelt-note").hidden = s.phase === "normal" || rows.length === 0;
-    $("#smelt-note").textContent = "Precios de lanzamiento: el cálculo es orientativo y no es una recomendación de compra hasta el 18-nov.";
+    const uses = r => r.parts.map(p => `${p.need} × ${p.name} a ${formatGSC(p.unit)}${p.fromVendor ? " (mercader)" : p.source === "reciente" ? " (últimos días)" : ""}`).join(" + ");
+    const stale = rows.some(r => r.stale), notes = [];
+    if (s.phase !== "normal") notes.push("Precios de lanzamiento: el cálculo es orientativo y no es una recomendación de compra hasta el 18-nov.");
+    if (stale) notes.push("Hoy aún nadie ha escaneado algunos materiales: se usa su precio de los últimos días y esas recetas salen como orientativas.");
+    $("#smelt-note").hidden = notes.length === 0 || rows.length === 0;
+    $("#smelt-note").textContent = notes.join(" ");
     $("#smelt-empty").hidden = rows.length > 0;
-    $("#smelt-empty").textContent = "Faltan precios de hoy de los materiales o de los lingotes: aparecerán cuando alguien de la hermandad escanee la subasta.";
+    $("#smelt-empty").textContent = "Faltan precios de los últimos días de los materiales o de los lingotes: aparecerán cuando alguien de la hermandad escanee la subasta.";
     $("#smelt-legend").hidden = rows.length === 0;
     $("#smelt-twin").hidden = rows.length === 0;
     $("#smelt-list").replaceChildren(...rows.map(r => rankRow({id: r.id, name: r.name, tag: `Minería · habilidad ${r.skill}`, track: divergingTrack(r.unitProfit, maxAbs, r.unitProfit > 0 ? "gain" : "loss"),
       value: [badge(r), signed(r.unitProfit), el("small", {text: "por lingote"})],
       detail: `${uses(r)} → ${r.qty > 1 ? `${r.qty} lingotes` : "lingote"} a ${formatGSC(r.sale)} (${sourceText(r.source)})${r.pays ? ` · lote de ${r.flip.units}: ganas ≈ ${formatGSC(r.flip.profit)}` : ""}`})));
     $("#smelt-table").replaceChildren(twinTable([["Lingote"], ["Habilidad", true], ["Materiales"], ["Coste por lingote", true], ["Venta", true], ["Ganancia por lingote", true], ["Margen", true], ["Lote", true], ["Ganancia del lote", true], ["Estado"]],
-      rows.map(r => [itemButton(r.id, r.name), num(String(r.skill)), el("td", {class: "twin-wrap", text: uses(r)}), num(money(r.unitCost)), num(money(r.sale)), num(money(r.unitProfit)), num(formatPct(r.marginBp)), num(r.flip.units ? String(r.flip.units) : "—"), num(r.flip.units ? money(r.flip.profit) : "—"), cell(badge(r))])));
+      rows.map(r => [itemButton(r.id, r.name), num(String(r.skill)), el("td", {class: "twin-wrap", text: uses(r)}), num(money(r.unitCost)), num(money(r.sale)), num(money(r.unitProfit)), num(formatPct(r.marginBp)), num(r.flip.units && !r.stale ? String(r.flip.units) : "—"), num(r.flip.units && !r.stale ? money(r.flip.profit) : "—"), cell(badge(r))])));
   }
   function renderMap() {
     const s = state.summary, holder = $("#map-holder");
