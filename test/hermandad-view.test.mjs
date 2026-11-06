@@ -349,6 +349,13 @@ test("salePrice is the prudent resale, then today's lowest, then the last three 
   assert.equal(H.salePrice(undefined), null);
 });
 
+test("buyPrice is today's lowest, then the last three days, never the resale", () => {
+  assert.deepEqual(H.buyPrice(stock(1, {Rs: 900, price: today(700, 12)})), {price: 700, source: "hoy", qty5: 12});
+  assert.deepEqual(H.buyPrice(stock(1, {Rs: 900, spark: [500, 400, null]})), {price: 400, source: "reciente", qty5: null});
+  assert.equal(H.buyPrice(stock(1, {Rs: 900, spark: [500, null, null, null]})), null, "four days ago is too old");
+  assert.equal(H.buyPrice(undefined), null);
+});
+
 test("farmRows values every material of a node after the cut, like the addon's routes", () => {
   const items = [stock(3858, {name: "Mineral de mitril", Rs: 10000, conf: "ALTA", confLabel: "Fiable", d7: -120, Q: 300}), stock(7912, {name: "Piedra sólida", Rs: 1000}),
     stock(2770, {name: "Mineral de cobre", price: today(100)}), stock(2835, {name: "Piedra basta", price: today(1000)}),
@@ -415,8 +422,16 @@ test("smeltRows buys the reagents today and sells the bar under the rules of a p
   assert.deepEqual(cheapCoal.parts[1].unit, 300);
   const bronze = H.smeltRows(marketOf([stock(2840, {price: today(101)}), stock(3576, {price: today(200)}), stock(2841, {Rs: 1000})])).rows[0];
   assert.deepEqual([bronze.qty, bronze.unitCost], [2, 151]);
+  assert.equal(steel.parts[1].source, "mercader");
   const missing = H.smeltRows(marketOf([stock(3860, {Rs: 2000})]));
-  assert.deepEqual([missing.rows.length, missing.unpriced], [0, H.SMELT.length], "a reagent without a price today hides the recipe");
+  assert.deepEqual([missing.rows.length, missing.unpriced], [0, H.SMELT.length], "a reagent without a recent price hides the recipe");
+  // Before anyone scans today a reagent costs its price of the last days, and the recipe is only a guide.
+  const morning = H.smeltRows(marketOf([stock(3858, {spark: [900, 1000, null]}), stock(3860, {Rs: 2000, Q: 400, deposit: {D: 100}})])).rows[0];
+  assert.deepEqual([morning.unitCost, morning.parts[0].source, morning.stale, morning.pays, morning.label], [1000, "reciente", true, false, "Orientativo"]);
+  assert.equal(morning.unitProfit, 799, "the same sum as with today's price");
+  assert.equal(row.stale, false);
+  const old = H.smeltRows(marketOf([stock(3858, {spark: [1000, null, null, null]}), stock(3860, {Rs: 2000})]));
+  assert.deepEqual([old.rows.length, old.unpriced], [0, H.SMELT.length], "four days ago is too old");
 });
 
 test("bestCards answers the three questions and never calls a launch price good news", () => {
@@ -435,6 +450,9 @@ test("bestCards answers the three questions and never calls a launch price good 
   assert.match(guard[1].note, /^Protección de lanzamiento/);
   assert.deepEqual([guard[2].name, guard[2].good, guard[2].amount], ["Lingote de mitril", false, 799]);
   assert.match(guard[2].note, /^Orientativo/);
+  const morning = answer(marketOf([items[0], stock(3858, {name: "Mineral de mitril", spark: [1000]}), items[3]]));
+  assert.deepEqual([morning[2].name, morning[2].good, morning[2].amount], ["Lingote de mitril", false, 799]);
+  assert.match(morning[2].note, /^Orientativo: hoy aún no se han escaneado los materiales/);
   const weak = answer(marketOf([stock(1, {name: "Flojo", verdict: "CHOLLO", Rs: 10000, Q: 400, price: today(8000, 1)})]));
   assert.match(weak[1].note, /^Hay chollos, pero ninguno compensa/);
   const empty = answer(marketOf([]));
