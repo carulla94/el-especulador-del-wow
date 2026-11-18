@@ -946,7 +946,7 @@ end
 handlers.COMMODITY_SEARCH_RESULTS_UPDATED = commodityResults
 handlers.COMMODITY_SEARCH_RESULTS_ADDED = commodityResults
 
--- Justo antes de que el juego escriba los SavedVariables: el historial no pasa de 1,25 MB (lo tuyo) y 2 MB (lo de
+-- Justo antes de que el juego escriba los SavedVariables: el historial no pasa de 1,25 MB (lo tuyo) y 3 MB (lo de
 -- los compañeros).
 function handlers.PLAYER_LOGOUT() History.BeforeSave() end
 

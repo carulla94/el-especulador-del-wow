@@ -677,7 +677,7 @@ local function obsFrom(items, seen)
   return {seen = seen, s = tostring(seen), items = out}
 end
 
-test("Topes: lo tuyo (1,25 MB) se mide sin lo de los compañeros, que tiene sus 2 MB y sus pasos", function()
+test("Topes: lo tuyo (1,25 MB) se mide sin lo de los compañeros, que tiene sus 3 MB y sus pasos", function()
   current = unit
   local H = freshHistory(unit)
   -- Desde la 0.5.1 los compañeros comparten la lista fija entera (161 objetos), como lo tuyo.
@@ -750,7 +750,7 @@ test("Topes: lo tuyo (1,25 MB) se mide sin lo de los compañeros, que tiene sus 
     for _, item in pairs(entry.items) do eq(#Spec.DecodeDays(item.d), 15, "sus 15 días") end
   end
   eq(n25, 25, "los 25")
-  -- Al salir (BeforeSave), con lo que llegó en la sesión: los 40 compañeros que admite un mercado, activos (114
+  -- Al salir (BeforeSave), con lo que llegó en la sesión: los 40 compañeros que admite un mercado, activos (161
   -- objetos, 15 días, 3 escaneos al día), siguen todos con el día de hoy y los 2 anteriores, que el subidor envía.
   H.Load({schema = 2, markets = {}}, {db = {}, market = function() return MARKET end})
   local live = H.Hist()
@@ -876,7 +876,7 @@ test("Puesta al día: el PC con el subidor pide al entrar y recibe por susurro l
   slash(jusep, "sondeo")
   text = table.concat(Stub.printed, "\n")
   assert(has(text, "Precios compartidos: 1 compañero en este mercado, último escaneo recibido hace "), text)
-  assert(has(text, "subidor: automático (aviso del PC: sí) · compartir: sí · ") and has(text, " KB de 2048 KB"), text)
+  assert(has(text, "subidor: automático (aviso del PC: sí) · compartir: sí · ") and has(text, " KB de 3072 KB"), text)
   assert(not has(text, HA) and not has(text, "Ána"), "sin nombres ni códigos en el sondeo")
   net.jusep = jusep
 end)
