@@ -178,6 +178,7 @@ test("wrangler and the worker entry add GuildMarket without touching Portfolio o
   assert.deepEqual(config.durable_objects.bindings, [{name: "PORTFOLIO", class_name: "Portfolio"}, {name: "GUILD", class_name: "GuildMarket"}]);
   assert.deepEqual(config.migrations, [{tag: "v1", new_sqlite_classes: ["Portfolio"]}, {tag: "v2", new_sqlite_classes: ["GuildMarket"]}]);
   assert.equal(config.main, "src/worker.mjs");
+  assert.deepEqual(config.vars, {GUILD_PUBLIC_VIEW: "1"}, "the panel is open to everyone in read only");
   assert.equal(WorkerGuildMarket, GuildMarket);
   assert.equal(WATCH_IDS.length, 161);
   assert.equal(new Set(WATCH_IDS).size, 161);
@@ -1403,4 +1404,46 @@ test("the secret view link: off at first, read-only without names, and a changed
   f.env.SESSION_SECRET = "test-only-another-session-secret-1234";
   assert.equal((await look("/api/guild/me", third)).status, 401);
   assert.equal(f.calls.portfolio, portfolioCalls, "no request with the link reached Portfolio");
+});
+
+test("the open panel (GUILD_PUBLIC_VIEW): anyone sees the read-only views without a link or names, and nothing else", async t => {
+  const f = fixture(t), owner = await f.owner(), ana = await f.member(owner, "Ana");
+  const portfolioCalls = f.calls.portfolio;
+  assert.equal((await f.sync(ana.key, upload([item(2589, {days: flat(1000, T0 - 14, T0), points: [[at(T0, 8), 990, 1, 1]]})]))).status, 200);
+  assert.equal((await f.call("/api/guild/fishing", {method: "POST", raw: JSON.stringify(fishBody([fishSession(at(T0, 9))])), token: ana.key})).status, 200);
+  const market = encodeURIComponent(MARKET);
+  // Closed (the default of these tests): without a session or a link nothing opens.
+  assert.equal((await f.call("/api/guild/me")).status, 401);
+  assert.equal((await (await f.call("/api/guild/me", {cookie: owner.cookie})).json()).openView, false);
+  f.env.GUILD_PUBLIC_VIEW = "1";
+  const me = await (await f.call("/api/guild/me")).json();
+  assert.deepEqual([me.role, me.viewer, me.openView, me.isOwner, me.canAdmin, me.member, me.csrf], ["viewer", true, true, false, false, null, ""]);
+  for (const key of ["writesToday", "viewLink", "uploadsToday", "lastUploadAt"]) assert.ok(!(key in me), key);
+  for (const path of [`/api/guild/market?market=${market}`, `/api/guild/item?market=${market}&id=2589`, `/api/guild/timing?market=${market}`,
+    `/api/guild/export.csv?market=${market}`, "/api/guild/fishing"]) {
+    const response = await f.call(path);
+    assert.equal(response.status, 200, path);
+    assert.ok(!(await bodyText(response)).includes("Ana"), `${path} shows a name`);
+  }
+  const fishing = await (await f.call("/api/guild/fishing")).json();
+  assert.deepEqual([fishing.scope, fishing.sessions, fishing.guild.sessions], ["viewer", [], 1]);
+  // An old or made-up view link opens the same panel; everything else stays closed.
+  assert.equal((await f.call("/api/guild/me", {headers: {"X-Guild-View": "a".repeat(43)}})).status, 200);
+  for (const [method, path] of [["GET", "/api/guild/members"], ["GET", "/api/guild/download/sincronizador"], ["POST", "/api/guild/members"],
+    ["POST", "/api/guild/view-link"], ["POST", "/api/guild/keys"], ["POST", "/api/guild/logout"]]) {
+    const response = await f.call(path, {method, origin: BASE, ...(method === "POST" ? {data: {action: "on", label: "Intruso", memberId: ana.id}} : {})});
+    assert.equal(response.status, 401, `${method} ${path}`);
+  }
+  assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_members").get().n, 1, "nobody was added");
+  // A session still wins, and whoever administers sees that the panel is open.
+  const anaSession = await f.login(ana.key);
+  const anaMe = await (await f.call("/api/guild/me", {cookie: anaSession.cookie})).json();
+  assert.deepEqual([anaMe.role, anaMe.viewer, anaMe.openView], ["member", false, true]);
+  assert.equal((await (await f.call("/api/guild/me", {cookie: owner.cookie})).json()).openView, true);
+  // Closing it again needs no link change: the next request is refused.
+  f.env.GUILD_PUBLIC_VIEW = "0";
+  const closed = await f.call(`/api/guild/market?market=${market}`);
+  assert.equal(closed.status, 401);
+  assert.match((await closed.json()).error, /Inicia sesión/);
+  assert.equal(f.calls.portfolio, portfolioCalls, "no open request reached Portfolio");
 });

@@ -226,6 +226,10 @@ const VIEW_ROUTES = new Set(["GET /api/guild/me", "GET /api/guild/market", "GET 
 const VIEW_PATHS = new Set([...VIEW_ROUTES].map(route => route.slice(route.indexOf(" ") + 1)));
 const VIEW_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const VIEW_GONE = "Este enlace para ver ya no vale. Pide el nuevo a quien administra la hermandad.";
+const OPEN_GONE = "El panel ya no se puede ver sin entrar. Entra con tu clave de la hermandad.";
+/** The panel open to everyone in read only, without a link: GUILD_PUBLIC_VIEW = "1" (wrangler.jsonc "vars"). It opens
+ * exactly what the view link opens, with the same names hidden, and an old view link opens it too. */
+export const publicView = env => env?.GUILD_PUBLIC_VIEW === "1";
 /** The token of view link number `version`: an HMAC of the session secret and the owner password, so nothing secret is
  * stored and changing either of them changes the link too. */
 const viewToken = (version, env) => guildSign("guild-view-link:" + version, env);
@@ -270,8 +274,11 @@ export async function guildFetch(request, env, {ownerSession} = {}) {
   const guest = owner ? null : await readGuildSession(request, env);
   let who = owner ? {actor: {kind: "owner"}, csrf: await guildSign("owner-csrf:" + owner.value, env)}
     : guest ? {actor: {kind: "member", memberId: guest.memberId, keyId: guest.keyId}, csrf: guest.csrf} : null;
-  const view = request.headers.get("X-Guild-View");
-  if (!who && view && VIEW_TOKEN.test(view) && VIEW_ROUTES.has(request.method + " " + path)) who = {actor: {kind: "viewer", token: view}, csrf: ""};
+  if (!who && VIEW_ROUTES.has(request.method + " " + path)) {
+    const view = request.headers.get("X-Guild-View");
+    if (publicView(env)) who = {actor: {kind: "viewer", open: true}, csrf: ""};
+    else if (view && VIEW_TOKEN.test(view)) who = {actor: {kind: "viewer", token: view}, csrf: ""};
+  }
   if (!who) return json({error: "Inicia sesión con tu clave de la hermandad."}, 401, request.headers.get("Cookie")?.includes(GUILD_COOKIE + "=") ? {"Set-Cookie": clearCookie} : {});
   if (request.method !== "GET") {
     originCheck(request);
@@ -568,7 +575,9 @@ export class GuildStore {
     let data = null;
     try { data = JSON.parse(header || "null"); } catch { data = null; }
     if (data?.kind === "owner") return {kind: "owner", role: "owner", memberId: null, keyId: null, label: "Propietario"};
-    // Checked against the current link by GuildMarket.fetch (the token is an HMAC, so the check is asynchronous).
+    // The open panel (publicView) and the view link: GuildMarket.fetch checks that the panel is still open, or the link
+    // against the current one (the token is an HMAC, so that check is asynchronous).
+    if (data?.kind === "viewer" && data.open === true) return {kind: "viewer", role: "viewer", memberId: null, keyId: null, label: null, token: null, open: true};
     if (data?.kind === "viewer" && typeof data.token === "string" && VIEW_TOKEN.test(data.token)) return {kind: "viewer", role: "viewer", memberId: null, keyId: null, label: null, token: data.token};
     if (data?.kind === "member" && isInt(data.memberId, 1, Number.MAX_SAFE_INTEGER) && isInt(data.keyId, 1, Number.MAX_SAFE_INTEGER)) {
       const row = this.rows(`SELECT m.label, m.role, m.revoked_at AS member_revoked, k.revoked_at AS key_revoked
@@ -1492,13 +1501,17 @@ export class GuildMarket {
       const actor = store.actor(request.headers.get("X-Guild-Actor"));
       const viewer = actor.kind === "viewer";
       if (viewer) {
-        const link = store.viewLink();
-        if (!link.on || !equal(actor.token, await viewToken(link.version, this.env))) return json({error: VIEW_GONE}, 401);
+        if (actor.open) {
+          if (!publicView(this.env)) return json({error: OPEN_GONE}, 401);
+        } else {
+          const link = store.viewLink();
+          if (!link.on || !equal(actor.token, await viewToken(link.version, this.env))) return json({error: VIEW_GONE}, 401);
+        }
         if (!VIEW_PATHS.has(path)) return json({error: "Con el enlace para ver no se puede abrir esto: entra con tu clave."}, 403);
       }
       const params = url.searchParams;
       if (path === "/api/guild/me") {
-        const me = {role: actor.role, isOwner: actor.role === "owner", canAdmin: canAdmin(actor), viewer,
+        const me = {role: actor.role, isOwner: actor.role === "owner", canAdmin: canAdmin(actor), viewer, openView: publicView(this.env),
           member: actor.kind === "member" ? {id: actor.memberId, label: actor.label} : null, rules: VERSION, T, date: dateOfDay(T),
           dayOfLaunch: T - LAUNCH + 1, launchDay: LAUNCH, guardUntil: LAUNCH + GUARD_DAYS, markets: store.markets(nowSec),
           limits: {uploadsPerDay: LIMITS.uploadsPerDay, maxKeys: LIMITS.keys, maxMembers: LIMITS.members, itemsPerMarket: LIMITS.itemsPerMarket,

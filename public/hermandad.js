@@ -1266,7 +1266,8 @@ function boot(doc, win) {
   try { state.favorites = new Set(parseFavorites(win.localStorage.getItem("hermandad.lista"))); } catch { /* private mode */ }
   // The secret view link (/hermandad?ver=…): read-only without signing in. Kept for this tab only, so the brand link
   // (/hermandad) keeps it; a session always wins over it.
-  let viewToken = null, viewDead = false;
+  // openView: the server says the panel is open to everyone in read only (GUILD_PUBLIC_VIEW), link or not.
+  let viewToken = null, viewDead = false, openView = false;
   try {
     const given = new URLSearchParams(win.location.search).get("ver");
     if (given && VIEW_TOKEN.test(given)) { viewToken = given; win.sessionStorage.setItem("hermandad.ver", given); }
@@ -1351,7 +1352,7 @@ function boot(doc, win) {
     showOnly("screen-login");
     $("#key-value").value = ""; $("#key-panel").hidden = true;
     $("#login-feedback").textContent = message;
-    $("#login-view").hidden = !viewToken || viewDead;
+    $("#login-view").hidden = !(viewToken || openView) || viewDead;
     if ($("#detail").open) $("#detail").close();
     $("#login-key").focus();
   }
@@ -1424,7 +1425,7 @@ function boot(doc, win) {
   $("#login-show").addEventListener("change", event => { $("#login-key").type = event.target.checked ? "text" : "password"; });
   $("#login-view").addEventListener("click", () => { $("#login-feedback").textContent = ""; start(); });
   $("#logout").addEventListener("click", async () => {
-    if (state.me?.viewer) return showLogin("Entra con tu clave de la hermandad o, si eres el propietario, con tu contraseña. Sin entrar, el enlace enseña el panel en solo lectura.");
+    if (state.me?.viewer) return showLogin("Entra con tu clave de la hermandad o, si eres el propietario, con tu contraseña. Sin entrar, el panel se ve en solo lectura.");
     const owner = state.me?.isOwner;
     try { await request("/api/guild/logout", {}); } catch { /* the cookie may already be gone */ }
     if (owner) { try { await ownerLogout(); } catch { /* the session may already be gone */ } }
@@ -1462,7 +1463,7 @@ function boot(doc, win) {
     } catch { toast("No se ha podido cargar tu cartera. Recarga la página.", true); }
   }
   function applyMe(me) {
-    state.me = me; state.csrf = me.csrf || state.csrf;
+    state.me = me; state.csrf = me.csrf || state.csrf; openView = !!me.openView;
     $("#account").hidden = false; $("#tabs").hidden = false;
     $("#tab-cartera").hidden = !me.isOwner;
     $("#tab-hermandad").hidden = !!me.viewer;
@@ -2474,6 +2475,7 @@ function boot(doc, win) {
     const link = state.me?.viewLink ?? null;
     $("#view-link-card").hidden = !link;
     if (!link) return;
+    $("#view-link-open").hidden = !state.me.openView;
     $("#view-link-off").hidden = link.on;
     $("#view-link-create").hidden = link.on;
     $("#view-link-on").hidden = !link.on;

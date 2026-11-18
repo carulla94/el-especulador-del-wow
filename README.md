@@ -104,7 +104,13 @@ Es independiente de la cartera: usa su propio Durable Object (`GuildMarket`), su
 2. Entra en la app con tu contraseña y pulsa **Hermandad** en el menú. Como propietario puedes hacerlo todo.
 3. En **Miembros**, añade a cada compañero con el nombre que quieras mostrar (no hace falta que sea su personaje). Se crea su clave personal `gld_…`: **se muestra una sola vez**, cópiala y envíasela por privado. Se guarda solo su SHA-256.
 4. Si quieres ayuda, haz administrador a alguien: podrá crear y revocar claves de miembros normales. Revocar a un miembro corta sus claves al momento (el panel lo saca en el siguiente minuto); marca «borrar también sus precios» si subió datos falsos.
-5. Si quieres que alguien vea el panel sin clave, crea el **enlace para ver** (ver abajo).
+5. Ahora el panel está **abierto a todos en solo lectura** (ver abajo): basta con pasar la dirección `…/hermandad`. Si lo cierras, quien quieras que lo vea sin clave necesita el **enlace para ver**.
+
+**Panel abierto a todos**
+
+Con `"vars": {"GUILD_PUBLIC_VIEW": "1"}` en `wrangler.jsonc` (así está desde noviembre de 2026), quien abra `…/hermandad` sin entrar ve el panel en solo lectura, sin clave ni enlace. Ve exactamente lo mismo que con el enlace para ver (ver abajo): sin nombres, sin lo personal y sin poder cambiar nada. Arriba sale «Solo lectura» y el botón **Entrar**, para quien tenga clave o contraseña. Un enlace para ver antiguo también abre el panel.
+
+Para cerrarlo, pon `"GUILD_PUBLIC_VIEW": "0"` y publica. Desde ese momento solo se ve con clave o con el enlace para ver, si está creado. No hace falta tocar Cloudflare: la variable va en el archivo y se publica con el resto.
 
 **Enlace para ver**
 
