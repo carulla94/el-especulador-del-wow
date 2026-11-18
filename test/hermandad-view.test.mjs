@@ -991,4 +991,9 @@ test("the view link: the page reads ?ver=, sends it as X-Guild-View and hides wh
   assert.match(html, /<a href="#hermandad" data-tab="hermandad" id="tab-hermandad">/);
   assert.match(html, /<section id="view-link-card" class="card view-link" hidden/);
   assert.match(js, /\/hermandad\?ver=\$\{token\}/);
+  // The open panel (GUILD_PUBLIC_VIEW): the server says so in /me, and the login screen offers to keep looking.
+  assert.match(js, /openView = !!me\.openView/);
+  assert.match(js, /\$\("#login-view"\)\.hidden = !\(viewToken \|\| openView\) \|\| viewDead/);
+  assert.match(js, /\$\("#view-link-open"\)\.hidden = !state\.me\.openView/);
+  assert.match(html, /<p id="view-link-open" class="muted" hidden>/);
 });
