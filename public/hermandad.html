@@ -23,6 +23,7 @@
       <a href="#hoy" data-tab="hoy">Hoy</a>
       <a href="#mercado" data-tab="mercado">Mercado</a>
       <a href="#compensa" data-tab="compensa">Qué compensa</a>
+      <a href="#pesca" data-tab="pesca">Pesca</a>
       <a href="#balance" data-tab="balance" id="tab-balance" hidden>Balance<span class="wide"> semanal</span></a>
       <a href="#cartera" data-tab="cartera" id="tab-cartera" hidden>Mi cartera</a>
       <a href="#hermandad" data-tab="hermandad">Hermandad</a>
@@ -268,6 +269,92 @@
           </details>
         </section>
         <p id="compensa-caveat" class="caveat muted"></p>
+      </div>
+    </section>
+
+    <section id="screen-pesca" data-screen class="screen" hidden aria-labelledby="pesca-title">
+      <div class="section-head">
+        <h1 id="pesca-title">Pesca</h1>
+        <p class="muted hint">Qué pescar, dónde, qué hacer con cada pez y cuándo venderlo, con los precios que ha visto la hermandad.</p>
+      </div>
+      <div id="pesca-banners" class="banners"></div>
+      <div id="pesca-empty" class="card empty" hidden><p>Aún no hay precios de este mercado.</p></div>
+      <div id="pesca-content" class="compensa" hidden>
+        <div class="card pesca-you">
+          <div class="filters" role="group" aria-label="Tu pescador">
+            <label class="inline-field">Pesca<input id="fish-skill" type="text" inputmode="numeric" maxlength="3" placeholder="1–300" autocomplete="off"></label>
+            <label class="inline-field">Cocina<input id="fish-cook" type="text" inputmode="numeric" maxlength="3" placeholder="1–300" autocomplete="off"></label>
+            <label class="inline-field">Alquimia<input id="fish-alch" type="text" inputmode="numeric" maxlength="3" placeholder="1–300" autocomplete="off"></label>
+            <label class="inline-field">Capturas por hora<input id="fish-rate" type="text" inputmode="numeric" maxlength="3" placeholder="200" autocomplete="off"></label>
+          </div>
+          <p id="fish-feedback" class="feedback" role="alert" hidden></p>
+          <p class="muted small-print">Tus habilidades solo se guardan en este navegador y sirven para quitar lo que aún no puedes pescar, cocinar o destilar. Déjalas vacías para verlo todo.</p>
+          <p id="fish-season" class="small-print"></p>
+        </div>
+        <p id="fish-missing" class="empty-line" hidden></p>
+        <ul id="fish-cards" class="best-cards"></ul>
+
+        <section id="sell-section" class="card compensa-section" aria-labelledby="sell-title">
+          <div>
+            <h2 id="sell-title">Cuándo vender</h2>
+            <p class="muted small-print">Cada escaneo de la hermandad comparado con el nivel de ese objeto esa semana: así se ve a qué hora y qué día su precio más bajo suele estar más alto (hay menos competencia y puedes poner el tuyo más caro). Hora de España, la del reino.</p>
+          </div>
+          <div class="filters" role="group" aria-label="Qué objetos mirar">
+            <label class="filter-wide"><span class="sr-only">Objetos</span><select id="sell-group"></select></label>
+          </div>
+          <p id="sell-feedback" class="empty-line" hidden></p>
+          <div id="sell-advice" class="advice" aria-live="polite"></div>
+          <ul id="sell-legend" class="legend" hidden>
+            <li><span class="key key-dear"></span>Más caro que su semana</li>
+            <li><span class="key key-cheap"></span>Más barato</li>
+            <li><span class="key key-few"></span>Pocos escaneos</li>
+          </ul>
+          <div id="sell-holder" class="heatmap-holder"></div>
+          <details id="sell-twin" class="days-table" hidden>
+            <summary>Ver por franja y por día en una tabla</summary>
+            <div id="sell-table"></div>
+          </details>
+        </section>
+
+        <section id="zones-section" class="card compensa-section" aria-labelledby="zones-title">
+          <div>
+            <h2 id="zones-title">Dónde pescar sin bancos</h2>
+            <p class="muted small-print">Lo que vale de media cada captura en aguas abiertas de cada zona, haciendo con cada pez lo que más rinde (venderlo, cocinarlo o destilarlo) y tras la comisión. Para pescar quieto, sin buscar bancos.</p>
+          </div>
+          <p id="zones-empty" class="empty-line" hidden></p>
+          <ol id="zones-list" class="rank"></ol>
+          <details id="zones-twin" class="days-table">
+            <summary>Ver todas las zonas en una tabla</summary>
+            <div id="zones-table"></div>
+          </details>
+        </section>
+
+        <section id="pools-section" class="card compensa-section" aria-labelledby="pools-title">
+          <div>
+            <h2 id="pools-title">Bancos de peces</h2>
+            <p class="muted small-print">Lo que vale cada captura en un banco y un banco entero (unas 4 capturas), haciendo con cada pez lo que más rinde. Compensan si los encuentras seguidos.</p>
+          </div>
+          <p id="pools-empty" class="empty-line" hidden></p>
+          <ol id="pools-list" class="rank"></ol>
+          <details id="pools-twin" class="days-table">
+            <summary>Ver todos los bancos en una tabla</summary>
+            <div id="pools-table"></div>
+          </details>
+        </section>
+
+        <section id="uses-section" class="card compensa-section" aria-labelledby="uses-title">
+          <div>
+            <h2 id="uses-title">Qué hacer con cada pez</h2>
+            <p class="muted small-print">Por cada pez: venderlo crudo, cocinarlo o destilarlo en aceite (y el aceite en su elixir), tras la comisión y lo que cuestan las especias y los viales del mercader.</p>
+          </div>
+          <p id="uses-empty" class="empty-line" hidden></p>
+          <ol id="uses-list" class="rank"></ol>
+          <details id="uses-twin" class="days-table">
+            <summary>Ver todos los peces en una tabla</summary>
+            <div id="uses-table"></div>
+          </details>
+        </section>
+        <p id="pesca-caveat" class="caveat muted"></p>
       </div>
     </section>
 

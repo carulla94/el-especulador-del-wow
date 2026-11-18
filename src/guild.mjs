@@ -24,6 +24,7 @@
  * The whole body is validated before anything is written, and an identical body is recognised by its SHA-256. */
 import {DAY0, LAUNCH, GUARD_DAYS, BUDGET, CUT_BP, PRICE_MAX, CATEGORIES, VERSION, median, quantile, dayIndex, mergeDay, dayValue,
   baseline, assess, flip, deltas, weekday, texts, idiv} from "./especular.mjs";
+import {buildTiming, TIMING, TIMING_VERSION} from "./timing.mjs";
 
 export const GUILD_ID = "guild-forever-eu-v1";
 export const GUILD_COOKIE = "__Host-especulador_hermandad";
@@ -34,7 +35,9 @@ export const LIMITS = Object.freeze({
   keys: 50, members: 50, markets: 20, itemsPerMarket: 300,
   marketsPerUpload: 8, itemsPerUpload: 300, daysPerItem: 130, pointsPerItem: 130,
   uploadsPerDay: 24, syncPerHour: 60, loginAttempts: 8, loginWindowMs: 15 * 60000,
-  retentionDays: 180, pointSeconds: 14 * 86400, pointsKept: 200,
+  // Points are read 14 days back (pointSeconds) everywhere except «Cuándo vender», which keeps them TIMING.days (28) days;
+  // pointsKept covers that month at a dozen scans a day.
+  retentionDays: 180, pointSeconds: 14 * 86400, pointsKept: 400,
   minDay: 2490, itemIdMax: 2147483647, qtyMax: 1000000, nameMax: 100, labelMax: 40, cacheBytes: 1536 * 1024,
   // A member's history reaches at most 30 days before their first upload to a market (a late joiner's 120 days
   // would cost as much as a week of everyone's uploads).
@@ -65,7 +68,7 @@ const OBSERVER_PATTERN = /^[0-9a-f]{8}$/;
 export const RESALE_DURATION = 3;
 const SUMMARY_VERSION = VERSION + ":resumen-2";
 
-/** The fixed guild watchlist, the same 114 IDs as Data.WATCH in the addon (addon/OroHermandad/Data.lua). Its items
+/** The fixed guild watchlist, the same 161 IDs as Data.WATCH in the addon (addon/OroHermandad/Data.lua). Its items
  * always have room in a market and are the only ones where weekday patterns are looked for. */
 export const WATCHLIST = Object.freeze({
   metal: [2770, 2771, 2775, 2772, 2776, 3858, 7911, 10620, 2840, 3576, 2841, 2842, 3575, 3577, 3859, 3860, 6037, 12359, 12360],
@@ -76,13 +79,16 @@ export const WATCHLIST = Object.freeze({
   piel: [2934, 2318, 783, 2319, 4232, 4234, 4235, 4304, 8169, 8170, 8171, 15417],
   tela: [2589, 2592, 4306, 4338, 14047, 14256, 14342],
   pocion: [3928, 13446, 13444, 13442, 5634],
-  elixir: [13452, 9187, 9206, 13454],
+  elixir: [13452, 9187, 9206, 13454, 13445, 21546, 6373],
   frasco: [13510, 13511, 13512, 13513],
-  comida: [13928, 13931, 18254],
+  // Fishing since 0.5.0: raw fish and what is cooked from it (comida), the oils (otro) and the elixirs they go into.
+  comida: [13928, 13931, 18254, 6291, 6303, 6289, 6317, 6361, 6308, 21071, 6522, 6358, 6359, 6362, 8365, 21153, 4603, 13754, 13758,
+    13756, 13755, 13759, 13760, 13889, 13893, 13888, 13422, 13757, 4592, 5095, 4593, 21072, 6657, 4594, 8364, 21217, 6887, 13927, 13930,
+    13929, 13932, 13933, 13934, 13935],
   venda: [14529, 14530],
   encantar: [11137, 11176, 16204, 16203, 14344, 20725],
   elemental: [7076, 7078, 7080, 12808],
-  otro: [12811]
+  otro: [12811, 6370, 6371, 13423]
 });
 const WATCH = new Map(Object.entries(WATCHLIST).flatMap(([cat, ids]) => ids.map(id => [id, cat])));
 export const CATEGORY_LABELS = Object.freeze({metal: "Metal", piedra: "Piedra", gema: "Gema", hierba: "Hierba", piel: "Piel",
@@ -205,7 +211,7 @@ function originCheck(request) {
 // ---- Worker side: authentication and forwarding. Called by worker.mjs for every /api/guild/* path.
 const ROUTES = new Map([
   ["POST /api/guild/sync", "key"], ["POST /api/guild/login", "public"], ["POST /api/guild/logout", "session"],
-  ["GET /api/guild/me", "session"], ["GET /api/guild/market", "session"], ["GET /api/guild/item", "session"],
+  ["GET /api/guild/me", "session"], ["GET /api/guild/market", "session"], ["GET /api/guild/item", "session"], ["GET /api/guild/timing", "session"],
   ["GET /api/guild/export.csv", "session"], ["GET /api/guild/download/sincronizador", "session"],
   ["GET /api/guild/members", "session"], ["POST /api/guild/members", "session"], ["POST /api/guild/members/role", "session"],
   ["POST /api/guild/members/revoke", "session"], ["POST /api/guild/keys", "session"], ["POST /api/guild/keys/revoke", "session"]
@@ -475,6 +481,9 @@ export class GuildStore {
       `CREATE INDEX IF NOT EXISTS guild_day_agg_day ON guild_day_agg(market, day)`,
       `CREATE TABLE IF NOT EXISTS guild_summary_cache (market TEXT PRIMARY KEY, day INTEGER NOT NULL, version TEXT NOT NULL,
         computed_at INTEGER NOT NULL, payload TEXT NOT NULL)`,
+      // «Cuándo vender» (src/timing.mjs): computed at most every TIMING.ttlSeconds, because it reads a month of points.
+      `CREATE TABLE IF NOT EXISTS guild_timing_cache (market TEXT PRIMARY KEY, day INTEGER NOT NULL, version TEXT NOT NULL,
+        computed_at INTEGER NOT NULL, payload TEXT NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS guild_rate_limits (bucket_key TEXT PRIMARY KEY, window_start INTEGER NOT NULL, attempts INTEGER NOT NULL)`,
       // One row: the UTC day and the rows the guild wrote on it (see LIMITS.writeRowsPerDay).
       `CREATE TABLE IF NOT EXISTS guild_write_budget (day INTEGER PRIMARY KEY, written INTEGER NOT NULL)`,
@@ -641,6 +650,7 @@ export class GuildStore {
       this.run("DELETE FROM guild_member_markets WHERE member_id=?", id);
       this.pruneItems();
       this.run("DELETE FROM guild_summary_cache");
+      this.run("DELETE FROM guild_timing_cache");
       return {purged};
     });
   }
@@ -1101,14 +1111,14 @@ export class GuildStore {
     return new Map(this.rows("SELECT slot,member_id FROM guild_observers WHERE slot>=? AND member_id IS NOT NULL", RELAYED_SLOT_BASE).map(r => [r.slot, r.member_id]));
   }
 
-  /** Retention, at most once per day: days older than T-180, points older than 14 days, upload receipts of 180 days,
+  /** Retention, at most once per day: days older than T-180, points older than 28 days, upload receipts of 180 days,
    * relayed mates not seen in 180 days (and their codes, when no member owns them), and then the items left without
    * days. */
   retain(T, nowSec) {
     if (this.rows("SELECT value FROM guild_meta WHERE key='retention_day'")[0]?.value === String(T)) return;
     this.run("DELETE FROM guild_obs_day WHERE day<?", T - LIMITS.retentionDays);
     this.run("DELETE FROM guild_day_agg WHERE day<?", T - LIMITS.retentionDays);
-    this.run("DELETE FROM guild_obs_point WHERE t<?", nowSec - LIMITS.pointSeconds);
+    this.run("DELETE FROM guild_obs_point WHERE t<?", nowSec - Math.max(LIMITS.pointSeconds, TIMING.days * 86400));
     this.run("DELETE FROM guild_uploads WHERE day<?", T - LIMITS.retentionDays);
     this.run("DELETE FROM guild_observer_markets WHERE last_seen<?", nowSec - LIMITS.retentionDays * 86400);
     this.run(`DELETE FROM guild_observers WHERE member_id IS NULL AND NOT EXISTS (SELECT 1 FROM guild_observer_markets om
@@ -1117,14 +1127,17 @@ export class GuildStore {
     this.run("INSERT OR REPLACE INTO guild_meta(key,value) VALUES ('retention_day',?)", String(T));
   }
   /** Items without any stored day (after the retention or a purge) give back their slot and their name, with their
-   * deposits and vendor prices. A point of such an item, if any is left, is shown nowhere and ages out in 14 days. */
+   * deposits and vendor prices. A point of such an item, if any is left, is shown nowhere and ages out in 28 days. */
   pruneItems() {
     const gone = this.rows(`DELETE FROM guild_items WHERE NOT EXISTS (SELECT 1 FROM guild_obs_day o
       WHERE o.market=guild_items.market AND o.item_id=guild_items.item_id) RETURNING market`);
     if (!gone.length) return 0;
     this.run(`DELETE FROM guild_deposits WHERE NOT EXISTS (SELECT 1 FROM guild_items i WHERE i.market=guild_deposits.market AND i.item_id=guild_deposits.item_id)`);
     this.run(`DELETE FROM guild_item_vendor WHERE NOT EXISTS (SELECT 1 FROM guild_items i WHERE i.market=guild_item_vendor.market AND i.item_id=guild_item_vendor.item_id)`);
-    for (const market of new Set(gone.map(r => r.market))) this.run("DELETE FROM guild_summary_cache WHERE market=?", market);
+    for (const market of new Set(gone.map(r => r.market))) {
+      this.run("DELETE FROM guild_summary_cache WHERE market=?", market);
+      this.run("DELETE FROM guild_timing_cache WHERE market=?", market);
+    }
     return gone.length;
   }
 
@@ -1205,6 +1218,23 @@ export class GuildStore {
     if (encoder.encode(payload).byteLength <= LIMITS.cacheBytes) {
       this.run("INSERT OR REPLACE INTO guild_summary_cache(market,day,version,computed_at,payload) VALUES (?,?,?,?,?)", market, T, SUMMARY_VERSION, nowSec, payload);
     }
+    return {payload, cache: "miss"};
+  }
+  /** «Cuándo vender» for every item of a market with points or days (src/timing.mjs), served from guild_timing_cache
+   * for TIMING.ttlSeconds within the same day. Every person counts once per moment, whatever slot they came by. */
+  timing(market, T, nowSec) {
+    const cached = this.rows("SELECT day,version,computed_at,payload FROM guild_timing_cache WHERE market=?", market)[0];
+    if (cached && cached.day === T && cached.version === TIMING_VERSION && cached.computed_at > nowSec - TIMING.ttlSeconds) {
+      return {payload: cached.payload, cache: "hit"};
+    }
+    if (!this.marketKnown(market)) return null;
+    const persons = this.persons();
+    const points = this.rows("SELECT item_id,member_id,t,lo,qty FROM guild_obs_point WHERE market=? AND t>=?", market, nowSec - TIMING.days * 86400)
+      .map(r => ({item_id: r.item_id, person: personOf(persons, r.member_id), t: r.t, lo: r.lo, qty: r.qty}));
+    const days = this.rows("SELECT item_id,day,v FROM guild_day_agg WHERE market=? AND day>=? AND day<=?", market,
+      T - TIMING.dayValues - TIMING.halfWindow, T);
+    const payload = JSON.stringify({market, rules: TIMING_VERSION, computedAt: iso(nowSec), ...buildTiming({points, days, T})});
+    this.run("INSERT OR REPLACE INTO guild_timing_cache(market,day,version,computed_at,payload) VALUES (?,?,?,?,?)", market, T, TIMING_VERSION, nowSec, payload);
     return {payload, cache: "miss"};
   }
   buildSummary(market, T, nowSec) {
@@ -1400,6 +1430,11 @@ export class GuildMarket {
         // The cached object plus the live freshness, spliced in without parsing the cached JSON again.
         const body = '{"freshness":' + JSON.stringify(store.freshness(market, T, nowSec)) + "," + summary.payload.slice(1);
         return new Response(body, {headers: {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "private, no-store", "X-Guild-Cache": summary.cache}});
+      }
+      if (path === "/api/guild/timing") {
+        const timing = store.timing(market, T, nowSec);
+        if (!timing) return json({error: "Todavía no hay datos de ese mercado."}, 404);
+        return new Response(timing.payload, {headers: {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "private, no-store", "X-Guild-Cache": timing.cache}});
       }
       if (path === "/api/guild/item") {
         const id = Number(params.get("id"));

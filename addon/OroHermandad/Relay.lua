@@ -343,7 +343,7 @@ function Relay.Parse(text, now, channel, mk)
         if not id then return nil, "objeto mal escrito" end
         if ids[id] then return nil, "objeto repetido" end
         ids[id] = true
-        if History.IsFixed(id) then items[#items + 1] = {id, lo, qty, qty5} end
+        if History.IsShared(id) then items[#items + 1] = {id, lo, qty, qty5} end
       end
     end
     return {kind = kind, seq = seq, part = part, total = total, mk = f[5], t = t, items = items, ids = ids}
@@ -897,7 +897,7 @@ local function onScan(info)
   local items = {}
   for _, it in ipairs(type(info.items) == "table" and info.items or {}) do
     local id, lo, qty, qty5 = it[1], it[2], it[3], it[4]
-    if History.IsFixed(id) and isInt(lo, 1, Spec.PRICE_MAX) and isInt(qty, 0, Spec.QTY_MAX) and isInt(qty5, 0, Spec.QTY_MAX) then
+    if History.IsShared(id) and isInt(lo, 1, Spec.PRICE_MAX) and isInt(qty, 0, Spec.QTY_MAX) and isInt(qty5, 0, Spec.QTY_MAX) then
       items[#items + 1] = {id, lo, qty, min(qty5, qty)}
     end
   end

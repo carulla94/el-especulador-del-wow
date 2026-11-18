@@ -5,7 +5,7 @@ local Guild, UI, Tooltip, Extras, History, Spec = ns.Guild, ns.UI, ns.Tooltip, n
 local Core = {}
 ns.Core = Core
 
-Core.VERSION = "0.4.0"
+Core.VERSION = "0.5.0"
 
 local DEFAULTS = {mode = "lazy", autoOpen = true, sound = true, tooltip = true}
 -- Un escaneo de resumen cuenta como completo si trae al menos esta parte de los resultados del último que contó
@@ -766,7 +766,7 @@ function handlers.ADDON_LOADED(name)
   Extras.Init(db, toggleWindow, openOptions)
   Extras.RegisterSettings(Core)
   Tooltip.Install(tooltipLines)
-  -- Historial de precios: se limpia, se poda y se deja en 768 KB como mucho. Si falla, OroHermandadHist se queda
+  -- Historial de precios: se limpia, se poda y se deja en 1,25 MB como mucho. Si falla, OroHermandadHist se queda
   -- como lo cargó el juego (y se guarda igual al salir) y no se graba nada en esta sesión.
   safely("el historial de precios", function()
     OroHermandadHist = History.Load(OroHermandadHist, {db = db, market = marketKey, version = Core.VERSION,
@@ -946,7 +946,7 @@ end
 handlers.COMMODITY_SEARCH_RESULTS_UPDATED = commodityResults
 handlers.COMMODITY_SEARCH_RESULTS_ADDED = commodityResults
 
--- Justo antes de que el juego escriba los SavedVariables: el historial no pasa de 768 KB (lo tuyo) y 2 MB (lo de
+-- Justo antes de que el juego escriba los SavedVariables: el historial no pasa de 1,25 MB (lo tuyo) y 2 MB (lo de
 -- los compañeros).
 function handlers.PLAYER_LOGOUT() History.BeforeSave() end
 

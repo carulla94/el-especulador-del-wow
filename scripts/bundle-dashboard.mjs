@@ -6,8 +6,9 @@ import {fileURLToPath} from "node:url";
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
 const destination=path.join(root,"dashboard-deploy");
 fs.mkdirSync(destination,{recursive:true});
-// Every module src/worker.mjs reaches, in dependency order: guild.mjs destructures Especular, so especular comes first.
-const namespaces=new Map([["./engine.mjs","Engine"],["./auctioneer.mjs","Auctioneer"],["./storage.mjs","Storage"],["./especular.mjs","Especular"],["./guild.mjs","Guild"]]);
+// Every module src/worker.mjs reaches, in dependency order: timing.mjs and guild.mjs destructure Especular, and guild.mjs
+// Timing, so especular comes first.
+const namespaces=new Map([["./engine.mjs","Engine"],["./auctioneer.mjs","Auctioneer"],["./storage.mjs","Storage"],["./especular.mjs","Especular"],["./timing.mjs","Timing"],["./guild.mjs","Guild"]]);
 function imports(source) {
   return source.replace(/^import\s+\{([\s\S]*?)\}\s+from\s+["']([^"']+)["'];\s*/gm,(_,names,file)=>{
     if(!namespaces.has(file))throw new Error(`Unexpected import ${file}`);
