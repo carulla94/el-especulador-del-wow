@@ -1258,8 +1258,8 @@ class PackagingTests(unittest.TestCase):
             self.assertNotIn(promise, source)
         for needle in ("pseudonymous, not anonymous", "Interface/AddOns/OroHermandad_Subidor", "Character names never leave"):
             self.assertIn(needle, h.__doc__)
-        self.assertEqual(h.VERSION, "0.4.0")
-        self.assertEqual(h.USER_AGENT, "OroHermandadPC/0.4.0")
+        self.assertEqual(h.VERSION, "0.5.0")
+        self.assertEqual(h.USER_AGENT, "OroHermandadPC/0.5.0")
         out = io.StringIO()
         with contextlib.redirect_stdout(out), tempfile.TemporaryDirectory() as home:
             self.assertEqual(h.main(["--quitar-aviso"], home=home, protector=None), 0)
@@ -1894,3 +1894,180 @@ class MarkerTests(Quiet):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# -----------------------------------------------------------------------------------------------------------
+# Forever Fishing: a synthetic ForeverFishing.lua in the layout of the addon (never a real one).
+FF_GUID = "Player-0000-0ABCDEF1"
+FF_SECRETS = ("Zaraguinda", "Reino Secreto de Prueba", FF_GUID, "Cuenta-Secreta", "logout")
+
+
+def ff_session(start, active=1800.4, casts=120, catches=110, records=None, **extra):
+    session = {"startedAt": start, "endedAt": start + 2000, "activeSeconds": active, "elapsedTotal": 1500.25,
+               "casts": casts, "successfulCasts": catches, "catches": catches, "timedCatches": catches - 1 if isinstance(catches, int) else 0,
+               "character": "Zaraguinda", "realm": "Reino Secreto de Prueba", "owner": "Cuenta-Secreta",
+               "endedBy": "logout",
+               "records": records if records is not None else {
+                   13422: {"count": 100, "locations": {"Azshara: Bahía de Bitter": 90}},
+                   6359: {"count": 10, "locations": {"Feralas: Costa": 10}}}}
+    session.update(extra)
+    return session
+
+
+def ff_saved(*sessions, history=None):
+    db = {"sessionHistory": history if history is not None else {FF_GUID: list(sessions)},
+          "lifetime": {"catches": 999, "character": "Zaraguinda"}, "fishingLocations": {"Azshara: Bahía de Bitter": 90},
+          "settings": {"owner": "Cuenta-Secreta"}}
+    return "ForeverFishingDB = " + lua(db) + "\n"
+
+
+class FishingReaderTests(unittest.TestCase):
+    def test_sessions_keep_numbers_and_places_and_never_a_name(self):
+        text = ff_saved(ff_session(NOW - 7200), ff_session(NOW - 86400, active=600.6, casts=30, catches=25,
+                                                           records={13422: {"count": 25, "locations": {}}}))
+        sessions = h.extract_fishing(text, NOW)
+        self.assertEqual(sessions, [
+            {"start": NOW - 86400, "end": NOW - 86400 + 2000, "seconds": 601, "casts": 30, "catches": 25,
+             "zones": {"?": {"13422": 25}}},
+            {"start": NOW - 7200, "end": NOW - 7200 + 2000, "seconds": 1800, "casts": 120, "catches": 110,
+             "zones": {"?": {"13422": 10}, "Azshara: Bahía de Bitter": {"13422": 90}, "Feralas: Costa": {"6359": 10}}}])
+        payload = h.encode_json({"schema": 1, "source": h.FISHING_SOURCE, "sessions": sessions})
+        for secret in FF_SECRETS:
+            self.assertNotIn(secret.encode("utf-8"), payload)
+        self.assertIsNone(h.extract_fishing("OtraCosa = {}\n", NOW))
+        self.assertEqual(h.extract_fishing("ForeverFishingDB = {}\n", NOW), [])
+        self.assertEqual(h.extract_fishing(ff_saved(history={}), NOW), [])
+
+    def test_out_of_range_sessions_are_left_out_and_every_limit_holds(self):
+        too_old = h.DAY0 + 2491 * 86400
+        bad = [ff_session(too_old), ff_session(NOW + 2 * 86400), ff_session(NOW - 5000, endedAt=NOW - 6000),
+               ff_session(NOW - 5100, active=-1), ff_session(NOW - 5200, casts="9"), ff_session(NOW - 5300, catches=None),
+               ff_session(NOW - 9 * 86400, endedAt=NOW), "no es una sesión"]
+        twin = ff_session(NOW - 3600, catches=1, records={})
+        history = {FF_GUID: bad + [ff_session(NOW - 3600)], "Player-0000-0FEDCBA9": [twin]}
+        self.assertEqual([s["start"] for s in h.extract_fishing(ff_saved(history=history), NOW)], [NOW - 3600],
+                         "out of range sessions are left out; the same start of another character counts once")
+        # A place claiming more than the item's count is ignored; what has no place goes under "?".
+        odd = ff_session(NOW - 3600, records={13422: {"count": 5, "locations": {"A: x": 4, "B: y": 3, "": 1}},
+                                              0: {"count": 3}, 6359: {"count": 0}, 6358: {"count": 2, "locations": {"C\n: z": 2}}})
+        self.assertEqual(h.extract_fishing(ff_saved(odd), NOW)[0]["zones"],
+                         {"?": {"13422": 1}, "A: x": {"13422": 4}, "C : z": {"6358": 2}})
+        # More than 40 places: the 39 most fished stay and the rest add up under "?"; 80 items a place at most.
+        records = {1000 + i: {"count": 50 - i, "locations": {f"Zona {i:02}: Sub": 50 - i}} for i in range(45)}
+        records[13422] = {"count": 200, "locations": {"Zona 00: Sub": 200}}
+        many = h.extract_fishing(ff_saved(ff_session(NOW - 3600, records=records)), NOW)[0]["zones"]
+        self.assertEqual(len(many), h.FISHING_ZONES)
+        self.assertEqual(many["?"], {str(1000 + i): 50 - i for i in range(39, 45)})
+        crowded = {i: {"count": i, "locations": {"Feralas: Costa": i}} for i in range(1, 91)}
+        kept = h.extract_fishing(ff_saved(ff_session(NOW - 3600, records=crowded)), NOW)[0]["zones"]["Feralas: Costa"]
+        self.assertEqual(sorted(map(int, kept)), list(range(11, 91)), "the 80 most caught")
+        newest = h.extract_fishing(ff_saved(*[ff_session(NOW - 86400 * 5 + i * 60) for i in range(h.FISHING_SESSIONS + 5)]), NOW)
+        self.assertEqual(len(newest), h.FISHING_SESSIONS)
+        self.assertEqual(newest[0]["start"], NOW - 86400 * 5 + 5 * 60)
+
+
+class FishingUploaderTests(Quiet):
+    def setUp(self):
+        super().setUp()
+        folder = self.tmp / "WoW" / "_forever_" / "WTF" / "Account" / "CUENTA1" / "SavedVariables"
+        self.prices, self.fish = folder / "OroHermandad.lua", folder / "ForeverFishing.lua"
+        write(self.prices, saved_variables(sample_hist()))
+        write(self.fish, ff_saved(ff_session(NOW - 86400), ff_session(NOW - 7200)))
+        self.state, self.calls, self.fish_calls, self.changed = {}, [], [], None
+
+    def poster(self, url, key, payload, timeout):
+        self.calls.append(payload)
+        return {"accepted": True, "duplicate": False, "rowsChanged": 3, "uploadsLeft": 23,
+                "markets": [{"market": "Mirage Raceway-Alliance", "skippedItems": [], "skipped": None}]}
+
+    def fish_poster(self, url, key, payload, timeout):
+        self.fish_calls.append((url, key, payload, timeout))
+        sessions = len(json.loads(payload)["sessions"])
+        return {"accepted": True, "sessions": sessions, "changed": sessions if self.changed is None else self.changed}
+
+    def uploader(self, fish_poster=None):
+        return h.GuildUploader(URL, KEY, self.tmp / "WoW", state=self.state, poster=self.poster, clock=lambda: NOW,
+                               fishing_poster=fish_poster or self.fish_poster)
+
+    def kinds(self, uploader):
+        return [(e.source.path.name, e.kind) for e in uploader.cycle()["events"]]
+
+    def test_the_sessions_go_once_with_the_same_key_and_again_only_when_they_change(self):
+        uploader = self.uploader()
+        result = uploader.cycle()
+        self.assertEqual([(e.source.path.name, e.kind) for e in result["events"]],
+                         [("OroHermandad.lua", "uploaded"), ("ForeverFishing.lua", "fishing")])
+        url, key, payload, timeout = self.fish_calls[0]
+        self.assertEqual((url, key, timeout), (URL, KEY, 30))
+        body = json.loads(payload)
+        self.assertEqual((body["schema"], body["source"], [s["start"] for s in body["sessions"]]),
+                         (1, "ForeverFishing", [NOW - 86400, NOW - 7200]))
+        for secret in FF_SECRETS:
+            self.assertNotIn(secret.encode("utf-8"), payload)
+        self.assertEqual(h.describe(result["events"][1]),
+                         ["Cuenta CUENTA1: Forever Fishing: 2 sesiones de pesca nuevas o cambiadas enviadas al panel."])
+        self.assertEqual(self.kinds(uploader), [("OroHermandad.lua", "unchanged"), ("ForeverFishing.lua", "unchanged")])
+        write(self.fish, self.fish.read_text(encoding="utf-8").replace("1500.25", "1600.5"), age=30)
+        self.assertEqual(self.kinds(uploader)[1], ("ForeverFishing.lua", "unchanged"), "nothing that is sent changed")
+        self.assertEqual(len(self.fish_calls), 1)
+        write(self.fish, ff_saved(ff_session(NOW - 86400), ff_session(NOW - 7200), ff_session(NOW - 3600)), age=20)
+        self.changed = 0
+        events = uploader.cycle()["events"]
+        self.assertEqual(len(self.fish_calls), 2)
+        self.assertEqual(h.describe(events[1]), ["Cuenta CUENTA1: Forever Fishing: el panel ya tenía tus 3 sesiones de pesca."])
+        restarted = h.GuildUploader(URL, KEY, self.tmp / "WoW", state=json.loads(json.dumps(self.state)), poster=self.poster,
+                                    clock=lambda: NOW, fishing_poster=self.fish_poster)
+        self.assertEqual(self.kinds(restarted)[1], ("ForeverFishing.lua", "unchanged"), "remembered across restarts")
+        self.assertEqual(len(self.fish_calls), 2)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_panel_without_the_route_rejects_once_and_a_file_being_saved_waits(self):
+        def old_panel(*args, **kwargs):
+            raise h.RejectedUploadError("El panel todavía no recibe esto (HTTP 404): hay que actualizarlo.")
+        uploader = self.uploader(old_panel)
+        events = uploader.cycle()["events"]
+        self.assertEqual(events[1].kind, "rejected")
+        self.assertIn("No se volverá a enviar hasta que el archivo cambie", h.describe(events[1])[0])
+        self.assertEqual(self.kinds(uploader)[1], ("ForeverFishing.lua", "unchanged"))
+        write(self.fish, ff_saved(ff_session(NOW - 3600)), age=0)
+        pending = [e for e in uploader.cycle()["events"] if e.source.path == self.fish]
+        self.assertEqual([e.kind for e in pending], ["pending"])
+        self.assertEqual(h.describe(pending[0]), ["Cuenta CUENTA1: WoW está guardando ForeverFishing.lua; se leerá en cuanto termine."])
+
+    def test_an_account_without_prices_or_without_forever_fishing(self):
+        self.prices.unlink()
+        result = self.uploader().cycle()
+        self.assertEqual(result["status"], "missing")
+        self.assertEqual([e.kind for e in result["events"]], ["fishing"], "the sessions go even before the first prices")
+        self.fish.unlink()
+        write(self.prices, saved_variables(sample_hist()))
+        self.fish_calls.clear()
+        self.assertEqual([e.kind for e in self.uploader().cycle()["events"]], ["uploaded"])
+        self.assertEqual(self.fish_calls, [])
+        write(self.fish, ff_saved(), age=60)
+        self.assertEqual(self.kinds(self.uploader())[1:], [("ForeverFishing.lua", "unchanged")], "no sessions, nothing to send")
+        write(self.fish, "ForeverFishingDB = {", age=50)
+        invalid = self.uploader().cycle()["events"][1]
+        self.assertEqual(invalid.kind, "invalid")
+        self.assertTrue(h.describe(invalid)[0].startswith("Cuenta CUENTA1: ForeverFishing.lua no se puede leer: "))
+        self.assertEqual(self.fish_calls, [])
+
+    def test_post_fishing_uses_its_own_route_and_a_missing_route_is_a_rejection(self):
+        captured = {}
+        class Opener:
+            def open(self, request, timeout):
+                captured.update(url=request.full_url, method=request.get_method())
+                return Response(b'{"accepted":true,"sessions":1,"changed":1}')
+        with patch.object(h, "build_opener", lambda handler: Opener()):
+            self.assertEqual(h.post_fishing(URL, KEY, b"{}"), {"accepted": True, "sessions": 1, "changed": 1})
+        self.assertEqual(captured, {"url": URL + "/api/guild/fishing", "method": "POST"})
+        for code in (404, 405):
+            with patch.object(h, "build_opener") as builder:
+                builder.return_value.open.side_effect = HTTPError(URL, code, "x", {}, io.BytesIO(b""))
+                with self.subTest(code=code), self.assertRaises(h.RejectedUploadError) as raised:
+                    h.post_fishing(URL, KEY, b"{}")
+                self.assertIn("hay que actualizarlo", str(raised.exception))
+            with patch.object(h, "build_opener") as builder:
+                builder.return_value.open.side_effect = HTTPError(URL, code, "x", {}, io.BytesIO(b""))
+                with self.assertRaises(h.RetryableSyncError):
+                    h.post_guild(URL, KEY, b"{}")

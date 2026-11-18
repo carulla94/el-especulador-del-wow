@@ -1156,6 +1156,97 @@ export function fishCards(zones, pools, uses, advice, {rate = CATCHES_PER_HOUR} 
       note: advice.best ? `Su precio más bajo suele estar ${pctWords(advice.best.value)} de su nivel de esa semana.` : advice.lines[0] ?? ""}];
 }
 
+// ---- Tus sesiones de pesca: Forever Fishing (GET /api/guild/fishing, src/fishing.mjs), valued with the day's prices --
+/** The zone of a Forever Fishing place: "Feralas: Bastión Plumaluna" -> "Feralas"; "?" (catches without a place) ->
+ * "Sin lugar". */
+export function fishingZoneOf(place) {
+  const zone = place === "?" ? "" : String(place ?? "").split(":")[0].trim();
+  return zone || "Sin lugar";
+}
+/** Seconds as "2 h 17 min", "49 min" or "menos de 1 min". */
+export function formatSpan(seconds) {
+  if (!isInt(seconds) || seconds < 60) return "menos de 1 min";
+  const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60);
+  return h ? `${h} h${m ? ` ${m} min` : ""}` : `${m} min`;
+}
+/** A unix time on Spain's clock, with its weekday: "mar 17 nov, 20:20". */
+export function sessionWhen(t) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("es-ES", {timeZone: "Europe/Madrid", year: "numeric", month: "numeric", day: "numeric",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23"}).formatToParts(new Date(t * 1000)).map(x => [x.type, x.value]));
+  const wd = (new Date(Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day))).getUTCDay() + 6) % 7;
+  return `${WEEKDAYS_SHORT[wd]} ${Number(p.day)} ${MONTHS[Number(p.month) - 1]}, ${p.hour}:${p.minute}`;
+}
+/** Time with the rod a session needs for its pace and gold per hour to be shown (shorter ones show only their total). */
+export const FISHING_MIN_SECONDS = 600;
+/** Fewer catches than this in a zone: what bites there is only orientative. */
+export const FISHING_FEW = 100;
+/** Your pace: catches per hour with the rod in hand over every session, or null with less than half an hour in all.
+ * {rate, catches, seconds, sessions}. */
+export function fishingRate(sessions) {
+  let catches = 0, seconds = 0, n = 0;
+  for (const s of sessions ?? []) if (isInt(s.seconds) && s.seconds > 0 && isInt(s.catches)) { catches += s.catches; seconds += s.seconds; n++; }
+  return seconds >= 1800 ? {rate: Math.round(catches * 3600 / seconds), catches, seconds, sessions: n} : null;
+}
+/** Every session valued with the day's prices: what you caught times what each catch is worth to you (worth: fishWorth
+ * with your skills) and selling everything as it comes (raw: fishWorth without recipes). Newest first: {start, end,
+ * seconds, catches, perHourCatches, value, raw, perHour, rawPerHour, unpriced (catches without any price), zones:
+ * [{zone, catches}], member (the owner's view only)}. Per hour only with FISHING_MIN_SECONDS with the rod. */
+export function fishingSessionRows(fishing, worth, raw) {
+  return (fishing?.sessions ?? []).map(s => {
+    let value = 0, plain = 0, unpriced = 0;
+    const zones = new Map();
+    for (const [place, items] of Object.entries(s.zones ?? {})) {
+      const zone = fishingZoneOf(place);
+      for (const [key, n] of Object.entries(items ?? {})) {
+        if (!isInt(n)) continue;
+        const id = Number(key), best = worth(id).best, sold = raw(id).best;
+        zones.set(zone, (zones.get(zone) ?? 0) + n);
+        if (best) value += best.value * n; else unpriced += n;
+        if (sold) plain += sold.value * n;
+      }
+    }
+    const timed = isInt(s.seconds) && s.seconds >= FISHING_MIN_SECONDS;
+    const perHour = x => timed ? Math.round(x * 3600 / s.seconds) : null;
+    return {start: s.start, end: s.end, seconds: s.seconds, catches: s.catches, perHourCatches: perHour(s.catches),
+      value, raw: plain, perHour: perHour(value), rawPerHour: perHour(plain), unpriced, member: s.member ?? null,
+      zones: [...zones].map(([zone, catches]) => ({zone, catches})).sort((a, b) => b.catches - a.catches || a.zone.localeCompare(b.zone, "es"))};
+  }).sort((a, b) => b.start - a.start);
+}
+/** What really bites in each zone, from every session the guild sent (fishing.guild.zones), valued like fishZones: the
+ * average catch (a catch without a price counts as nothing) and per hour at rate. Zones with enough catches first, then
+ * by value: {zone, catches, value, perHour, pct (share with a price), few, parts: [{id, name, pct, value, best}],
+ * places: [{place, catches}] (the subzones, most fished first)}. */
+export function fishingPlaces(fishing, worth, rate = CATCHES_PER_HOUR) {
+  const zones = new Map();
+  for (const [place, items] of Object.entries(fishing?.guild?.zones ?? {})) {
+    const zone = fishingZoneOf(place);
+    if (!zones.has(zone)) zones.set(zone, {items: new Map(), places: new Map(), catches: 0});
+    const z = zones.get(zone);
+    for (const [key, n] of Object.entries(items ?? {})) {
+      if (!isInt(n) || n <= 0) continue;
+      z.items.set(Number(key), (z.items.get(Number(key)) ?? 0) + n);
+      z.places.set(place, (z.places.get(place) ?? 0) + n);
+      z.catches += n;
+    }
+  }
+  const rows = [];
+  for (const [zone, z] of zones) {
+    if (!z.catches) continue;
+    let total = 0, priced = 0;
+    const parts = [...z.items].map(([id, n]) => {
+      const w = worth(id), value = w.best ? w.best.value : null;
+      if (value !== null) { total += value * n; priced += n; }
+      return {id, name: w.name, n, pct: Math.round(n * 1000 / z.catches) / 10, value, best: w.best, bring: value === null ? 0 : value * n};
+    }).sort((a, b) => b.bring - a.bring || b.n - a.n || a.id - b.id);
+    const value = Math.floor(total / z.catches);
+    rows.push({zone, catches: z.catches, value, perHour: value * rate, pct: Math.round(priced * 1000 / z.catches) / 10, few: z.catches < FISHING_FEW, parts,
+      places: [...z.places].map(([place, catches]) => ({place: place === "?" ? "sin lugar" : place.slice(place.indexOf(":") + 1).trim() || place, catches}))
+        .sort((a, b) => b.catches - a.catches || a.place.localeCompare(b.place, "es"))});
+  }
+  rows.sort((a, b) => Number(a.few) - Number(b.few) || b.value - a.value || a.zone.localeCompare(b.zone, "es"));
+  return rows;
+}
+
 // =================================================================================================================
 // Page (browser only)
 // =================================================================================================================
@@ -1164,7 +1255,8 @@ function boot(doc, win) {
   const state = {me: null, csrf: "", market: null, summary: null, detail: null, filters: {q: "", cat: "", show: "", conf: ""},
     sort: {key: "", dir: "asc"}, view: "hoy", lastUpload: null, pollTimer: null, members: null, busy: false,
     compensa: {prof: "", skill: "", budget: "", rare: false, cat: ""}, favorites: new Set(),
-    pesca: {skill: "", cook: "", alch: "", rate: "", group: "pesca"}, timing: null, timingKey: null, timingLoading: false, timingError: ""};
+    pesca: {skill: "", cook: "", alch: "", rate: "", group: "pesca"}, timing: null, timingKey: null, timingLoading: false, timingError: "",
+    fishing: null, fishingKey: null, fishingLoading: false};
   let toastTimer;
   let cartera = null;
   /** The portfolio tab, while the owner is the one signed in: this page may stay open after they log out. */
@@ -1834,8 +1926,11 @@ function boot(doc, win) {
       const t = String(text ?? "").trim();
       return /^\d{1,3}$/.test(t) && Number(t) >= low && Number(t) <= high ? Number(t) : null;
     };
-    const p = state.pesca;
-    const out = {fishing: read(p.skill, 1, 450), cooking: read(p.cook, 1, 300), alchemy: read(p.alch, 1, 300), rate: read(p.rate, 10, 999) ?? CATCHES_PER_HOUR};
+    const p = state.pesca, mine = fishingRate(state.fishing?.sessions);
+    // The pace: what you typed, else your sessions of Forever Fishing, else a usual one.
+    const typed = read(p.rate, 10, 999), real = mine && mine.rate >= 10 && mine.rate <= 999 ? mine.rate : null;
+    const out = {fishing: read(p.skill, 1, 450), cooking: read(p.cook, 1, 300), alchemy: read(p.alch, 1, 300), rate: typed ?? real ?? CATCHES_PER_HOUR,
+      rateFrom: typed !== null ? "typed" : real !== null ? "fishing" : "usual", realRate: real};
     out.bad = [["skill", "Pesca", out.fishing, 450], ["cook", "Cocina", out.cooking, 300], ["alch", "Alquimia", out.alchemy, 300], ["rate", "Capturas por hora", read(p.rate, 10, 999), 999]]
       .filter(([key, , value]) => String(p[key] ?? "").trim() && value === null).map(([, label, , high]) => `${label}: escribe un número hasta ${high}.`);
     return out;
@@ -1856,16 +1951,32 @@ function boot(doc, win) {
       if (state.view === "pesca") renderPesca();
     }
   }
+  /** /api/guild/fishing once per upload (Forever Fishing sessions are not tied to a market); the view redraws when it arrives. */
+  async function loadFishing() {
+    const key = String(state.lastUpload ?? "");
+    if (state.fishingKey === key) return;
+    state.fishingKey = key; state.fishingLoading = true;
+    try {
+      state.fishing = await request("/api/guild/fishing");
+    } catch (error) {
+      if (error.status === 401) { handle(error); return; }
+      state.fishing = null;
+    } finally {
+      state.fishingLoading = false;
+      if (state.view === "pesca") renderPesca();
+    }
+  }
   const verb = best => !best ? "sin precio" : best.kind === "subasta" ? "véndelo" : best.kind === "mercader" ? "al mercader" : best.kind === "cooking" ? "cocínalo" : "destílalo";
   const catchText = (row, n = 4) => row.parts.filter(p => p.pct >= 1).slice(0, n).map(p => `${p.name} ${String(p.pct).replace(".", ",")} % (${verb(p.best)}${isInt(p.value) ? `, ${formatGSC(p.value)}` : ""})`).join(" · ");
   function renderPesca() {
     const s = state.summary;
     if (!s) return;
     loadTiming();
+    loadFishing();
     const inputs = pescaInputs();
     $("#fish-feedback").hidden = inputs.bad.length === 0;
     $("#fish-feedback").textContent = inputs.bad.join(" ");
-    $("#fish-rate").placeholder = String(CATCHES_PER_HOUR);
+    $("#fish-rate").placeholder = String(inputs.realRate ?? CATCHES_PER_HOUR);
     const byId = new Map(s.items.map(e => [e.id, e]));
     const pricedFish = FISH.filter(f => byId.has(f.id)).length;
     $("#fish-missing").hidden = pricedFish > 0;
@@ -1876,6 +1987,7 @@ function boot(doc, win) {
       : "Ahora es verano en el juego: pica la lubina y no el calamar de invierno (de octubre a marzo, al revés). El pargo nocturno sale de noche y el salmón escama de sol de día: las cuentas usan la media del día.";
     const advice = renderSell();
     $("#fish-cards").replaceChildren(...fishCards(zones, pools, uses, advice, {rate: inputs.rate}).map(c => bestCardNode(c, () => $(c.target).scrollIntoView())));
+    renderMine(s, zones, inputs);
     renderZones(zones, inputs);
     renderPools(pools);
     renderUses(uses);
@@ -1933,10 +2045,53 @@ function boot(doc, win) {
       const fill = el("span", {class: "rank-fill"});
       fill.style.width = Math.max(1, Math.round(100 * z.perHour / max)) + "%";
       return rankRow({id: null, name: z.name, tag: tag(z), track: el("span", {class: "rank-base"}, fill), value: [money(z.perHour), el("small", {text: "por hora"})],
-        detail: `≈ ${formatGSC(z.value)} por captura a ${inputs.rate} capturas por hora. Pica: ${catchText(z)}.`});
+        detail: `≈ ${formatGSC(z.value)} por captura a ${inputs.rate} capturas por hora${inputs.rateFrom === "fishing" ? " (tu ritmo según Forever Fishing)" : ""}. Pica: ${catchText(z)}.`});
     }));
     $("#zones-table").replaceChildren(twinTable([["Zona"], ["Habilidad", true], ["Sin escapes", true], ["Por captura", true], ["Por hora", true], ["Lo que pica"]],
       zones.rows.map(z => [z.name, num(String(z.skill)), num(String(z.clean)), num(money(z.value)), num(money(z.perHour)), el("td", {class: "twin-wrap", text: catchText(z, 8)})])));
+  }
+  /** "Tus sesiones de pesca": Forever Fishing sessions valued with today's prices, your pace and what really bites. */
+  function renderMine(s, zones, inputs) {
+    const worth = fishWorth(s, inputs), raw = fishWorth(s, {cooking: 0, alchemy: 0});
+    const fishing = state.fishing, guildView = fishing?.scope === "guild";
+    const rows = fishingSessionRows(fishing, worth, raw), timed = rows.filter(r => r.perHour !== null);
+    $("#mine-title").textContent = guildView ? "Sesiones de pesca de la hermandad" : "Tus sesiones de pesca";
+    $("#mine-empty").hidden = rows.length > 0;
+    $("#mine-empty").textContent = state.fishingLoading && !fishing ? "Cargando las sesiones…"
+      : "Aún no hay sesiones. Si usas el addon Forever Fishing, el subidor del PC (0.5.0 o posterior) envía tus sesiones al salir del juego o al usar /reload: solo números y lugares, sin nombres de personaje.";
+    const seconds = timed.reduce((sum, r) => sum + r.seconds, 0), value = timed.reduce((sum, r) => sum + r.value, 0), plain = timed.reduce((sum, r) => sum + r.raw, 0);
+    const pace = fishingRate(fishing?.sessions), best = zones.rows[0];
+    const lines = [];
+    if (pace) lines.push(`${guildView ? "Ritmo de la hermandad" : "Tu ritmo"}: ${pace.rate} capturas por hora con la caña en la mano (${plural(pace.sessions, "sesión", "sesiones")}, ${formatSpan(pace.seconds)}).${inputs.rateFrom === "fishing" ? " Las cuentas de abajo lo usan; escribe otro en «Capturas por hora» si quieres." : ""}`);
+    if (seconds) lines.push(`Vendiéndolo todo tal cual sale, ${formatGSC(Math.round(plain * 3600 / seconds))} por hora.`);
+    if (best && seconds) lines.push(`La mejor zona de la lista de abajo, ${best.name}, daría unos ${formatGSC(best.perHour)} por hora a ${inputs.rate} capturas por hora (con lo que pica allí según Wowhead).`);
+    $("#mine-advice").replaceChildren(...(rows.length ? [el("h3", {text: seconds ? `${guildView ? "La hermandad ha sacado" : "Has sacado"} ${formatGSC(Math.round(value * 3600 / seconds))} por hora` : "Sesiones demasiado cortas para calcular el oro por hora"}),
+      ...lines.map(line => el("p", {text: line}))] : []));
+    const where = r => r.zones.slice(0, 2).map(z => `${z.zone} (${groupThousands(z.catches)})`).join(" y ");
+    const top = rows.slice(0, 10), max = Math.max(1, ...top.map(r => r.perHour ?? 0));
+    $("#mine-list").replaceChildren(...top.map(r => {
+      const fill = el("span", {class: "rank-fill"});
+      fill.style.width = Math.max(1, Math.round(100 * (r.perHour ?? 0) / max)) + "%";
+      const tag = `${formatSpan(r.seconds)} · ${plural(r.catches, "captura", "capturas")}${r.perHourCatches !== null ? ` · ${r.perHourCatches} por hora` : ""}${r.member ? ` · ${r.member}` : ""}`;
+      return rankRow({id: null, name: sessionWhen(r.start), tag, track: el("span", {class: "rank-base"}, fill),
+        value: r.perHour !== null ? [money(r.perHour), el("small", {text: "por hora"})] : [money(r.value), el("small", {text: "en total"})],
+        detail: `${r.zones.length ? `Sobre todo en ${where(r)}. ` : ""}Vale ${formatGSC(r.value)} haciendo lo mejor con cada pez; vendiéndolo tal cual, ${formatGSC(r.raw)}.`
+          + (r.unpriced ? ` ${plural(r.unpriced, "captura", "capturas")} sin precio (cofres, cajas o lo que nadie ha escaneado).` : "")});
+    }));
+    $("#mine-twin").hidden = rows.length === 0;
+    $("#mine-table").replaceChildren(twinTable([["Inicio"], ...(guildView ? [["Quién"]] : []), ["Con la caña", true], ["Capturas", true], ["Por hora", true], ["Vale", true], ["Oro por hora", true], ["Tal cual, por hora", true], ["Dónde"]],
+      rows.map(r => [sessionWhen(r.start), ...(guildView ? [r.member ?? ""] : []), num(formatSpan(r.seconds)), num(groupThousands(r.catches)), num(r.perHourCatches === null ? "—" : String(r.perHourCatches)),
+        num(money(r.value)), num(money(r.perHour)), num(money(r.rawPerHour)), el("td", {class: "twin-wrap", text: r.zones.map(z => `${z.zone} (${groupThousands(z.catches)})`).join(", ")})])));
+    const places = fishingPlaces(fishing, worth, inputs.rate).slice(0, 8), maxPlace = Math.max(1, ...places.map(p => p.perHour));
+    $("#places-title").hidden = places.length === 0;
+    $("#places-list").replaceChildren(...places.map(p => {
+      const fill = el("span", {class: "rank-fill"});
+      fill.style.width = Math.max(1, Math.round(100 * p.perHour / maxPlace)) + "%";
+      const parts = p.parts.filter(x => x.pct >= 1).slice(0, 4).map(x => `${x.name} ${String(x.pct).replace(".", ",")} % (${verb(x.best)}${isInt(x.value) ? `, ${formatGSC(x.value)}` : ""})`).join(" · ");
+      return rankRow({id: null, name: p.zone, tag: `${plural(p.catches, "captura", "capturas")}${p.few ? " · pocas, orientativo" : ""}${p.places[0] ? ` · sobre todo en ${p.places[0].place}` : ""}`,
+        track: el("span", {class: "rank-base"}, fill), value: [money(p.perHour), el("small", {text: "por hora"})],
+        detail: `≈ ${formatGSC(p.value)} por captura a ${inputs.rate} capturas por hora. Ha picado: ${parts || "nada con precio"}.`});
+    }));
   }
   function renderPools(pools) {
     const top = pools.rows, max = top[0]?.perPool || 1;

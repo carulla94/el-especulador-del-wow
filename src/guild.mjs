@@ -25,6 +25,7 @@
 import {DAY0, LAUNCH, GUARD_DAYS, BUDGET, CUT_BP, PRICE_MAX, CATEGORIES, VERSION, median, quantile, dayIndex, mergeDay, dayValue,
   baseline, assess, flip, deltas, weekday, texts, idiv} from "./especular.mjs";
 import {buildTiming, TIMING, TIMING_VERSION} from "./timing.mjs";
+import {FISHING, validateFishing, fishingReport} from "./fishing.mjs";
 
 export const GUILD_ID = "guild-forever-eu-v1";
 export const GUILD_COOKIE = "__Host-especulador_hermandad";
@@ -210,7 +211,7 @@ function originCheck(request) {
 
 // ---- Worker side: authentication and forwarding. Called by worker.mjs for every /api/guild/* path.
 const ROUTES = new Map([
-  ["POST /api/guild/sync", "key"], ["POST /api/guild/login", "public"], ["POST /api/guild/logout", "session"],
+  ["POST /api/guild/sync", "key"], ["POST /api/guild/fishing", "key"], ["GET /api/guild/fishing", "session"], ["POST /api/guild/login", "public"], ["POST /api/guild/logout", "session"],
   ["GET /api/guild/me", "session"], ["GET /api/guild/market", "session"], ["GET /api/guild/item", "session"], ["GET /api/guild/timing", "session"],
   ["GET /api/guild/export.csv", "session"], ["GET /api/guild/download/sincronizador", "session"],
   ["GET /api/guild/members", "session"], ["POST /api/guild/members", "session"], ["POST /api/guild/members/role", "session"],
@@ -240,7 +241,7 @@ export async function guildFetch(request, env, {ownerSession} = {}) {
   if (access === "key") {
     const token = request.headers.get("Authorization")?.match(/^Bearer (gld_[A-Za-z0-9_-]{43})$/)?.[1];
     if (!token) return json({error: "Clave de la hermandad no válida."}, 401);
-    return internal(env, "/api/guild/sync", {method: "POST", headers: {...passBody(request), "X-Member-Hash": await sha256(token)}, body: request.body});
+    return internal(env, path, {method: "POST", headers: {...passBody(request), "X-Member-Hash": await sha256(token)}, body: request.body});
   }
   if (access === "public") {
     originCheck(request);
@@ -484,6 +485,10 @@ export class GuildStore {
       // «Cuándo vender» (src/timing.mjs): computed at most every TIMING.ttlSeconds, because it reads a month of points.
       `CREATE TABLE IF NOT EXISTS guild_timing_cache (market TEXT PRIMARY KEY, day INTEGER NOT NULL, version TEXT NOT NULL,
         computed_at INTEGER NOT NULL, payload TEXT NOT NULL)`,
+      // Fishing sessions of the Forever Fishing addon (src/fishing.mjs): one row per member and session start, zones as JSON.
+      `CREATE TABLE IF NOT EXISTS guild_fishing (member_id INTEGER NOT NULL, start INTEGER NOT NULL, end_at INTEGER NOT NULL,
+        seconds INTEGER NOT NULL, casts INTEGER NOT NULL, catches INTEGER NOT NULL, zones TEXT NOT NULL, received_at INTEGER NOT NULL,
+        PRIMARY KEY (member_id, start))`,
       `CREATE TABLE IF NOT EXISTS guild_rate_limits (bucket_key TEXT PRIMARY KEY, window_start INTEGER NOT NULL, attempts INTEGER NOT NULL)`,
       // One row: the UTC day and the rows the guild wrote on it (see LIMITS.writeRowsPerDay).
       `CREATE TABLE IF NOT EXISTS guild_write_budget (day INTEGER PRIMARY KEY, written INTEGER NOT NULL)`,
@@ -648,11 +653,42 @@ export class GuildStore {
       const persons = this.persons();
       for (const [market, items] of touched) for (const [item, days] of items) this.aggregate(market, item, days, persons);
       this.run("DELETE FROM guild_member_markets WHERE member_id=?", id);
+      purged += this.rows("DELETE FROM guild_fishing WHERE member_id=? RETURNING start", id).length;
       this.pruneItems();
       this.run("DELETE FROM guild_summary_cache");
       this.run("DELETE FROM guild_timing_cache");
       return {purged};
     });
+  }
+
+  // ---- Fishing sessions (src/fishing.mjs)
+  /** Stores the sessions of one upload that are new or changed (a session is its member and start). Over the guild's
+   * daily write budget nothing is written and a 429 says when to retry. {sessions, changed}. */
+  ingestFishing(memberId, sessions, {nowSec, budget = Infinity}) {
+    const stored = new Map(this.rows("SELECT start,end_at,seconds,casts,catches,zones FROM guild_fishing WHERE member_id=?", memberId)
+      .map(r => [r.start, `${r.end_at}|${r.seconds}|${r.casts}|${r.catches}|${r.zones}`]));
+    const writes = sessions.map(s => ({...s, json: JSON.stringify(s.zones)}))
+      .filter(s => stored.get(s.start) !== `${s.end}|${s.seconds}|${s.casts}|${s.catches}|${s.json}`);
+    // A session row and its primary key entry; a replaced one also its old entry.
+    const estimate = 3 * writes.length;
+    if (writes.length && this.writesToday(nowSec) + estimate > budget) {
+      const reset = (utcDay(nowSec) + 1) * 86400;
+      fail("La hermandad ha agotado por hoy su cuota de escritura en el panel. Las sesiones de pesca se guardarán mañana: el subidor lo volverá a intentar solo.",
+        429, {"Retry-After": String(reset - nowSec + 60)});
+    }
+    for (const s of writes) {
+      this.run(`INSERT INTO guild_fishing(member_id,start,end_at,seconds,casts,catches,zones,received_at) VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(member_id,start) DO UPDATE SET end_at=excluded.end_at, seconds=excluded.seconds, casts=excluded.casts,
+        catches=excluded.catches, zones=excluded.zones, received_at=excluded.received_at`,
+        memberId, s.start, s.end, s.seconds, s.casts, s.catches, s.json, nowSec);
+    }
+    return {sessions: sessions.length, changed: writes.length};
+  }
+  /** GET /api/guild/fishing for this actor: a member their own sessions, the owner everyone's; both the guild's totals. */
+  fishing(actor, nowSec) {
+    const rows = this.rows(`SELECT f.member_id, m.label, f.start, f.end_at, f.seconds, f.casts, f.catches, f.zones
+      FROM guild_fishing f JOIN guild_members m ON m.id=f.member_id`);
+    return fishingReport(rows, {scope: actor.kind === "owner" ? "guild" : "mine", memberId: actor.memberId, nowSec});
   }
 
   // ---- Daily write budget
@@ -1120,6 +1156,7 @@ export class GuildStore {
     this.run("DELETE FROM guild_day_agg WHERE day<?", T - LIMITS.retentionDays);
     this.run("DELETE FROM guild_obs_point WHERE t<?", nowSec - Math.max(LIMITS.pointSeconds, TIMING.days * 86400));
     this.run("DELETE FROM guild_uploads WHERE day<?", T - LIMITS.retentionDays);
+    this.run("DELETE FROM guild_fishing WHERE end_at<?", nowSec - LIMITS.retentionDays * 86400);
     this.run("DELETE FROM guild_observer_markets WHERE last_seen<?", nowSec - LIMITS.retentionDays * 86400);
     this.run(`DELETE FROM guild_observers WHERE member_id IS NULL AND NOT EXISTS (SELECT 1 FROM guild_observer_markets om
       WHERE om.slot=guild_observers.slot)`);
@@ -1397,6 +1434,7 @@ export class GuildMarket {
         return json({id: key.memberId, keyId: key.keyId, label: key.label, role: key.role});
       }
       if (path === "/api/guild/sync" && method === "POST") return await this.sync(request, nowMs, nowSec, T);
+      if (path === "/api/guild/fishing" && method === "POST") return await this.fishingUpload(request, nowMs, nowSec, T);
       if (method === "POST") {
         store.actor(request.headers.get("X-Guild-Actor"));
         const data = parseObject(await readBody(request, LIMITS.adminBody));
@@ -1419,6 +1457,7 @@ export class GuildMarket {
         return json(me);
       }
       if (path === "/api/guild/download/sincronizador") return new Response(null, {status: 204});
+      if (path === "/api/guild/fishing") return json(store.fishing(actor, nowSec), 200, {"Cache-Control": "private, no-store"});
       if (path === "/api/guild/members") {
         if (!canAdmin(actor)) return json({error: "Solo quien administra la hermandad puede ver los miembros."}, 403);
         return json(store.listMembers());
@@ -1497,6 +1536,29 @@ export class GuildMarket {
     return json({accepted: true, duplicate: false, day: T, rowsChanged: changes, markets: report.markets,
       uploadsToday: used + 1, uploadsLeft: LIMITS.uploadsPerDay - used - 1,
       message: changes ? `Envío aceptado: ${plural(changes, "cambio", "cambios")}.` : "Envío aceptado: sin cambios."});
+  }
+
+  /** POST /api/guild/fishing: the Forever Fishing sessions the uploader read (src/fishing.mjs). */
+  async fishingUpload(request, nowMs, nowSec, T) {
+    const store = this.store, hash = request.headers.get("X-Member-Hash");
+    let key = store.keyByHash(hash);
+    if (!key || key.revoked) return json({error: "La clave de la hermandad se ha rechazado o revocado."}, 401);
+    if (!store.rateLimit("fishing:" + key.memberId, nowMs, FISHING.postsPerHour, 3600000)) return json({error: "Demasiados envíos de pesca en una hora. Espera un poco y vuelve a intentarlo."}, 429);
+    const encoding = request.headers.get("Content-Encoding");
+    if (encoding && encoding.toLowerCase() !== "identity") return json({error: "Envía el JSON sin comprimir."}, 415);
+    const raw = await readBody(request, FISHING.body, `El envío de pesca supera el límite de ${FISHING.body / 1024} KiB.`);
+    key = store.keyByHash(hash);
+    if (!key || key.revoked) return json({error: "La clave de la hermandad se ha revocado durante el envío."}, 401);
+    const upload = validateFishing(parseObject(raw), {nowSec});
+    // The daily retention (old sessions too) commits on its own, as with the prices.
+    store.transaction(() => store.retain(T, nowSec));
+    const report = store.transaction(() => {
+      const result = store.ingestFishing(key.memberId, upload.sessions, {nowSec, budget: this.writeBudget()});
+      store.saveWrites(nowSec);
+      return result;
+    });
+    return json({accepted: true, sessions: report.sessions, changed: report.changed,
+      message: report.changed ? `Pesca recibida: ${plural(report.changed, "sesión nueva o cambiada", "sesiones nuevas o cambiadas")}.` : "Pesca recibida: sin cambios."});
   }
 
   admin(path, data, actor, nowSec) {

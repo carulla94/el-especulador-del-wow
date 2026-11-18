@@ -44,7 +44,7 @@ Pruebas del sincronizador: `python -m unittest test_sync.py -v`. Son pruebas loc
 
 ## Panel de la hermandad: HERMANDAD.cmd
 
-Es otro programa de esta misma carpeta, para la hermandad que usa el addon **Oro de Hermandad** (0.4.0; también lee los archivos de 0.3.x). Envía al panel de la hermandad los precios que apunta ese addon. No tiene nada que ver con tu cartera ni con Auctioneer.
+Es otro programa de esta misma carpeta, para la hermandad que usa el addon **Oro de Hermandad** (0.4.0 o 0.5.0; también lee los archivos de 0.3.x). Envía al panel de la hermandad los precios que apunta ese addon y, si usas el addon **Forever Fishing**, tus sesiones de pesca. No tiene nada que ver con tu cartera ni con Auctioneer.
 
 **Basta con que una o dos personas de la hermandad lo tengan abierto.** Al terminar un escaneo completo de la subasta, el addon de cada compañero comparte un resumen de precios con la hermandad por el canal oculto de los addons (no se ve en el chat, no suena y no abre ventanas). El addon de quien tiene el subidor lo recoge mientras juega, pide a los compañeros conectados los escaneos que se perdió en las últimas 72 horas y lo guarda en su `OroHermandad.lua`; este programa lo sube al panel junto con los precios propios. El panel cuenta cuántas personas aportan precios, no solo cuántas suben. Los demás solo juegan con el addon: no necesitan Python, ni este programa, ni hacer nada.
 
@@ -67,9 +67,17 @@ Este programa lee `_forever_/WTF/Account/<CUENTA>/SavedVariables/OroHermandad.lu
 - el código de 8 cifras de cada uno de tus personajes y de cada compañero, nunca su nombre;
 - los depósitos de subasta aprendidos y la comisión de la subasta, si el addon la conoce.
 
-Nunca envía **`OroHermandadDB`** (tu hermandad, sus miembros, profesiones y recetas) ni **`OroHermandadCharDB`** (tus personajes, oro y banco). Tampoco abre **`Auctionator.lua`** ni ningún otro archivo. El programa se salta esos bloques sin guardar nada de ellos. En el panel apareces con el nombre que te puso quien administra la hermandad; tus otros personajes de la misma cuenta se suman a ti. Los compañeros que no suben aparecen como «un compañero», nunca con un nombre. Sus otros personajes cuentan como personas distintas, porque nadie puede comprobar que son del mismo jugador.
+Nunca envía **`OroHermandadDB`** (tu hermandad, sus miembros, profesiones y recetas) ni **`OroHermandadCharDB`** (tus personajes, oro y banco). Tampoco abre **`Auctionator.lua`** ni ningún otro archivo, salvo `ForeverFishing.lua` (ver «Tus sesiones de pesca»). El programa se salta esos bloques sin guardar nada de ellos. En el panel apareces con el nombre que te puso quien administra la hermandad; tus otros personajes de la misma cuenta se suman a ti. Los compañeros que no suben aparecen como «un compañero», nunca con un nombre. Sus otros personajes cuentan como personas distintas, porque nadie puede comprobar que son del mismo jugador.
 
 El archivo se interpreta en tu PC sin ejecutar Lua, con límites de tamaño (10 MB), profundidad y número de elementos. Un archivo dañado o de otro formato se avisa y no se envía. Los datos van solo a `https://<panel>/api/guild/sync`, con tu clave en la cabecera `Authorization`. Las redirecciones están bloqueadas y cada envío ocupa como mucho 2 MiB. Solo se envía un archivo cuyo contenido haya cambiado (por su sha256), y solo se da por enviado cuando el panel lo confirma. Tras el primer envío aceptado de cada cuenta solo va lo nuevo, también de cada compañero: los tres últimos días de cada objeto y sus escaneos recientes; un objeto que el panel aún no tiene va completo. Después de `--reset` o de un envío rechazado, el siguiente vuelve a ir completo. Si un envío pasa de 2 MiB, primero se quedan fuera los puntos de escaneo de los compañeros, después los tuyos y por último los compañeros con escaneos más antiguos; lo que no cupo sale en el envío siguiente. Si el panel no guarda a un compañero, la ventana lo dice y ese compañero vuelve a ir completo más tarde: si no cabía en ese envío (`ENVIO`), enseguida, en otro envío con el mismo archivo; si se acabó la parte de la cuota diaria para compañeros (`CUOTA`), pasada la medianoche UTC (la 01:05 o las 02:05 en España), aunque el archivo no haya cambiado; si el panel ya tiene el máximo de compañeros, con el siguiente archivo. Si falla la conexión, se reintenta tras una pausa de entre 60 segundos y 5 minutos. Si el panel ha agotado su cuota diaria de escritura, espera lo que el panel indique (como mucho una hora entre intentos). Si el panel rechaza la clave, el programa se detiene.
+
+### Tus sesiones de pesca (Forever Fishing)
+
+Si tienes el addon **Forever Fishing**, el subidor 0.5.0 lee también `ForeverFishing.lua`, en la misma carpeta `SavedVariables` de cada cuenta, y envía a `https://<panel>/api/guild/fishing` las sesiones de pesca que guarda ese addon. Así la pestaña **Pesca** del panel enseña cuánto has sacado por hora en cada sesión con los precios del día, tu ritmo real de capturas (y lo usa para calcular el oro por hora de cada zona) y lo que de verdad pica en cada zona según lo que ha pescado la hermandad.
+
+De cada sesión solo va: la hora de inicio y de fin, el tiempo con la caña en la mano, los lanzamientos, las capturas y, por cada lugar («Zona: Subzona»), el ID de cada objeto pescado y cuántos. **Nunca** va el nombre del personaje, el reino, el código (GUID) del personaje ni ninguna otra opción del addon. Lo que no tiene lugar se cuenta como «sin lugar». Se envían como mucho las 200 sesiones más recientes, y solo cuando cambian. Un miembro ve en el panel solo sus sesiones; quien administra la hermandad ve las de todos con el nombre que les puso en el panel. «Lo que de verdad pica» suma las sesiones de todos, sin nombres. El panel guarda las sesiones 180 días y las borra si se revoca al miembro con sus datos.
+
+Si no usas Forever Fishing no pasa nada: el subidor no lo busca más allá de esa carpeta y no avisa. Si el panel aún no tiene esta parte, la ventana lo dice una vez y no vuelve a intentarlo hasta que el archivo cambie.
 
 ### El aviso para el addon
 
@@ -79,7 +87,7 @@ WoW solo descubre una carpeta de addon nueva al arrancar: la primera vez sal del
 
 ### Formatos y versiones
 
-Oro de Hermandad 0.4.0 guarda `OroHermandadHist` en el formato 2 (añade los precios de los compañeros). Este subidor lee el formato 1 (addon 0.3.x) y el 2 y siempre envía el formato 2 del panel. Un subidor anterior (0.3.0) avisa de que no entiende el formato 2: descarga este desde el panel. Si vuelves al addon 0.3.1, deja el archivo de formato 2 sin tocar y apaga su historial; al volver a 0.4.0 todo sigue ahí.
+Oro de Hermandad 0.4.0 y 0.5.0 guardan `OroHermandadHist` en el formato 2 (añade los precios de los compañeros). Este subidor lee el formato 1 (addon 0.3.x) y el 2 y siempre envía el formato 2 del panel. Un subidor anterior (0.3.0) avisa de que no entiende el formato 2: descarga este desde el panel. Si vuelves al addon 0.3.1, deja el archivo de formato 2 sin tocar y apaga su historial; al volver a 0.4.0 todo sigue ahí.
 
 ### Opciones
 
