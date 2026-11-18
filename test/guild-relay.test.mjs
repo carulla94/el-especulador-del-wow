@@ -186,7 +186,7 @@ test("a database written by f007cb8 keeps every row when this code opens it, and
     else if (name === "guild_meta") assert.deepEqual(after[name], rows.map(r => r.key === "schema" ? {...r, value: "2"} : r), name);
     else assert.deepEqual(after[name], rows, name);
   }
-  assert.deepEqual(Object.keys(after).filter(name => !(name in before)).sort(), ["guild_observer_markets", "guild_observers", "guild_timing_cache"]);
+  assert.deepEqual(Object.keys(after).filter(name => !(name in before)).sort(), ["guild_fishing", "guild_observer_markets", "guild_observers", "guild_timing_cache"]);
   assert.deepEqual([after.guild_observers, after.guild_observer_markets], [[], []]);
   new GuildStore(base.ctx);
   assert.deepEqual(dump(base.db, {skip: []}), after, "opening the database again changes nothing");

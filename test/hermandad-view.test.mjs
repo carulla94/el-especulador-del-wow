@@ -940,3 +940,55 @@ test("fishGroups covers every fish, what is cooked or distilled from them and th
   assert.equal(groups[1].ids.length, H.FISH.length);
   assert.ok(groups[3].ids.includes(13445) && groups[3].ids.includes(6370));
 });
+
+test("your fishing sessions: places by zone, Spanish times and spans, and your real pace", () => {
+  assert.equal(H.fishingZoneOf("Feralas: Costa de Sardor"), "Feralas");
+  assert.equal(H.fishingZoneOf("Azshara"), "Azshara");
+  for (const place of ["?", "", " : x", null]) assert.equal(H.fishingZoneOf(place), "Sin lugar");
+  assert.deepEqual([59, 60, 2940, 7200, 8220, null].map(H.formatSpan), ["menos de 1 min", "1 min", "49 min", "2 h", "2 h 17 min", "menos de 1 min"]);
+  const utc = (y, m, d, h, min) => Date.UTC(y, m - 1, d, h, min) / 1000;
+  assert.equal(H.sessionWhen(utc(2026, 11, 17, 19, 20)), "mar 17 nov, 20:20", "Spain's clock, an hour ahead of UTC in November");
+  assert.equal(H.sessionWhen(utc(2026, 11, 17, 23, 5)), "mié 18 nov, 00:05", "past midnight in Spain it is already the next day");
+  assert.equal(H.sessionWhen(utc(2027, 7, 1, 18, 0)), "jue 1 jul, 20:00", "two hours ahead in summer");
+  assert.equal(H.fishingRate([]), null);
+  assert.equal(H.fishingRate([{seconds: 1700, catches: 90}]), null, "less than half an hour with the rod tells nothing");
+  assert.deepEqual(H.fishingRate([{seconds: 1800, catches: 90}, {seconds: 1800, catches: 110}, {seconds: 0, catches: 5}, {seconds: 60}]),
+    {rate: 200, catches: 200, seconds: 3600, sessions: 2});
+});
+
+test("fishingSessionRows values each session with today's prices and fishingPlaces says what really bites where", () => {
+  const values = {1: 100, 3: 500}, raws = {1: 80, 3: 50};
+  const worth = id => ({name: `Pez ${id}`, best: values[id] ? {value: values[id], kind: "cocina"} : null});
+  const raw = id => ({name: `Pez ${id}`, best: raws[id] ? {value: raws[id], kind: "subasta"} : null});
+  const fishing = {sessions: [
+    {start: 1000, end: 1400, seconds: 300, catches: 4, zones: {"Azshara: Bahía": {"1": 4}}},
+    {start: 5000, end: 7000, seconds: 1800, catches: 30, member: "Ana", zones: {"Feralas: Costa": {"1": 20, "2": 5}, "Feralas: Isla": {"3": 2}, "?": {"1": 3}}}
+  ], guild: {zones: {"Feralas: Costa": {"1": 80, "2": 20}, "Feralas: Isla": {"3": 10}, "Azshara": {"3": 5}, "?": {"1": 7}, "Vacía": {}}}};
+  const [newest, short] = H.fishingSessionRows(fishing, worth, raw);
+  assert.deepEqual(newest, {start: 5000, end: 7000, seconds: 1800, catches: 30, perHourCatches: 60, value: 23 * 100 + 2 * 500, raw: 23 * 80 + 2 * 50,
+    perHour: 6600, rawPerHour: 3880, unpriced: 5, member: "Ana", zones: [{zone: "Feralas", catches: 27}, {zone: "Sin lugar", catches: 3}]});
+  assert.deepEqual([short.start, short.value, short.perHour, short.rawPerHour, short.perHourCatches, short.member], [1000, 400, null, null, null, null],
+    "under ten minutes with the rod: only its total");
+  assert.deepEqual(H.fishingSessionRows(null, worth, raw), []);
+  const places = H.fishingPlaces(fishing, worth, 150);
+  assert.deepEqual(places.map(p => [p.zone, p.catches, p.value, p.perHour, p.pct, p.few]),
+    [["Feralas", 110, Math.floor(13000 / 110), Math.floor(13000 / 110) * 150, 81.8, false], ["Azshara", 5, 500, 75000, 100, true], ["Sin lugar", 7, 100, 15000, 100, true]],
+    "zones with enough catches first, the rest by value");
+  assert.deepEqual(places[0].parts.map(p => [p.id, p.n, p.pct, p.value]), [[1, 80, 72.7, 100], [3, 10, 9.1, 500], [2, 20, 18.2, null]]);
+  assert.deepEqual(places[0].places, [{place: "Costa", catches: 100}, {place: "Isla", catches: 10}]);
+  assert.deepEqual(places[2].places, [{place: "sin lugar", catches: 7}]);
+  assert.equal(H.fishingPlaces(fishing, worth)[0].perHour, Math.floor(13000 / 110) * H.CATCHES_PER_HOUR, "the table's pace without yours");
+  assert.deepEqual(H.fishingPlaces({}, worth), []);
+});
+
+test("the view link: the page reads ?ver=, sends it as X-Guild-View and hides what needs a session", () => {
+  const js = read("public/hermandad.js"), html = read("public/hermandad.html");
+  assert.ok(H.VIEW_TOKEN.test("A".repeat(43)) && !H.VIEW_TOKEN.test("A".repeat(42)) && !H.VIEW_TOKEN.test("A".repeat(42) + "="));
+  assert.match(js, /new URLSearchParams\(win\.location\.search\)\.get\("ver"\)/);
+  assert.match(js, /options\.headers\["X-Guild-View"\] = viewToken/);
+  assert.match(js, /\$\("#tab-hermandad"\)\.hidden = !!me\.viewer/);
+  assert.match(js, /if \(view === "hermandad" && state\.me\?\.viewer\) view = "hoy"/);
+  assert.match(html, /<a href="#hermandad" data-tab="hermandad" id="tab-hermandad">/);
+  assert.match(html, /<section id="view-link-card" class="card view-link" hidden/);
+  assert.match(js, /\/hermandad\?ver=\$\{token\}/);
+});

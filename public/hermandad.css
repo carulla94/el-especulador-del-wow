@@ -243,6 +243,10 @@ thead th.num button{justify-content:flex-end}
 #member-form{display:flex;flex-direction:column;gap:10px}
 #member-form label,.key-panel label,.url-field{display:flex;flex-direction:column;gap:4px;font-size:13px}
 .key-panel{border-color:#9b7c3e;background:#2a261b;display:flex;flex-direction:column;gap:10px}
+.view-link{display:flex;flex-direction:column;gap:10px;align-items:flex-start;margin-top:14px}
+.view-link h2{margin:0}
+.view-link p{margin:0}
+#view-link-on{display:flex;flex-direction:column;gap:10px;align-self:stretch}
 #key-value{font-family:Consolas,"Courier New",monospace;font-size:13px;width:100%}
 .members-table{min-width:820px}
 .members-table .actions{display:flex;gap:6px}

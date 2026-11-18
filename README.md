@@ -94,7 +94,7 @@ Todo el mundo entra por el mismo sitio: `/` lleva a `/hermandad`, y el mismo cam
 
 Para verlo en local con datos de ejemplo: `node scripts/prepare-downloads.mjs` y `node scripts/dev-local.mjs --demo` (treinta días de precios, con chollos) o `--demo=lanzamiento` (solo hoy, como el primer día). Entra con la contraseña de pruebas que aparece en `scripts/dev-local.mjs` y en la consola se imprime una clave de miembro.
 
-`/hermandad` es una página aparte, fuera del juego, con el mercado que ve **toda la hermandad** con el addon Oro de Hermandad (cada addon 0.4 comparte sus escaneos en el juego y basta con que 1 o 2 personas tengan el subidor del PC para que lleguen al panel, ver [Retransmisión](#retransmisión-con-1-o-2-subidores-basta)): chollos del día con la compra y reventa calculadas (comisión del 5 % y depósitos incluidos), una tabla de materiales y consumibles por categoría que se puede ordenar, filtrar y exportar a CSV para Excel, la vista «Qué compensa» (qué farmear, qué comprar para revender, qué fundir y un mapa de cada objeto según lo barato que está y cuánto varía su precio), la vista «Pesca» (las mejores zonas para pescar sin bancos y los mejores bancos según lo que pica en cada sitio, si cada pez compensa venderlo crudo, al mercader, cocinarlo o destilarlo en aceite y elixir, y «Cuándo vender»: un mapa de calor por día de la semana y franja de 4 horas, hora de España, hecho con los escaneos de los últimos 28 días; necesita el addon 0.5.0, que apunta el pescado), el balance semanal, el detalle de cada objeto con 60 días de precios, el patrón por día de la semana cuando hay datos suficientes y una calculadora editable. Las reglas son las de `src/especular.mjs`, gemelo exacto del `Spec.lua` del addon; el contrato compartido está en `test-vectors/especular-v1.json`. Durante el lanzamiento el panel lo dice claramente: «Aprendiendo precios» los primeros 7 días y sin chollos hasta el 18 de noviembre.
+`/hermandad` es una página aparte, fuera del juego, con el mercado que ve **toda la hermandad** con el addon Oro de Hermandad (cada addon 0.4 comparte sus escaneos en el juego y basta con que 1 o 2 personas tengan el subidor del PC para que lleguen al panel, ver [Retransmisión](#retransmisión-con-1-o-2-subidores-basta)): chollos del día con la compra y reventa calculadas (comisión del 5 % y depósitos incluidos), una tabla de materiales y consumibles por categoría que se puede ordenar, filtrar y exportar a CSV para Excel, la vista «Qué compensa» (qué farmear, qué comprar para revender, qué fundir y un mapa de cada objeto según lo barato que está y cuánto varía su precio), la vista «Pesca» (las mejores zonas para pescar sin bancos y los mejores bancos según lo que pica en cada sitio, si cada pez compensa venderlo crudo, al mercader, cocinarlo o destilarlo en aceite y elixir, y «Cuándo vender»: un mapa de calor por día de la semana y franja de 4 horas, hora de España, hecho con los escaneos de los últimos 28 días; necesita el addon 0.5.0, que apunta el pescado; con el addon Forever Fishing y el subidor del PC 0.5.0 añade también tus sesiones de pesca valoradas a precios del día, tu ritmo real de capturas y lo que de verdad pica en cada zona), el balance semanal, el detalle de cada objeto con 60 días de precios, el patrón por día de la semana cuando hay datos suficientes y una calculadora editable. Las reglas son las de `src/especular.mjs`, gemelo exacto del `Spec.lua` del addon; el contrato compartido está en `test-vectors/especular-v1.json`. Durante el lanzamiento el panel lo dice claramente: «Aprendiendo precios» los primeros 7 días y sin chollos hasta el 18 de noviembre.
 
 Es independiente de la cartera: usa su propio Durable Object (`GuildMarket`), su propia base SQLite, sus propias claves, su propia cookie y su propio CSRF. Las rutas son `/api/guild/*`; sin el binding `GUILD` responden 503 «Hermandad no configurada».
 
@@ -104,6 +104,29 @@ Es independiente de la cartera: usa su propio Durable Object (`GuildMarket`), su
 2. Entra en la app con tu contraseña y pulsa **Hermandad** en el menú. Como propietario puedes hacerlo todo.
 3. En **Miembros**, añade a cada compañero con el nombre que quieras mostrar (no hace falta que sea su personaje). Se crea su clave personal `gld_…`: **se muestra una sola vez**, cópiala y envíasela por privado. Se guarda solo su SHA-256.
 4. Si quieres ayuda, haz administrador a alguien: podrá crear y revocar claves de miembros normales. Revocar a un miembro corta sus claves al momento (el panel lo saca en el siguiente minuto); marca «borrar también sus precios» si subió datos falsos.
+5. Si quieres que alguien vea el panel sin clave, crea el **enlace para ver** (ver abajo).
+
+**Enlace para ver**
+
+Al final de **Hermandad → Miembros**, quien administra (el propietario o un administrador) puede pulsar **Crear enlace**. Sale una dirección `…/hermandad?ver=<código>`: quien la abra ve el panel **en solo lectura y sin entrar**, con las pestañas Hoy, Mercado, Qué compensa, Pesca y Balance, el detalle de cada objeto y las exportaciones CSV.
+
+- **No ve nombres.** El nombre de quien vio cada precio sale como «un compañero», y tampoco aparece quién hizo el último envío.
+- **No ve lo personal:** las sesiones de pesca de cada uno (solo lo que pica en cada zona, sumado), la cartera, los miembros, las claves ni la descarga del subidor.
+- **No puede cambiar nada:** cualquier cambio sigue pidiendo una sesión con clave o contraseña. Si ya has entrado, tu sesión manda sobre el enlace.
+
+Gestión del enlace:
+- **Cambiar enlace** crea uno nuevo, y el anterior deja de funcionar al momento.
+- **Quitar enlace** lo apaga.
+- Un enlace cambiado o quitado no vuelve a valer nunca, aunque se cree otro.
+- La página no se indexa en buscadores (`noindex` y `X-Robots-Tag`), pero el enlace funciona para cualquiera que lo tenga: pásalo solo a quien quieras.
+
+El código es una firma HMAC de `SESSION_SECRET` y `OWNER_PASSWORD`, así que el panel no guarda ningún secreto nuevo. Por eso, **si cambias la contraseña del propietario o el secreto de sesiones, el enlace también cambia**: vuelve a copiarlo en Hermandad y pásalo de nuevo. Las peticiones lo llevan en la cabecera `X-Guild-View` y solo abren `GET /api/guild/me`, `market`, `item`, `timing`, `export.csv` y `fishing`; se gestiona con `POST /api/guild/view-link` y `{"action": "on" | "rotate" | "off"}`.
+
+**Si no recuerdas la contraseña del propietario**, no se puede leer en ningún sitio. Pon una nueva de una de estas dos formas:
+- en Cloudflare: Workers & Pages → `el-especulador-del-wow` → Settings → Variables and Secrets → `OWNER_PASSWORD`;
+- con `npx wrangler secret put OWNER_PASSWORD`.
+
+Cambiarla cierra las sesiones abiertas y cambia el enlace para ver.
 
 Límites de la app (no son los del plan de Cloudflare): 50 miembros y 50 claves activas, 300 objetos por mercado, 60 compañeros retransmitidos por mercado (activos en 30 días) y 2.000 códigos de personaje en total, 180 días de historia, envíos de hasta 2 MiB y 24 envíos por miembro y día. Quien se une tarde guarda como mucho los 30 días anteriores a su primer envío. Un objeto que se queda sin días (por la retención o porque se borraron los precios de un miembro) desaparece del mercado y libera su hueco.
 

@@ -7,10 +7,16 @@ schema 2 to <panel>/api/guild/sync with the member's personal key (Authorization
 addon (OroHermandadHist schema 1) are still read. One or two members of a guild running this is enough: everybody
 else only plays with the addon.
 
+From 0.5.0 it also reads ForeverFishing.lua of the same accounts, when the Forever Fishing addon is installed, and sends
+the fishing sessions it recorded (when, how long with the rod, casts, catches and what was caught where) to
+<panel>/api/guild/fishing, so the Pesca tab of the panel shows your real pace and what really bites in each zone.
+
 Privacy and safety:
 - The file is parsed locally by a literal-only reader (no Lua is ever executed) with size, depth and node limits.
   OroHermandadDB (guild roster, professions, recipes) and OroHermandadCharDB are skipped without being decoded or
-  kept, and Auctionator.lua is never opened.
+  kept, and Auctionator.lua is never opened. Of ForeverFishing.lua only the numbers of sessionHistory are sent (start
+  and end time, seconds with the rod, casts, catches, and the item IDs caught per place); the character name, realm
+  and GUID it stores, the gear and every other setting stay on this PC.
 - Character names never leave the game: each observer (this account's characters and every guild mate whose scans
   the addon collected) is sent only as the 8-hex code the addon stores, a hash of the guild and the character name.
   That code is pseudonymous, not anonymous: whoever knows the guild roster can recompute it.
@@ -55,10 +61,19 @@ from xml.sax.saxutils import escape as xml_text
 import sincronizar as sync
 from sincronizar import AuthenticationError, ReadPendingError, RetryableSyncError, SyncError
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 SOURCE_NAME = "OroHermandad.lua"
 ALLOWED = frozenset({SOURCE_NAME})
 HIST_GLOBAL = "OroHermandadHist"
+FISHING_NAME = "ForeverFishing.lua"   # the Forever Fishing addon's SavedVariables, next to OroHermandad.lua
+FISHING_ALLOWED = frozenset({FISHING_NAME})
+FISHING_GLOBAL = "ForeverFishingDB"
+FISHING_SOURCE = "ForeverFishing"
+FISHING_SESSIONS = 200       # newest sessions sent (the panel's limit per upload)
+FISHING_ZONES = 40           # places per session (the rest add up under "?")
+FISHING_ITEMS = 80           # items per place (the most caught)
+FISHING_COUNT_MAX = 100_000
+FISHING_SESSION_SECONDS = 7 * 86400
 SCHEMA = 2                   # what is sent (upload JSON schema 2)
 HIST_SCHEMAS = (1, 2)        # OroHermandadHist formats read: 0.3.x (own prices) and 0.4.0 (also guild mates' scans)
 
@@ -198,19 +213,20 @@ class _LuaReader:
     """Reads `Name = literal` statements. Only the globals in `wanted` are built; the others are walked to find
     where they end (same syntax checks and limits) but their strings are never decoded and their tables never kept."""
 
-    def __init__(self, text, limits=None):
+    def __init__(self, text, limits=None, name=SOURCE_NAME):
         self.limits = dict(PARSER_LIMITS, **(limits or {}))
+        self.name = name
         if not isinstance(text, str):
-            raise LuaFormatError(f"{SOURCE_NAME} no es texto.")
+            raise LuaFormatError(f"{name} no es texto.")
         if len(text) > self.limits["chars"]:
-            raise LuaFormatError(f"{SOURCE_NAME} es demasiado grande.")
+            raise LuaFormatError(f"{name} es demasiado grande.")
         self.text = text[1:] if text.startswith("\ufeff") else text
         self.pos = 0
         self.nodes = 0
 
     def fail(self, message):
         line = self.text.count("\n", 0, min(self.pos, len(self.text))) + 1
-        raise LuaFormatError(f"{SOURCE_NAME} no se puede leer: {message} (línea {line}).")
+        raise LuaFormatError(f"{self.name} no se puede leer: {message} (línea {line}).")
 
     def skip(self):
         text = self.text
@@ -450,14 +466,88 @@ class _LuaReader:
         return value if keep else _STRING
 
 
-def read_globals(text, wanted, limits=None):
-    """{name: value} for the wanted globals only. Tables become dicts with int, float or str keys."""
-    return _LuaReader(text, limits).parse(frozenset(wanted))
+def read_globals(text, wanted, limits=None, name=SOURCE_NAME):
+    """{name: value} for the wanted globals only. Tables become dicts with int, float or str keys. name: the file, for
+    the error messages."""
+    return _LuaReader(text, limits, name).parse(frozenset(wanted))
 
 
 def extract_hist(text, limits=None):
     """The OroHermandadHist table of an OroHermandad.lua text, or None when the file has none yet."""
     return read_globals(text, (HIST_GLOBAL,), limits).get(HIST_GLOBAL)
+
+
+def _lua_list(value):
+    """A Lua array read as a dict {1: a, 2: b} (or a list) -> its values in order."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value[k] for k in sorted(k for k in value if isinstance(k, int))]
+    return []
+
+
+def fishing_sessions(db, now):
+    """The finished sessions of ForeverFishingDB.sessionHistory (every character of the account), newest
+    FISHING_SESSIONS, oldest first: {start, end, seconds, casts, catches, zones: {"Zona: Subzona": {"<id>": n}}}.
+    Only numbers and place names: the character's name, realm and GUID are never copied. Sessions with a value out of
+    range are left out."""
+    history = db.get("sessionHistory") if isinstance(db, dict) else None
+    out = {}
+    min_start = DAY0 + 2492 * 86400
+    for sessions in (history.values() if isinstance(history, dict) else ()):
+        for raw in _lua_list(sessions):
+            if not isinstance(raw, dict):
+                continue
+            start, end = raw.get("startedAt"), raw.get("endedAt")
+            seconds = raw.get("activeSeconds")
+            if not (_is_int(start, min_start, now + 86400) and _is_int(end, start, now + 86400)
+                    and end - start <= FISHING_SESSION_SECONDS):
+                continue
+            if isinstance(seconds, float) and math.isfinite(seconds):
+                seconds = int(round(seconds))
+            casts, catches = raw.get("casts"), raw.get("catches")
+            if not (_is_int(seconds, 0, FISHING_SESSION_SECONDS) and _is_int(casts, 0, FISHING_COUNT_MAX)
+                    and _is_int(catches, 0, FISHING_COUNT_MAX)):
+                continue
+            places = {}
+            records = raw.get("records")
+            for item, record in (records.items() if isinstance(records, dict) else ()):
+                if not _is_int(item, 1, ITEM_ID_MAX) or not isinstance(record, dict):
+                    continue
+                count = record.get("count")
+                if not _is_int(count, 1, FISHING_COUNT_MAX):
+                    continue
+                located = 0
+                locations = record.get("locations")
+                for place, n in (locations.items() if isinstance(locations, dict) else ()):
+                    name = CONTROL.sub(" ", place).strip()[:80] if isinstance(place, str) else ""
+                    if not name or not _is_int(n, 1, FISHING_COUNT_MAX) or located + n > count:
+                        continue
+                    located += n
+                    places.setdefault(name, {})[item] = places.get(name, {}).get(item, 0) + n
+                if count > located:
+                    places.setdefault("?", {})[item] = places.get("?", {}).get(item, 0) + count - located
+            ranked = sorted(places.items(), key=lambda kv: (-sum(kv[1].values()), kv[0]))
+            kept, rest = ranked[:FISHING_ZONES - 1], ranked[FISHING_ZONES - 1:]
+            if len(ranked) <= FISHING_ZONES:
+                kept, rest = ranked, []
+            zones = dict(kept)
+            for _, items in rest:
+                other = zones.setdefault("?", {})
+                for item, n in items.items():
+                    other[item] = min(FISHING_COUNT_MAX, other.get(item, 0) + n)
+            zones = {name: {str(item): n for item, n in sorted(sorted(items.items(), key=lambda kv: -kv[1])[:FISHING_ITEMS])}
+                     for name, items in sorted(zones.items())}
+            if start not in out:
+                out[start] = {"start": start, "end": end, "seconds": seconds, "casts": casts, "catches": catches,
+                              "zones": zones}
+    return [out[k] for k in sorted(out)[-FISHING_SESSIONS:]]
+
+
+def extract_fishing(text, now, limits=None):
+    """The fishing sessions of a ForeverFishing.lua text ([] when it has none), or None without ForeverFishingDB."""
+    db = read_globals(text, (FISHING_GLOBAL,), limits, name=FISHING_NAME).get(FISHING_GLOBAL)
+    return None if not isinstance(db, dict) else fishing_sessions(db, now)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1228,10 +1318,11 @@ def _server_message(error, key):
     return message.replace(key, "[clave]") if key else message
 
 
-def post_guild(url, key, payload, timeout=REQUEST_TIMEOUT):
-    """One upload to <panel>/api/guild/sync. HTTPS only and no redirects, so the key cannot be sent elsewhere."""
+def post_guild(url, key, payload, timeout=REQUEST_TIMEOUT, route="/api/guild/sync"):
+    """One upload to <panel>/api/guild/sync (or route). HTTPS only and no redirects, so the key cannot be sent
+    elsewhere."""
     url, key = validate_panel_url(url), validate_key(key)
-    request = Request(url + "/api/guild/sync", data=payload, method="POST",
+    request = Request(url + route, data=payload, method="POST",
                       headers={"Authorization": "Bearer " + key, "Content-Type": "application/json; charset=utf-8",
                                "Accept": "application/json", "User-Agent": USER_AGENT})
     opener = build_opener(sync._NoRedirect())
@@ -1251,6 +1342,8 @@ def post_guild(url, key, payload, timeout=REQUEST_TIMEOUT):
                                       "HERMANDAD.cmd --reset para pegarla." + said) from None
         if error.code in (400, 413, 415, 422):
             raise RejectedUploadError(f"El panel no ha aceptado estos datos (HTTP {error.code}).{said}") from None
+        if error.code in (404, 405) and route != "/api/guild/sync":
+            raise RejectedUploadError(f"El panel todavía no recibe esto (HTTP {error.code}): hay que actualizarlo.") from None
         if 300 <= error.code < 400:
             raise RetryableSyncError("La dirección del panel devuelve una redirección y no se sigue para no reenviar "
                                      "tu clave. Usa la dirección HTTPS final del panel (--reset para cambiarla).") from None
@@ -1281,13 +1374,18 @@ def post_guild(url, key, payload, timeout=REQUEST_TIMEOUT):
     return result
 
 
+def post_fishing(url, key, payload, timeout=REQUEST_TIMEOUT):
+    """The Forever Fishing sessions to <panel>/api/guild/fishing, with the same key and the same safeguards."""
+    return post_guild(url, key, payload, timeout, route="/api/guild/fishing")
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # The uploader
 # ---------------------------------------------------------------------------------------------------------------
 @dataclass
 class Event:
     source: Source
-    kind: str          # uploaded, duplicate, rejected, invalid, empty, pending, unchanged
+    kind: str          # uploaded, duplicate, rejected, invalid, empty, pending, unchanged, fishing
     message: str = ""
     result: dict | None = None
     upload: dict | None = None
@@ -1307,13 +1405,14 @@ class GuildUploader:
     left for the panel's next daily quota (CUOTA) set "retry" (the next 00:00 UTC and a few minutes): from then the
     same file is read and sent again even if it did not change."""
 
-    def __init__(self, url, key, folder, state=None, save=None, poster=post_guild, clock=time.time):
+    def __init__(self, url, key, folder, state=None, save=None, poster=post_guild, clock=time.time, fishing_poster=post_fishing):
         self.url = validate_panel_url(url)
         self._key = validate_key(key)
         self.folder = Path(folder)
         self.state = {} if state is None else state
         self.save = save or (lambda: None)
         self.poster = poster
+        self.fishing_poster = fishing_poster
         self.clock = clock
         self.ignored = {}   # path -> sha256 of a file that was invalid, empty or rejected (until it changes)
         self.settled = {}   # path -> stat signature already handled in this run: not read again until it changes
@@ -1347,7 +1446,64 @@ class GuildUploader:
             except (AuthenticationError, RetryableSyncError) as error:
                 error.events = events
                 raise
+        # Forever Fishing, next to OroHermandad.lua (also on an account that has no prices yet).
+        for source in find_sources(self.folder):
+            fishing = Source(source.account, source.path.with_name(FISHING_NAME))
+            try:
+                event = self.check_fishing(fishing, now)
+            except (AuthenticationError, RetryableSyncError) as error:
+                error.events = events
+                raise
+            if event is not None:
+                events.append(event)
         return {"status": "missing" if present == 0 else "ok", "events": events}
+
+    def check_fishing(self, source, now):
+        """ForeverFishing.lua of one account: its sessions go to the panel when the file changed and they did. None when
+        the account has no such file."""
+        path, key = source.path, "fishing:" + str(source.path)
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        if not path.is_file():
+            return None
+        signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_ctime_ns)
+        if self.settled.get(key) == signature:
+            return Event(source, "unchanged")
+        if 0 <= now - stat.st_mtime < SETTLE_SECONDS:
+            return Event(source, "pending")
+        try:
+            observation = sync.stable_read(path, allowed=FISHING_ALLOWED)
+        except ReadPendingError:
+            return Event(source, "pending")
+        except SyncError as error:
+            self.settled[key] = signature
+            return Event(source, "invalid", str(error))
+        self.settled[key] = signature
+        saved = self.state.get(key) or {}
+        if observation.sha256 in (self.ignored.get(key), saved.get("file")):
+            return Event(source, "unchanged")
+        try:
+            sessions = extract_fishing(observation.text, int(now))
+        except SyncError as error:
+            self.ignored[key] = observation.sha256
+            return Event(source, "invalid", str(error))
+        if not sessions:
+            self.ignored[key] = observation.sha256
+            return Event(source, "unchanged")
+        payload = encode_json({"schema": 1, "source": FISHING_SOURCE, "sessions": sessions})
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest == saved.get("payload"):
+            self.remember(key, observation.sha256, digest, now)
+            return Event(source, "unchanged")
+        try:
+            result = self.fishing_poster(self.url, self._key, payload, timeout=REQUEST_TIMEOUT)
+        except RejectedUploadError as error:
+            self.ignored[key] = observation.sha256
+            return Event(source, "rejected", str(error))
+        self.remember(key, observation.sha256, digest, now)
+        return Event(source, "fishing", result=result, upload={"sessions": len(sessions)})
 
     def retry_due(self, key, now):
         """True when mates left for the panel's daily quota (CUOTA) may be sent again."""
@@ -1519,6 +1675,12 @@ def describe(event):
                              + " a otro miembro del panel.")
         lines += [f"{who}: aviso: {note}." for note in event.notes]
         return lines
+    if event.kind == "fishing":
+        result = event.result or {}
+        changed, sent = result.get("changed"), (event.upload or {}).get("sessions")
+        if _is_int(changed, 1, 10**6):
+            return [f"{who}: Forever Fishing: {plural(changed, 'sesión de pesca nueva o cambiada enviada', 'sesiones de pesca nuevas o cambiadas enviadas')} al panel."]
+        return [f"{who}: Forever Fishing: el panel ya tenía tus {plural(sent, 'sesión', 'sesiones') if _is_int(sent, 0, 10**6) else 'sesiones'} de pesca."]
     if event.kind == "duplicate":
         return [f"{who}: el panel ya tenía estos datos; nada nuevo."]
     if event.kind == "rejected":
@@ -1526,7 +1688,7 @@ def describe(event):
     if event.kind in ("invalid", "empty"):
         return [f"{who}: {event.message}"]
     if event.kind == "pending":
-        return [f"{who}: WoW está guardando {SOURCE_NAME}; se leerá en cuanto termine."]
+        return [f"{who}: WoW está guardando {event.source.path.name}; se leerá en cuanto termine."]
     return []
 
 
@@ -1991,7 +2153,7 @@ def _say_marker_removal(status):
 
 
 def main(argv=None, *, protector=_DEFAULT, home=None, ask=input, ask_secret=getpass.getpass, detect=detect_wow_folders,
-         poster=post_guild, runner=subprocess.run, sleep=time.sleep, clock=time.time):
+         poster=post_guild, runner=subprocess.run, sleep=time.sleep, clock=time.time, fishing_poster=post_fishing):
     parser = argparse.ArgumentParser(prog="hermandad.py",
                                      description="Sube los precios de Oro de Hermandad al panel de la hermandad.")
     group = parser.add_mutually_exclusive_group()
@@ -2061,7 +2223,7 @@ def main(argv=None, *, protector=_DEFAULT, home=None, ask=input, ask_secret=getp
                 install_startup(runner, home=home)
                 return 0
             uploader = GuildUploader(url, key, folder, state=config["sources"], save=lambda: save_config(home, config),
-                                     poster=poster, clock=clock)
+                                     poster=poster, fishing_poster=fishing_poster, clock=clock)
             if args.segundo_plano:
                 say(f"Subidor {VERSION} iniciado sin ventana. Vigilando {folder}.")
             elif not args.once:
