@@ -1176,6 +1176,8 @@ export function sessionWhen(t) {
   const wd = (new Date(Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day))).getUTCDay() + 6) % 7;
   return `${WEEKDAYS_SHORT[wd]} ${Number(p.day)} ${MONTHS[Number(p.month) - 1]}, ${p.hour}:${p.minute}`;
 }
+/** A view link's token (?ver=): what the server's HMAC gives, base64url without padding. */
+export const VIEW_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 /** Time with the rod a session needs for its pace and gold per hour to be shown (shorter ones show only their total). */
 export const FISHING_MIN_SECONDS = 600;
 /** Fewer catches than this in a zone: what bites there is only orientative. */
@@ -1262,6 +1264,14 @@ function boot(doc, win) {
   /** The portfolio tab, while the owner is the one signed in: this page may stay open after they log out. */
   const owned = () => state.me?.isOwner ? cartera : null;
   try { state.favorites = new Set(parseFavorites(win.localStorage.getItem("hermandad.lista"))); } catch { /* private mode */ }
+  // The secret view link (/hermandad?ver=…): read-only without signing in. Kept for this tab only, so the brand link
+  // (/hermandad) keeps it; a session always wins over it.
+  let viewToken = null, viewDead = false;
+  try {
+    const given = new URLSearchParams(win.location.search).get("ver");
+    if (given && VIEW_TOKEN.test(given)) { viewToken = given; win.sessionStorage.setItem("hermandad.ver", given); }
+    else { const kept = win.sessionStorage.getItem("hermandad.ver"); viewToken = kept && VIEW_TOKEN.test(kept) ? kept : null; }
+  } catch { /* private mode */ }
 
   // ---- tiny DOM helpers
   function el(tag, props = {}, ...children) {
@@ -1301,6 +1311,7 @@ function boot(doc, win) {
   class PanelError extends Error { constructor(message, status) { super(message); this.status = status; } }
   async function request(path, data) {
     const options = {headers: {Accept: "application/json"}, cache: "no-store", credentials: "same-origin"};
+    if (viewToken) options.headers["X-Guild-View"] = viewToken;
     if (data !== undefined) {
       options.method = "POST";
       options.headers["Content-Type"] = "application/json";
@@ -1316,6 +1327,7 @@ function boot(doc, win) {
     return body;
   }
   function handle(error) {
+    if (error?.status === 401 && state.me?.viewer) { viewDead = true; return showLogin(error.message); }
     if (error?.status === 401) return showLogin("Tu sesión ha terminado o tu clave ya no es válida. Vuelve a entrar con tu clave o contraseña.");
     if (error?.status === 503) return showFatal(error.message);
     toast(error?.message || "No se ha podido completar la operación.", true);
@@ -1339,6 +1351,7 @@ function boot(doc, win) {
     showOnly("screen-login");
     $("#key-value").value = ""; $("#key-panel").hidden = true;
     $("#login-feedback").textContent = message;
+    $("#login-view").hidden = !viewToken || viewDead;
     if ($("#detail").open) $("#detail").close();
     $("#login-key").focus();
   }
@@ -1355,6 +1368,7 @@ function boot(doc, win) {
     const wanted = VIEW_ALIASES[hash] ?? hash;
     let view = item ? state.view : VIEWS.includes(wanted) ? wanted : "hoy";
     if (view === "cartera" && !state.me?.isOwner) view = "hoy";
+    if (view === "hermandad" && state.me?.viewer) view = "hoy";
     state.view = view;
     for (const tab of doc.querySelectorAll("#tabs a")) {
       const active = tab.dataset.tab === view;
@@ -1408,7 +1422,9 @@ function boot(doc, win) {
     await win.fetch("/api/logout", {...options, method: "POST", headers: {"Content-Type": "application/json", "X-CSRF-Token": owner.token ?? ""}, body: "{}"});
   }
   $("#login-show").addEventListener("change", event => { $("#login-key").type = event.target.checked ? "text" : "password"; });
+  $("#login-view").addEventListener("click", () => { $("#login-feedback").textContent = ""; start(); });
   $("#logout").addEventListener("click", async () => {
+    if (state.me?.viewer) return showLogin("Entra con tu clave de la hermandad o, si eres el propietario, con tu contraseña. Sin entrar, el enlace enseña el panel en solo lectura.");
     const owner = state.me?.isOwner;
     try { await request("/api/guild/logout", {}); } catch { /* the cookie may already be gone */ }
     if (owner) { try { await ownerLogout(); } catch { /* the session may already be gone */ } }
@@ -1418,7 +1434,12 @@ function boot(doc, win) {
   async function start() {
     let me;
     try { me = await request("/api/guild/me"); }
-    catch (error) { return error.status === 401 ? showLogin("") : showFatal(error.message); }
+    catch (error) {
+      if (error.status !== 401) return showFatal(error.message);
+      // With a view link and no session, a 401 means the link was changed or turned off.
+      if (viewToken) viewDead = true;
+      return showLogin(viewToken ? error.message : "");
+    }
     applyMe(me);
     if (me.isOwner) await mountCartera();
     let saved = null;
@@ -1444,9 +1465,12 @@ function boot(doc, win) {
     state.me = me; state.csrf = me.csrf || state.csrf;
     $("#account").hidden = false; $("#tabs").hidden = false;
     $("#tab-cartera").hidden = !me.isOwner;
-    const who = me.isOwner ? "Propietario" : `${me.member?.label ?? "Miembro"} · ${me.role === "admin" ? "administra" : "miembro"}`;
+    $("#tab-hermandad").hidden = !!me.viewer;
+    const who = me.viewer ? "Solo lectura" : me.isOwner ? "Propietario" : `${me.member?.label ?? "Miembro"} · ${me.role === "admin" ? "administra" : "miembro"}`;
     $("#who").textContent = who;
+    $("#logout").textContent = me.viewer ? "Entrar" : "Salir";
     $("#panel-url").value = win.location.origin + "/hermandad";
+    renderViewLink();
   }
 
   // ---- polling: /me every minute (revocation logs out); the market again when someone uploaded
@@ -2053,11 +2077,12 @@ function boot(doc, win) {
   /** "Tus sesiones de pesca": Forever Fishing sessions valued with today's prices, your pace and what really bites. */
   function renderMine(s, zones, inputs) {
     const worth = fishWorth(s, inputs), raw = fishWorth(s, {cooking: 0, alchemy: 0});
-    const fishing = state.fishing, guildView = fishing?.scope === "guild";
+    const fishing = state.fishing, guildView = fishing?.scope === "guild", linkView = fishing?.scope === "viewer";
     const rows = fishingSessionRows(fishing, worth, raw), timed = rows.filter(r => r.perHour !== null);
-    $("#mine-title").textContent = guildView ? "Sesiones de pesca de la hermandad" : "Tus sesiones de pesca";
+    $("#mine-title").textContent = guildView ? "Sesiones de pesca de la hermandad" : linkView ? "Lo que pesca la hermandad" : "Tus sesiones de pesca";
     $("#mine-empty").hidden = rows.length > 0;
     $("#mine-empty").textContent = state.fishingLoading && !fishing ? "Cargando las sesiones…"
+      : linkView ? "Las sesiones de cada uno solo se ven entrando con su clave. Aquí, lo que de verdad pica en cada zona según lo que ha pescado la hermandad (sin nombres)."
       : "Aún no hay sesiones. Si usas el addon Forever Fishing, el subidor del PC (0.5.0 o posterior) envía tus sesiones al salir del juego o al usar /reload: solo números y lugares, sin nombres de personaje.";
     const seconds = timed.reduce((sum, r) => sum + r.seconds, 0), value = timed.reduce((sum, r) => sum + r.value, 0), plain = timed.reduce((sum, r) => sum + r.raw, 0);
     const pace = fishingRate(fishing?.sessions), best = zones.rows[0];
@@ -2443,6 +2468,40 @@ function boot(doc, win) {
     try { await request("/api/guild/members/revoke", {memberId: member.id, purge: answer.purge}); toast(answer.purge ? `${member.label} revocado y sus precios borrados.` : `${member.label} revocado.`); await loadMembers(); if (answer.purge) await loadMarket(); }
     catch (error) { handle(error); }
   }
+  // ---- the secret view link (whoever administers)
+  const viewLinkUrl = token => `${win.location.origin}/hermandad?ver=${token}`;
+  function renderViewLink() {
+    const link = state.me?.viewLink ?? null;
+    $("#view-link-card").hidden = !link;
+    if (!link) return;
+    $("#view-link-off").hidden = link.on;
+    $("#view-link-create").hidden = link.on;
+    $("#view-link-on").hidden = !link.on;
+    $("#view-link-value").value = link.on ? viewLinkUrl(link.token) : "";
+  }
+  async function changeViewLink(action, done) {
+    $("#view-link-feedback").textContent = "";
+    try {
+      const {viewLink} = await request("/api/guild/view-link", {action});
+      state.me.viewLink = viewLink;
+      renderViewLink();
+      toast(done);
+    } catch (error) { if (error.status === 401) handle(error); else $("#view-link-feedback").textContent = error.message; }
+  }
+  $("#view-link-create").addEventListener("click", () => changeViewLink("on", "Enlace creado. Cópialo y pásalo a quien quieras."));
+  $("#view-link-rotate").addEventListener("click", async () => {
+    if (!await confirmAction("¿Cambiar el enlace para ver?", "El enlace de ahora dejará de funcionar para todos los que lo tengan. Tendrás que pasar el nuevo.")) return;
+    await changeViewLink("rotate", "Enlace cambiado: el anterior ya no vale.");
+  });
+  $("#view-link-remove").addEventListener("click", async () => {
+    if (!await confirmAction("¿Quitar el enlace para ver?", "Nadie podrá ver el panel sin entrar con su clave. Puedes crear otro enlace cuando quieras.")) return;
+    await changeViewLink("off", "Enlace quitado: ya solo se entra con clave.");
+  });
+  $("#view-link-copy").addEventListener("click", async () => {
+    const input = $("#view-link-value");
+    try { await win.navigator.clipboard.writeText(input.value); toast("Enlace copiado."); }
+    catch { input.select(); toast("Selecciona el enlace y cópialo con Ctrl+C.", true); }
+  });
   async function revokeKey(member, key) {
     const answer = await confirmAction(`¿Revocar la clave ${key.id} de ${member.label}?`, "El sincronizador o el panel que la use dejarán de funcionar. Puedes crearle otra clave después.");
     if (!answer) return;

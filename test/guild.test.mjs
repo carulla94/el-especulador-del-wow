@@ -134,6 +134,8 @@ function flat(lo, from, to, {spread = 200, qty = 400, scans = 2, src = "o"} = {}
   for (let d = from; d <= to; d++) out.push([d, lo, lo + spread, lo + spread / 2, qty, scans, src]);
   return out;
 }
+// Response.text() drops a leading BOM; the CSV exports keep it.
+const bodyText = async response => new TextDecoder("utf-8", {ignoreBOM: true}).decode(await response.arrayBuffer());
 function rng(seed) {
   return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let x = Math.imul(seed ^ seed >>> 15, 1 | seed); x = x + Math.imul(x ^ x >>> 7, 61 | x) ^ x; return ((x ^ x >>> 14) >>> 0) / 4294967296; };
 }
@@ -146,6 +148,7 @@ test("without the GUILD binding every guild route answers 503 and nothing reache
     ["GET", "/api/guild/export.csv?market=a-Alliance"], ["GET", "/api/guild/members"], ["GET", "/api/guild/download/sincronizador"],
     ["POST", "/api/guild/sync"], ["GET", "/api/guild/fishing"], ["POST", "/api/guild/fishing"], ["POST", "/api/guild/login"], ["POST", "/api/guild/logout"], ["POST", "/api/guild/members"],
     ["POST", "/api/guild/members/role"], ["POST", "/api/guild/members/revoke"], ["POST", "/api/guild/keys"], ["POST", "/api/guild/keys/revoke"],
+    ["POST", "/api/guild/view-link"],
     ["GET", "/api/guild/unknown"], ["GET", "/api/guild"]];
   for (const [method, path] of routes) {
     const response = await f.call(path, {method, ...(method === "POST" ? {data: {}} : {}), token: "gld_" + "a".repeat(43), origin: BASE});
@@ -1328,4 +1331,76 @@ test("Forever Fishing uploads have their own hourly limit and respect the guild'
   assert.match((await limited.json()).error, /Demasiados envíos de pesca/);
   f.advance(3600 * 1000 + 1000);
   assert.equal((await fish(fishBody([fishSession(at(T0 + 1, 1))]))).status, 200);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+test("the secret view link: off at first, read-only without names, and a changed or removed link stops working", async t => {
+  const f = fixture(t), owner = await f.owner(), ana = await f.member(owner, "Ana"), bruno = await f.member(owner, "Bruno", "admin");
+  const portfolioCalls = f.calls.portfolio;
+  assert.equal((await f.sync(ana.key, upload([item(2589, {days: flat(1000, T0 - 14, T0), points: [[at(T0, 8), 990, 1, 1]]})], {deposits: [[2589, 3, 50]]}))).status, 200);
+  assert.equal((await f.call("/api/guild/fishing", {method: "POST", raw: JSON.stringify(fishBody([fishSession(at(T0, 9))])), token: ana.key})).status, 200);
+  const look = (path, token, extra = {}) => f.call(path, {...extra, headers: {"X-Guild-View": token, ...extra.headers}});
+  const market = encodeURIComponent(MARKET);
+  // Off: no link opens anything.
+  assert.deepEqual((await (await f.call("/api/guild/me", {cookie: owner.cookie})).json()).viewLink, {on: false, token: null});
+  for (const token of ["a".repeat(43), "corto"]) assert.equal((await look("/api/guild/me", token)).status, 401);
+  // On: the read-only views open, without a name anywhere.
+  const created = await f.post("/api/guild/view-link", {action: "on"}, owner);
+  assert.equal(created.status, 200, await created.clone().text());
+  const token = (await created.json()).viewLink.token;
+  assert.match(token, /^[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual((await (await f.call("/api/guild/me", {cookie: owner.cookie})).json()).viewLink, {on: true, token});
+  const me = await (await look("/api/guild/me", token)).json();
+  assert.deepEqual([me.role, me.viewer, me.isOwner, me.canAdmin, me.member, me.csrf], ["viewer", true, false, false, null, ""]);
+  for (const key of ["writesToday", "viewLink", "uploadsToday", "lastUploadAt"]) assert.ok(!(key in me), key);
+  assert.deepEqual(me.markets.map(m => m.market), [MARKET]);
+  for (const path of [`/api/guild/market?market=${market}`, `/api/guild/item?market=${market}&id=2589`, `/api/guild/timing?market=${market}`,
+    `/api/guild/export.csv?market=${market}`, `/api/guild/export.csv?market=${market}&kind=daily`, "/api/guild/fishing"]) {
+    const response = await look(path, token);
+    assert.equal(response.status, 200, path);
+    const text = await bodyText(response);
+    for (const name of ["Ana", "Bruno"]) assert.ok(!text.includes(name), `${path} shows ${name}`);
+  }
+  assert.ok((await (await f.market(owner)).text()).includes('"member":"Ana"'), "the owner still sees who saw the price");
+  const seen = await (await look(`/api/guild/market?market=${market}`, token)).json();
+  assert.deepEqual([seen.items[0].price.member, seen.items[0].price.mate, seen.freshness.lastUploadBy], [null, true, null]);
+  assert.ok((await bodyText(await look(`/api/guild/export.csv?market=${market}`, token))).includes("un compañero"));
+  const detail = await (await look(`/api/guild/item?market=${market}&id=2589`, token)).json();
+  assert.ok(detail.points.length > 0 && detail.points.every(p => p.member === null && p.mate));
+  assert.ok(detail.days.length > 0 && detail.days.every(d => d.members.every(m => m === null)));
+  const fishing = await (await look("/api/guild/fishing", token)).json();
+  assert.deepEqual([fishing.scope, fishing.sessions, fishing.guild.sessions], ["viewer", [], 1]);
+  assert.equal(f.gdb.prepare("SELECT payload FROM guild_summary_cache").get().payload.includes('"member":"Ana"'), true, "the cache keeps the names");
+  // Everything else stays closed to the link.
+  for (const [method, path] of [["GET", "/api/guild/members"], ["GET", "/api/guild/download/sincronizador"], ["POST", "/api/guild/members"],
+    ["POST", "/api/guild/view-link"], ["POST", "/api/guild/keys"], ["POST", "/api/guild/logout"]]) {
+    const response = await look(path, token, {method, origin: BASE, ...(method === "POST" ? {data: {action: "off", label: "Intruso", memberId: ana.id}} : {})});
+    assert.equal(response.status, 401, `${method} ${path}`);
+  }
+  assert.deepEqual((await (await f.call("/api/guild/me", {cookie: owner.cookie})).json()).viewLink, {on: true, token}, "nothing changed");
+  // A session wins over the link; a plain member cannot manage it, an admin can.
+  const anaSession = await f.login(ana.key);
+  assert.equal((await (await f.call("/api/guild/me", {cookie: anaSession.cookie, headers: {"X-Guild-View": token}})).json()).role, "member");
+  const refused = await f.post("/api/guild/view-link", {action: "off"}, anaSession);
+  assert.equal(refused.status, 403);
+  assert.match((await refused.json()).error, /enlace para ver/);
+  const brunoSession = await f.login(bruno.key);
+  const rotated = (await (await f.post("/api/guild/view-link", {action: "rotate"}, brunoSession)).json()).viewLink;
+  assert.ok(rotated.on && rotated.token !== token);
+  const gone = await look("/api/guild/me", token);
+  assert.equal(gone.status, 401);
+  assert.equal((await gone.json()).error, "Este enlace para ver ya no vale. Pide el nuevo a quien administra la hermandad.");
+  assert.equal((await look("/api/guild/me", rotated.token)).status, 200);
+  // Off, then on again: a new link, and none of the old ones comes back.
+  assert.deepEqual((await (await f.post("/api/guild/view-link", {action: "off"}, owner)).json()).viewLink, {on: false, token: null});
+  assert.equal((await look("/api/guild/market?market=" + market, rotated.token)).status, 401);
+  const third = (await (await f.post("/api/guild/view-link", {action: "on"}, owner)).json()).viewLink.token;
+  assert.ok(![token, rotated.token].includes(third));
+  for (const old of [token, rotated.token]) assert.equal((await look("/api/guild/me", old)).status, 401);
+  assert.equal((await look("/api/guild/me", third)).status, 200);
+  assert.equal((await f.post("/api/guild/view-link", {action: "borrar"}, owner)).status, 400);
+  // The link is an HMAC of the server's secrets: rotating them changes it too.
+  f.env.SESSION_SECRET = "test-only-another-session-secret-1234";
+  assert.equal((await look("/api/guild/me", third)).status, 401);
+  assert.equal(f.calls.portfolio, portfolioCalls, "no request with the link reached Portfolio");
 });

@@ -215,9 +215,20 @@ const ROUTES = new Map([
   ["GET /api/guild/me", "session"], ["GET /api/guild/market", "session"], ["GET /api/guild/item", "session"], ["GET /api/guild/timing", "session"],
   ["GET /api/guild/export.csv", "session"], ["GET /api/guild/download/sincronizador", "session"],
   ["GET /api/guild/members", "session"], ["POST /api/guild/members", "session"], ["POST /api/guild/members/role", "session"],
-  ["POST /api/guild/members/revoke", "session"], ["POST /api/guild/keys", "session"], ["POST /api/guild/keys/revoke", "session"]
+  ["POST /api/guild/members/revoke", "session"], ["POST /api/guild/keys", "session"], ["POST /api/guild/keys/revoke", "session"],
+  ["POST /api/guild/view-link", "session"]
 ]);
 const PATHS = new Set([...ROUTES.keys()].map(route => route.slice(route.indexOf(" ") + 1)));
+/** What the secret view link opens without signing in (X-Guild-View): the read-only market views, never a member's
+ * own data, the members, the keys, the uploader or any POST. The Durable Object checks the link and hides the names. */
+const VIEW_ROUTES = new Set(["GET /api/guild/me", "GET /api/guild/market", "GET /api/guild/item", "GET /api/guild/timing",
+  "GET /api/guild/export.csv", "GET /api/guild/fishing"]);
+const VIEW_PATHS = new Set([...VIEW_ROUTES].map(route => route.slice(route.indexOf(" ") + 1)));
+const VIEW_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const VIEW_GONE = "Este enlace para ver ya no vale. Pide el nuevo a quien administra la hermandad.";
+/** The token of view link number `version`: an HMAC of the session secret and the owner password, so nothing secret is
+ * stored and changing either of them changes the link too. */
+const viewToken = (version, env) => guildSign("guild-view-link:" + version, env);
 const stub = env => env.GUILD.get(env.GUILD.idFromName(GUILD_ID));
 // A fresh request to the Durable Object: no client header (Cookie, Authorization, X-Guild-*) ever reaches it.
 function internal(env, path, {method = "GET", search = "", actor, headers = {}, body} = {}) {
@@ -257,8 +268,10 @@ export async function guildFetch(request, env, {ownerSession} = {}) {
   }
   const owner = ownerSession ? await ownerSession() : null;
   const guest = owner ? null : await readGuildSession(request, env);
-  const who = owner ? {actor: {kind: "owner"}, csrf: await guildSign("owner-csrf:" + owner.value, env)}
+  let who = owner ? {actor: {kind: "owner"}, csrf: await guildSign("owner-csrf:" + owner.value, env)}
     : guest ? {actor: {kind: "member", memberId: guest.memberId, keyId: guest.keyId}, csrf: guest.csrf} : null;
+  const view = request.headers.get("X-Guild-View");
+  if (!who && view && VIEW_TOKEN.test(view) && VIEW_ROUTES.has(request.method + " " + path)) who = {actor: {kind: "viewer", token: view}, csrf: ""};
   if (!who) return json({error: "Inicia sesión con tu clave de la hermandad."}, 401, request.headers.get("Cookie")?.includes(GUILD_COOKIE + "=") ? {"Set-Cookie": clearCookie} : {});
   if (request.method !== "GET") {
     originCheck(request);
@@ -555,6 +568,8 @@ export class GuildStore {
     let data = null;
     try { data = JSON.parse(header || "null"); } catch { data = null; }
     if (data?.kind === "owner") return {kind: "owner", role: "owner", memberId: null, keyId: null, label: "Propietario"};
+    // Checked against the current link by GuildMarket.fetch (the token is an HMAC, so the check is asynchronous).
+    if (data?.kind === "viewer" && typeof data.token === "string" && VIEW_TOKEN.test(data.token)) return {kind: "viewer", role: "viewer", memberId: null, keyId: null, label: null, token: data.token};
     if (data?.kind === "member" && isInt(data.memberId, 1, Number.MAX_SAFE_INTEGER) && isInt(data.keyId, 1, Number.MAX_SAFE_INTEGER)) {
       const row = this.rows(`SELECT m.label, m.role, m.revoked_at AS member_revoked, k.revoked_at AS key_revoked
         FROM guild_keys k JOIN guild_members m ON m.id=k.member_id WHERE k.id=? AND m.id=?`, data.keyId, data.memberId)[0];
@@ -661,6 +676,26 @@ export class GuildStore {
     });
   }
 
+  // ---- The secret view link (VIEW_ROUTES): off until someone who administers turns it on.
+  /** {on, version}: version only ever grows, so a link that was changed or turned off never works again. */
+  viewLink() {
+    const meta = new Map(this.rows("SELECT key,value FROM guild_meta WHERE key IN ('view_link_version','view_link_on')").map(r => [r.key, r.value]));
+    return {on: meta.get("view_link_on") === "1", version: Number(meta.get("view_link_version") ?? 0)};
+  }
+  /** action "on" or "rotate": a new link (the previous one stops working); "off": no link. */
+  setViewLink(action) {
+    return this.transaction(() => {
+      const link = this.viewLink();
+      if (action === "off") {
+        this.run("INSERT OR REPLACE INTO guild_meta(key,value) VALUES ('view_link_on','0')");
+        return {on: false, version: link.version};
+      }
+      this.run("INSERT OR REPLACE INTO guild_meta(key,value) VALUES ('view_link_version',?)", String(link.version + 1));
+      this.run("INSERT OR REPLACE INTO guild_meta(key,value) VALUES ('view_link_on','1')");
+      return {on: true, version: link.version + 1};
+    });
+  }
+
   // ---- Fishing sessions (src/fishing.mjs)
   /** Stores the sessions of one upload that are new or changed (a session is its member and start). Over the guild's
    * daily write budget nothing is written and a 429 says when to retry. {sessions, changed}. */
@@ -684,11 +719,13 @@ export class GuildStore {
     }
     return {sessions: sessions.length, changed: writes.length};
   }
-  /** GET /api/guild/fishing for this actor: a member their own sessions, the owner everyone's; both the guild's totals. */
+  /** GET /api/guild/fishing for this actor: a member their own sessions, the owner everyone's, the view link nobody's;
+   * all of them the guild's totals. */
   fishing(actor, nowSec) {
     const rows = this.rows(`SELECT f.member_id, m.label, f.start, f.end_at, f.seconds, f.casts, f.catches, f.zones
       FROM guild_fishing f JOIN guild_members m ON m.id=f.member_id`);
-    return fishingReport(rows, {scope: actor.kind === "owner" ? "guild" : "mine", memberId: actor.memberId, nowSec});
+    const scope = actor.kind === "owner" ? "guild" : actor.kind === "viewer" ? "viewer" : "mine";
+    return fishingReport(rows, {scope, memberId: actor.memberId, nowSec});
   }
 
   // ---- Daily write budget
@@ -1400,6 +1437,17 @@ export class GuildStore {
   }
 }
 
+// ---- What the view link gets: the same answers with every member's name taken out (a price "seen by" becomes
+// «un compañero», like a relayed guild mate's).
+const anonymousPrice = price => price ? {...price, member: null, mate: true} : price;
+function anonymousSummary(summary) {
+  return {...summary, items: summary.items.map(e => ({...e, price: anonymousPrice(e.price), flip: e.flip ? {...e.flip, who: null} : e.flip}))};
+}
+function anonymousItem(detail) {
+  return {...detail, price: anonymousPrice(detail.price), points: detail.points.map(p => ({...p, member: null, mate: true})),
+    days: detail.days.map(d => ({...d, members: d.members.map(() => null)}))};
+}
+
 // ---- Durable Object
 const canAdmin = actor => actor.role === "owner" || actor.role === "admin";
 function requireId(value, label) { if (!isInt(value, 1, Number.MAX_SAFE_INTEGER)) fail(`${label} no válido.`); return value; }
@@ -1436,20 +1484,29 @@ export class GuildMarket {
       if (path === "/api/guild/sync" && method === "POST") return await this.sync(request, nowMs, nowSec, T);
       if (path === "/api/guild/fishing" && method === "POST") return await this.fishingUpload(request, nowMs, nowSec, T);
       if (method === "POST") {
-        store.actor(request.headers.get("X-Guild-Actor"));
+        if (store.actor(request.headers.get("X-Guild-Actor")).kind === "viewer") return json({error: "Con el enlace para ver solo se puede mirar."}, 403);
         const data = parseObject(await readBody(request, LIMITS.adminBody));
         return await this.admin(path, data, store.actor(request.headers.get("X-Guild-Actor")), nowSec);
       }
       if (method !== "GET") return json({error: "Método no admitido."}, 405);
       const actor = store.actor(request.headers.get("X-Guild-Actor"));
+      const viewer = actor.kind === "viewer";
+      if (viewer) {
+        const link = store.viewLink();
+        if (!link.on || !equal(actor.token, await viewToken(link.version, this.env))) return json({error: VIEW_GONE}, 401);
+        if (!VIEW_PATHS.has(path)) return json({error: "Con el enlace para ver no se puede abrir esto: entra con tu clave."}, 403);
+      }
       const params = url.searchParams;
       if (path === "/api/guild/me") {
-        const me = {role: actor.role, isOwner: actor.role === "owner", canAdmin: canAdmin(actor),
+        const me = {role: actor.role, isOwner: actor.role === "owner", canAdmin: canAdmin(actor), viewer,
           member: actor.kind === "member" ? {id: actor.memberId, label: actor.label} : null, rules: VERSION, T, date: dateOfDay(T),
           dayOfLaunch: T - LAUNCH + 1, launchDay: LAUNCH, guardUntil: LAUNCH + GUARD_DAYS, markets: store.markets(nowSec),
           limits: {uploadsPerDay: LIMITS.uploadsPerDay, maxKeys: LIMITS.keys, maxMembers: LIMITS.members, itemsPerMarket: LIMITS.itemsPerMarket,
             retentionDays: LIMITS.retentionDays, bodyBytes: LIMITS.body, writeRowsPerDay: this.writeBudget()}};
-        if (canAdmin(actor)) me.writesToday = store.writesToday(nowSec);
+        if (canAdmin(actor)) {
+          me.writesToday = store.writesToday(nowSec);
+          me.viewLink = await this.viewLinkAnswer(store.viewLink());
+        }
         if (actor.kind === "member") {
           me.uploadsToday = store.uploadsOn(actor.memberId, T);
           me.lastUploadAt = iso(store.rows("SELECT max(received_at) AS t FROM guild_uploads WHERE member_id=?", actor.memberId)[0].t);
@@ -1466,8 +1523,11 @@ export class GuildMarket {
       if (path === "/api/guild/market") {
         const summary = store.summary(market, T, nowSec);
         if (!summary) return json({error: "Todavía no hay datos de ese mercado."}, 404);
-        // The cached object plus the live freshness, spliced in without parsing the cached JSON again.
-        const body = '{"freshness":' + JSON.stringify(store.freshness(market, T, nowSec)) + "," + summary.payload.slice(1);
+        // The cached object plus the live freshness, spliced in without parsing the cached JSON again (the view link
+        // gets a copy without names).
+        const fresh = store.freshness(market, T, nowSec);
+        const body = viewer ? JSON.stringify({freshness: {...fresh, lastUploadBy: null}, ...anonymousSummary(JSON.parse(summary.payload))})
+          : '{"freshness":' + JSON.stringify(fresh) + "," + summary.payload.slice(1);
         return new Response(body, {headers: {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "private, no-store", "X-Guild-Cache": summary.cache}});
       }
       if (path === "/api/guild/timing") {
@@ -1479,7 +1539,7 @@ export class GuildMarket {
         const id = Number(params.get("id"));
         if (!/^[1-9][0-9]{0,9}$/.test(params.get("id") || "") || !isInt(id, 1, LIMITS.itemIdMax)) fail("Indica el objeto con su ID numérico.");
         const detail = store.item(market, id, T, nowSec);
-        return detail ? json(detail) : json({error: "Ese objeto no está en este mercado."}, 404);
+        return detail ? json(viewer ? anonymousItem(detail) : detail) : json({error: "Ese objeto no está en este mercado."}, 404);
       }
       if (path === "/api/guild/export.csv") {
         const kind = params.get("kind") || "summary";
@@ -1490,7 +1550,8 @@ export class GuildMarket {
         if (kind === "summary") {
           const summary = store.summary(market, T, nowSec);
           if (!summary) return json({error: "Todavía no hay datos de ese mercado."}, 404);
-          text = store.csvSummary(JSON.parse(summary.payload));
+          const parsed = JSON.parse(summary.payload);
+          text = store.csvSummary(viewer ? anonymousSummary(parsed) : parsed);
         } else {
           if (!store.marketKnown(market)) return json({error: "Todavía no hay datos de ese mercado."}, 404);
           text = store.csvDaily(market, T, span);
@@ -1563,8 +1624,14 @@ export class GuildMarket {
 
   admin(path, data, actor, nowSec) {
     const store = this.store, by = actor.kind === "owner" ? "owner" : "member:" + actor.memberId;
-    if (!["/api/guild/members", "/api/guild/members/role", "/api/guild/members/revoke", "/api/guild/keys", "/api/guild/keys/revoke"].includes(path)) return json({error: "Ruta no encontrada."}, 404);
-    if (!canAdmin(actor)) return json({error: "Solo quien administra la hermandad puede gestionar miembros y claves."}, 403);
+    if (!["/api/guild/members", "/api/guild/members/role", "/api/guild/members/revoke", "/api/guild/keys", "/api/guild/keys/revoke",
+      "/api/guild/view-link"].includes(path)) return json({error: "Ruta no encontrada."}, 404);
+    if (!canAdmin(actor)) return json({error: path === "/api/guild/view-link" ? "Solo quien administra la hermandad puede gestionar el enlace para ver."
+      : "Solo quien administra la hermandad puede gestionar miembros y claves."}, 403);
+    if (path === "/api/guild/view-link") {
+      if (!["on", "rotate", "off"].includes(data.action)) fail("action debe ser «on», «rotate» u «off».");
+      return this.viewLinkAnswer(store.setViewLink(data.action)).then(viewLink => json({viewLink}));
+    }
     const ownerOnly = message => { if (actor.role !== "owner") fail(message, 403); };
     // An admin manages plain members and their own keys; other admins are the owner's.
     const target = id => {
@@ -1602,6 +1669,11 @@ export class GuildMarket {
     target(key.member_id);
     store.revokeKey(key.id, nowSec);
     return json({revoked: true, keyId: key.id});
+  }
+
+  /** The link as the panel shows it to whoever administers: {on, token} (the panel builds /hermandad?ver=<token>). */
+  async viewLinkAnswer(link) {
+    return {on: link.on, token: link.on ? await viewToken(link.version, this.env) : null};
   }
 
   async newKey(member, nowSec) {

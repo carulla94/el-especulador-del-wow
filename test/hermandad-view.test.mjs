@@ -980,3 +980,15 @@ test("fishingSessionRows values each session with today's prices and fishingPlac
   assert.equal(H.fishingPlaces(fishing, worth)[0].perHour, Math.floor(13000 / 110) * H.CATCHES_PER_HOUR, "the table's pace without yours");
   assert.deepEqual(H.fishingPlaces({}, worth), []);
 });
+
+test("the view link: the page reads ?ver=, sends it as X-Guild-View and hides what needs a session", () => {
+  const js = read("public/hermandad.js"), html = read("public/hermandad.html");
+  assert.ok(H.VIEW_TOKEN.test("A".repeat(43)) && !H.VIEW_TOKEN.test("A".repeat(42)) && !H.VIEW_TOKEN.test("A".repeat(42) + "="));
+  assert.match(js, /new URLSearchParams\(win\.location\.search\)\.get\("ver"\)/);
+  assert.match(js, /options\.headers\["X-Guild-View"\] = viewToken/);
+  assert.match(js, /\$\("#tab-hermandad"\)\.hidden = !!me\.viewer/);
+  assert.match(js, /if \(view === "hermandad" && state\.me\?\.viewer\) view = "hoy"/);
+  assert.match(html, /<a href="#hermandad" data-tab="hermandad" id="tab-hermandad">/);
+  assert.match(html, /<section id="view-link-card" class="card view-link" hidden/);
+  assert.match(js, /\/hermandad\?ver=\$\{token\}/);
+});

@@ -78,7 +78,8 @@ export function validateFishing(data, {nowSec}) {
 
 /** What GET /api/guild/fishing answers from the stored rows ({member_id, label, start, end_at, seconds, casts, catches,
  * zones (JSON)}), newest first. scope "mine": a member sees their own sessions; "guild": the owner sees everyone's, with
- * the member's label. guild: every stored session added up (what bites where, for everybody). */
+ * the member's label; "viewer" (the view link): nobody's. guild: every stored session added up (what bites where, for
+ * everybody, without names). */
 export function fishingReport(rows, {scope, memberId = null, nowSec}) {
   const parsed = rows.map(r => ({...r, zones: JSON.parse(r.zones)})).sort((a, b) => b.start - a.start || a.member_id - b.member_id);
   const since = nowSec - FISHING.shownDays * 86400;

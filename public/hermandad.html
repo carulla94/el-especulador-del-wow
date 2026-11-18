@@ -26,7 +26,7 @@
       <a href="#pesca" data-tab="pesca">Pesca</a>
       <a href="#balance" data-tab="balance" id="tab-balance" hidden>Balance<span class="wide"> semanal</span></a>
       <a href="#cartera" data-tab="cartera" id="tab-cartera" hidden>Mi cartera</a>
-      <a href="#hermandad" data-tab="hermandad">Hermandad</a>
+      <a href="#hermandad" data-tab="hermandad" id="tab-hermandad">Hermandad</a>
     </nav>
     <div id="account" class="account" hidden>
       <span id="who" class="who"></span>
@@ -57,6 +57,7 @@
           <button id="login-submit" class="button primary" type="submit">Entrar en el panel</button>
           <p id="login-feedback" class="feedback" role="alert" aria-live="polite"></p>
         </form>
+        <button id="login-view" class="button subtle" type="button" hidden>Seguir viendo sin entrar</button>
       </div>
     </section>
 
@@ -479,6 +480,21 @@
         </table>
       </div>
       <p id="members-empty" class="empty-line" hidden>Todavía no hay miembros. Añade al primero con el formulario.</p>
+      <section id="view-link-card" class="card view-link" hidden aria-labelledby="view-link-title">
+        <h2 id="view-link-title">Enlace para ver sin clave</h2>
+        <p class="muted small-print">Quien tenga este enlace ve el panel en solo lectura sin entrar: Hoy, Mercado, Qué compensa, Pesca y Balance. No ve los nombres de los miembros, ni las sesiones de pesca de cada uno, ni la cartera, ni esta pestaña. Pásalo solo a quien quieras: si se filtra, cámbialo y el viejo dejará de valer. Si cambias la contraseña del propietario, el enlace también cambia.</p>
+        <p id="view-link-off" class="muted">Ahora no hay enlace: solo se entra con clave.</p>
+        <button id="view-link-create" class="button primary small" type="button">Crear enlace</button>
+        <div id="view-link-on" hidden>
+          <label class="url-field">Enlace para ver<input id="view-link-value" type="text" readonly spellcheck="false" autocomplete="off"></label>
+          <div class="row">
+            <button id="view-link-copy" class="button primary small" type="button">Copiar enlace</button>
+            <button id="view-link-rotate" class="button subtle small" type="button">Cambiar enlace</button>
+            <button id="view-link-remove" class="button danger small" type="button">Quitar enlace</button>
+          </div>
+        </div>
+        <p id="view-link-feedback" class="feedback" role="alert"></p>
+      </section>
     </section>
 
     <section id="screen-unirse" data-screen class="screen" hidden aria-labelledby="join-title">
