@@ -44,7 +44,7 @@ Pruebas del sincronizador: `python -m unittest test_sync.py -v`. Son pruebas loc
 
 ## Panel de la hermandad: HERMANDAD.cmd
 
-Es otro programa de esta misma carpeta, para la hermandad que usa el addon **Oro de Hermandad** (0.4.0 o 0.5.0; también lee los archivos de 0.3.x). Envía al panel de la hermandad los precios que apunta ese addon y, si usas el addon **Forever Fishing**, tus sesiones de pesca. No tiene nada que ver con tu cartera ni con Auctioneer.
+Es otro programa de esta misma carpeta, para la hermandad que usa el addon **Oro de Hermandad** (0.4.0 o posterior; también lee los archivos de 0.3.x). Envía al panel de la hermandad los precios que apunta ese addon y, si usas el addon **Forever Fishing**, tus sesiones de pesca. No tiene nada que ver con tu cartera ni con Auctioneer.
 
 **Basta con que una o dos personas de la hermandad lo tengan abierto.** Al terminar un escaneo completo de la subasta, el addon de cada compañero comparte un resumen de precios con la hermandad por el canal oculto de los addons (no se ve en el chat, no suena y no abre ventanas). El addon de quien tiene el subidor lo recoge mientras juega, pide a los compañeros conectados los escaneos que se perdió en las últimas 72 horas y lo guarda en su `OroHermandad.lua`; este programa lo sube al panel junto con los precios propios. El panel cuenta cuántas personas aportan precios, no solo cuántas suben. Los demás solo juegan con el addon: no necesitan Python, ni este programa, ni hacer nada.
 

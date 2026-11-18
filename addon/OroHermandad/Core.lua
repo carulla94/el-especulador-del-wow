@@ -5,7 +5,7 @@ local Guild, UI, Tooltip, Extras, History, Spec = ns.Guild, ns.UI, ns.Tooltip, n
 local Core = {}
 ns.Core = Core
 
-Core.VERSION = "0.5.0"
+Core.VERSION = "0.5.1"
 
 local DEFAULTS = {mode = "lazy", autoOpen = true, sound = true, tooltip = true}
 -- Un escaneo de resumen cuenta como completo si trae al menos esta parte de los resultados del último que contó

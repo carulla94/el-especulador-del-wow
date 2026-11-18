@@ -37,7 +37,7 @@ local isInt = Spec.IsInt
 local hist                     -- OroHermandadHist (la tabla viva que el juego guarda al salir)
 local db = {}                  -- OroHermandadDB: estado privado (extras vigilados, día de la última importación)
 local marketKeyFn              -- función de Core que da "Reino-Facción"
-local version = "0.5.0"
+local version = "0.5.1"
 local loadInfo = {}            -- cómo se cargó OroHermandadHist (para /oro sondeo)
 local shapes = {}              -- tipo de escaneo -> forma de su primera fila (para /oro sondeo)
 local queue, running = {}, nil
@@ -156,7 +156,8 @@ for _, cat in ipairs(Data.CATEGORY_ORDER or Spec.CATEGORIES) do
     if not FIXED[id] and Spec.IsCategory(cat) then FIXED[id] = cat; FIXED_ORDER[#FIXED_ORDER + 1] = id end
   end
 end
--- Lo que se comparte con la hermandad (Relay.lua): la lista fija menos Data.LOCAL_ONLY, en el mismo orden.
+-- Lo que se comparte con la hermandad (Relay.lua): la lista fija menos Data.LOCAL_ONLY (vacía desde la 0.5.1, así que
+-- toda la lista fija), en el mismo orden.
 local SHARED, SHARED_ORDER, LOCAL_ONLY = {}, {}, {}
 for _, id in ipairs(Data.LOCAL_ONLY or {}) do LOCAL_ONLY[id] = true end
 for _, id in ipairs(FIXED_ORDER) do
