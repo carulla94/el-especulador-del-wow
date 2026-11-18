@@ -258,13 +258,15 @@ Data.BASKET = {2770, 2771, 2772, 3858, 10620, 2589, 2592, 4306, 4338, 14047, 231
                2447, 785, 2453, 3356, 3818, 8831, 8838, 13464, 2835, 2836, 2838, 7912, 12365}
 
 ---------------------------------------------------------------------------
--- Lista vigilada del historial de precios (History.lua): 114 materiales y consumibles comunes
+-- Lista vigilada del historial de precios (History.lua): 161 materiales, consumibles y pescado
 ---------------------------------------------------------------------------
 -- Las claves son las categorías de OroHermandadHist (el contrato con el subidor de la hermandad); el orden es el
 -- de Data.CATEGORY_ORDER. Incluye toda la cesta de arriba, todo lo que da la recolección (Data.GATHER) y lo que hace
 -- falta para valorar la fundición (Data.SMELT), salvo lo que vende un mercader. Son IDs de Classic que Forever debería
 -- mantener: el addon solo vigila los que el cliente reconoce (C_Item.GetItemInfoInstant), y /oro sondeo lista los que no.
 -- Sin confirmar todavía en Forever (marcados con «?»): 15417, 13931, 18254.
+-- Desde la 0.5.0 también la pesca: el pescado crudo y lo que se cocina con él (en «comida»), los aceites que se
+-- destilan (en «otro») y los elixires que usan esos aceites, para que el panel compare venderlo, cocinarlo o destilarlo.
 Data.WATCH = {
   metal     = {2770, 2771, 2775, 2772, 2776, 3858, 7911, 10620,              -- minerales: cobre, estaño, plata, hierro, oro, mitril, veraplata, torio
                2840, 3576, 2841, 2842, 3575, 3577,                           -- lingotes: cobre, estaño, bronce, plata, hierro, oro,
@@ -280,16 +282,32 @@ Data.WATCH = {
                4235, 4304, 8169, 8170, 8171, 15417},                         -- pellejo pesado, cuero grueso, pellejo grueso, cuero basto, pellejo basto; demosaurio (?)
   tela      = {2589, 2592, 4306, 4338, 14047, 14256, 14342},               -- lino, lana, seda, paño mágico, rúnico, tela de inferi, tela lunar
   pocion    = {3928, 13446, 13444, 13442, 5634},                           -- sanación superior y mayor, maná mayor, ira poderosa, acción libre
-  elixir    = {13452, 9187, 9206, 13454},                                  -- mangosta, agilidad superior, gigantes, arcano superior
+  elixir    = {13452, 9187, 9206, 13454,                                   -- mangosta, agilidad superior, gigantes, arcano superior
+               13445, 21546, 6373},                                          -- defensa superior, potencia de fuego superior, potencia de fuego
   frasco    = {13510, 13511, 13512, 13513},                                -- titanes, sabiduría destilada, poder supremo, resistencia cromática
-  comida    = {13928, 13931, 18254},                                       -- calamar a la parrilla, sopa de aleta nocturna (?), tubérculo Runn Tum (?)
+  comida    = {13928, 13931, 18254,                                        -- calamar a la parrilla, sopa de aleta nocturna (?), tubérculo Runn Tum (?)
+               6291, 6303, 6289, 6317, 6361, 6308, 21071, 6522,              -- pescado crudo: pececito luminoso, caballa, pargo boquilargo, frenesí del lago, atún arco iris, siluro, sabiola, pez descarriado
+               6358, 6359, 6362, 8365, 21153, 4603, 13754, 13758,            -- bocanegra graso, pargo de fuego, bacalao, trucha cabeza de mitril, sabiola superior, serviola, vigorpez lustroso, branquirrojo
+               13756, 13755, 13759, 13760, 13889, 13893, 13888,              -- lubina (verano), calamar de invierno, pargo nocturno, salmón escama de sol y escama blanca, vigorpez grande, langosta
+               13422, 13757,                                                 -- anguila Escama Tormentosa, anguila relámpago
+               4592, 5095, 4593, 21072, 6657, 4594, 8364, 21217,             -- cocinado: pargo boquilargo, atún arco iris, siluro, sabiola ahumada, delicia descarriada, bacalao, trucha, delicia de sabiola
+               6887, 13927, 13930, 13929, 13932, 13933, 13934, 13935},       -- serviola, vigorpez lustroso, filete de branquirrojo, lubina ahumada, salmón escalfado, guiso de langosta, filete de vigorpez, salmón al horno
   venda     = {14529, 14530},                                              -- de paño rúnico y de paño rúnico gruesa
   encantar  = {11137, 11176, 16204, 16203, 14344, 20725},                  -- polvo de visión, sueño, ilusión; esencia eterna mayor; fragmento brillante grande; cristal de nexo
   elemental = {7076, 7078, 7080, 12808},                                   -- esencias de tierra, fuego, agua y no-muerte
-  otro      = {12811},                                                     -- orbe de rectitud
+  otro      = {12811,                                                      -- orbe de rectitud
+               6370, 6371, 13423},                                           -- aceites: de bocanegra, de fuego, de Escama Tormentosa
 }
 Data.CATEGORY_ORDER = {"metal", "piedra", "gema", "hierba", "piel", "tela", "pocion", "elixir", "frasco", "comida",
                        "venda", "encantar", "elemental", "otro"}
+-- Lo que tu addon vigila y tu subidor envía, pero no se comparte con la hermandad por el addon (Relay.lua): lo que
+-- entró en la 0.5.0. Así los mensajes entre compañeros son los mismos que en la 0.4.0 (9 partes por escaneo) y se
+-- entienden versiones distintas.
+Data.LOCAL_ONLY = {13445, 21546, 6373,
+                   6291, 6303, 6289, 6317, 6361, 6308, 21071, 6522, 6358, 6359, 6362, 8365, 21153, 4603, 13754, 13758,
+                   13756, 13755, 13759, 13760, 13889, 13893, 13888, 13422, 13757,
+                   4592, 5095, 4593, 21072, 6657, 4594, 8364, 21217, 6887, 13927, 13930, 13929, 13932, 13933, 13934, 13935,
+                   6370, 6371, 13423}
 Data.CATEGORY_LABELS = {
   metal = "Metal", piedra = "Piedra", gema = "Gema", hierba = "Hierba", piel = "Piel", tela = "Tela",
   pocion = "Poción", elixir = "Elixir", frasco = "Frasco", comida = "Comida", venda = "Venda",

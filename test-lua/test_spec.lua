@@ -447,17 +447,20 @@ test("Tamaño: el estimador da exactamente el tamaño del formato de WoW", funct
 end)
 
 test("Tamaño: 114 objetos x 120 días + 14 días de 4 escaneos caben en 768 KB; con 120 puntos, Shrink quita puntos primero", function()
+  -- El tope de la 0.4.0 (114 objetos); la 0.5.0 sube Spec.MAX_BYTES a 1,25 MB para sus 161 (test_history.lua).
+  local CAP = 768 * 1024
+  assert(Spec.MAX_BYTES >= CAP, "el tope no baja")
   local hist, now = fullHist(4)
   local size = Spec.EstimateSize(hist)
-  local step, after = Spec.Shrink(hist, Spec.MAX_BYTES, now)
+  local step, after = Spec.Shrink(hist, CAP, now)
   eq(step, 0); eq(after, size)
   local heavy = fullHist(10)
   local heavySize = Spec.EstimateSize(heavy)
-  local heavyStep, heavyAfter = Spec.Shrink(heavy, Spec.MAX_BYTES, now)
+  local heavyStep, heavyAfter = Spec.Shrink(heavy, CAP, now)
   print(string.format("  tamaño: 4 escaneos/día %.0f KB · 120 puntos/objeto %.0f KB -> Shrink paso %d, %.0f KB",
     size / 1024, heavySize / 1024, heavyStep, heavyAfter / 1024))
-  assert(size <= Spec.MAX_BYTES, size)
-  assert(heavySize > Spec.MAX_BYTES and heavyStep >= 1 and heavyStep <= 2 and heavyAfter <= Spec.MAX_BYTES)
+  assert(size <= CAP, size)
+  assert(heavySize > CAP and heavyStep >= 1 and heavyStep <= 2 and heavyAfter <= CAP)
   local item = select(2, next(heavy.markets["Mirage Raceway-Alliance"].items))
   eq(#Spec.DecodeDays(item.d), 120, "los días no se tocan mientras basta con quitar puntos")
   -- Si ni sin puntos cabe, se acortan los días.

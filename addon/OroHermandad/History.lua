@@ -37,7 +37,7 @@ local isInt = Spec.IsInt
 local hist                     -- OroHermandadHist (la tabla viva que el juego guarda al salir)
 local db = {}                  -- OroHermandadDB: estado privado (extras vigilados, día de la última importación)
 local marketKeyFn              -- función de Core que da "Reino-Facción"
-local version = "0.4.0"
+local version = "0.5.0"
 local loadInfo = {}            -- cómo se cargó OroHermandadHist (para /oro sondeo)
 local shapes = {}              -- tipo de escaneo -> forma de su primera fila (para /oro sondeo)
 local queue, running = {}, nil
@@ -156,6 +156,12 @@ for _, cat in ipairs(Data.CATEGORY_ORDER or Spec.CATEGORIES) do
     if not FIXED[id] and Spec.IsCategory(cat) then FIXED[id] = cat; FIXED_ORDER[#FIXED_ORDER + 1] = id end
   end
 end
+-- Lo que se comparte con la hermandad (Relay.lua): la lista fija menos Data.LOCAL_ONLY, en el mismo orden.
+local SHARED, SHARED_ORDER, LOCAL_ONLY = {}, {}, {}
+for _, id in ipairs(Data.LOCAL_ONLY or {}) do LOCAL_ONLY[id] = true end
+for _, id in ipairs(FIXED_ORDER) do
+  if not LOCAL_ONLY[id] then SHARED[id] = true; SHARED_ORDER[#SHARED_ORDER + 1] = id end
+end
 local CATEGORY_RANK = {}
 for i, cat in ipairs(Spec.CATEGORIES) do CATEGORY_RANK[cat] = i end
 
@@ -204,6 +210,8 @@ end
 
 function History.IsFixed(id) return FIXED[id] ~= nil end
 function History.FixedIDs() return FIXED_ORDER end
+function History.IsShared(id) return SHARED[id] == true end
+function History.SharedIDs() return SHARED_ORDER end
 function History.ExtraIDs() return extraIDs() end
 
 -- Objetos vigilados que el cliente reconoce: {{id, cat, fixed}, ...}, los fijos en orden de categoría y los extras
@@ -316,7 +324,7 @@ History.OBS_SCAN_SECONDS = 4 * 86400     -- escaneos aplicados que se recuerdan
 History.OBS_SCANS = 64
 History.OBS_STALE = 15 * 86400           -- un compañero sin escaneos en 15 días se olvida
 History.OBS_PER_MARKET = 40
-History.OBS_MAX_BYTES = 2048 * 1024      -- tope propio (40 compañeros con sus 15 días), aparte de los 768 KB de lo tuyo
+History.OBS_MAX_BYTES = 2048 * 1024      -- tope propio (40 compañeros con sus 15 días), aparte de los 1,25 MB de lo tuyo
 History.SELF_MAX = 10
 
 local function isHash(h) return type(h) == "string" and #h == 8 and not h:find("[^0-9a-f]") end
@@ -372,7 +380,7 @@ local function capObservers(obs)
 end
 History.EvictionOrder = evictionOrder
 
--- Copia limpia de market.obs: códigos válidos que no son tuyos, horas enteras, objetos de la lista fija con sus
+-- Copia limpia de market.obs: códigos válidos que no son tuyos, horas enteras, objetos de la lista compartida con sus
 -- textos (se normalizan después, en History.PruneObs).
 local function sanitizeObs(obs, mine)
   local out = {}
@@ -380,7 +388,7 @@ local function sanitizeObs(obs, mine)
     if isHash(h) and not mine[h] and type(entry) == "table" then
       local clean = {items = {}}
       for id, item in pairs(type(entry.items) == "table" and entry.items or {}) do
-        if type(id) == "number" and FIXED[id] and type(item) == "table" then
+        if type(id) == "number" and SHARED[id] and type(item) == "table" then
           clean.items[id] = {d = type(item.d) == "string" and item.d or "", p = type(item.p) == "string" and item.p or ""}
         end
       end
@@ -515,7 +523,7 @@ function History.ShrinkObs(h, t, maxBytes)
   return 5, obsSize(h)
 end
 
--- Llama a fn con los obs quitados un momento de cada mercado: el tope de 768 KB de lo tuyo se mide sin ellos.
+-- Llama a fn con los obs quitados un momento de cada mercado: el tope de 1,25 MB de lo tuyo se mide sin ellos.
 local function withoutObs(h, fn)
   local detached = {}
   for key, market in pairs(h.markets) do
@@ -581,7 +589,7 @@ end
 
 -- En ADDON_LOADED. saved: lo que el juego cargó en OroHermandadHist (nil si nada). opts: db (OroHermandadDB ya
 -- preparado), market (función "Reino-Facción"), version, dbLoaded (OroHermandadDB venía del archivo).
--- Limpia, poda (120 días, 14 días de puntos; lo de los compañeros, 15 días y 72 h) y deja lo tuyo en 768 KB o menos
+-- Limpia, poda (120 días, 14 días de puntos; lo de los compañeros, 15 días y 72 h) y deja lo tuyo en 1,25 MB o menos
 -- (medido sin lo de los compañeros, que tiene su propio tope de 2 MB). Devuelve la tabla que debe quedar en
 -- OroHermandadHist.
 function History.Load(saved, opts)
@@ -594,6 +602,7 @@ function History.Load(saved, opts)
               hadHist = db.histSince ~= nil, at = t}
   db.watchExtra = type(db.watchExtra) == "table" and db.watchExtra or {}
   db.histImport = type(db.histImport) == "table" and db.histImport or {}
+  db.histImportN = type(db.histImportN) == "table" and db.histImportN or {}
   if type(saved) == "table" and type(saved.schema) == "number" and saved.schema > History.SCHEMA then
     -- De una versión más nueva del addon: no se toca, por si se vuelve a ella.
     loadInfo.newer = saved.schema
@@ -624,7 +633,7 @@ end
 function History.Hist() return hist end
 function History.LoadInfo() return loadInfo end
 
--- En PLAYER_LOGOUT, antes de que el juego escriba el archivo: los topes de 768 KB (lo tuyo) y 2 MB (lo de los
+-- En PLAYER_LOGOUT, antes de que el juego escriba el archivo: los topes de 1,25 MB (lo tuyo) y 2 MB (lo de los
 -- compañeros, ya podado) también para lo de esta sesión. Devuelve paso y tamaño de cada uno.
 function History.BeforeSave()
   if not hist then return nil end
@@ -1012,7 +1021,8 @@ function History.Import(force, ids)
   local key, t = currentKey(), now()
   local today = t and Spec.DayIndex(t)
   if not (key and today) then return "off" end
-  if not force and db.histImport[key] == today then return "done" end
+  -- Con otra lista fija (una versión nueva del addon) se repite el mismo día: así lo nuevo trae su historial ya.
+  if not force and db.histImport[key] == today and db.histImportN[key] == #FIXED_ORDER then return "done" end
   if importing then return "busy" end
   if not databaseReady() then return "unavailable" end
   local todo = {}
@@ -1049,7 +1059,7 @@ function History.Import(force, ids)
       schedule(tick)
     else
       importing = false
-      if not ids then db.histImport[key] = today end
+      if not ids then db.histImport[key] = today; db.histImportN[key] = #FIXED_ORDER end
       History.lastImport = {t = t, days = added, items = touched, checked = #todo}
       if added > 0 then changed() end
     end

@@ -744,6 +744,418 @@ export function marketMapSVG({items = [], width = 720, height = 360} = {}) {
   return {node, layout: {points, x0, x1, y0, y1}};
 }
 
+// ---- Cuándo vender: weekday × time of day from /api/guild/timing (src/timing.mjs) -----------------------------
+export const BLOCK_LABELS = ["0–4 h", "4–8 h", "8–12 h", "12–16 h", "16–20 h", "20–24 h"];
+const BLOCK_TEXT = ["de 0 a 4 h", "de 4 a 8 h", "de 8 a 12 h", "de 12 a 16 h", "de 16 a 20 h", "de 20 a 24 h"];
+/** When a cell, a time of day or a weekday is worth reading: at least this many scans from this many days, and a
+ * difference of at least spreadBp between the best and the worst before anything is called a pattern. */
+export const TIMING_MIN = Object.freeze({cellPoints: 3, cellDays: 2, blockPoints: 6, blockDays: 3, dayValues: 2, spreadBp: 300});
+const meanOf = list => list.length ? Math.round(list.reduce((s, x) => s + x, 0) / list.length) : null;
+/** The pattern of a group of items, every item weighing the same (an item's cell is the mean of its points).
+ * timing: the /api/guild/timing answer; ids: the items to take (null: every item with data).
+ * Returns {items, points, cells: [42] {cell, wd, block, value, n, days, items, qty, usable}, blocks: [6] {block, value, n,
+ * days, items, usable}, weekdays: [7] {wd, value, n, items, usable}}; value is null where nobody scanned. */
+export function timingPattern(timing, ids = null) {
+  const wanted = ids ? new Set(ids) : null, blocks = BLOCK_LABELS.length;
+  const list = (timing?.items ?? []).filter(i => !wanted || wanted.has(i.id));
+  const cells = Array.from({length: 7 * blocks}, (_, cell) => ({cell, wd: Math.floor(cell / blocks), block: cell % blocks, means: [], qtys: [], n: 0, days: 0}));
+  const byBlock = Array.from({length: blocks}, (_, block) => ({block, means: [], n: 0, days: 0}));
+  const byDay = Array.from({length: 7}, (_, wd) => ({wd, means: [], n: 0}));
+  let points = 0, items = 0;
+  for (const item of list) {
+    const blockSum = Array(blocks).fill(0), blockN = Array(blocks).fill(0), blockDays = Array(blocks).fill(0);
+    for (const [cell, n, days, sum, nQty, sumQty] of item.cells ?? []) {
+      const c = cells[cell];
+      if (!c || !isInt(n) || n < 1) continue;
+      c.means.push(sum / n); c.n += n; c.days = Math.max(c.days, days);
+      if (isInt(nQty) && nQty > 0) c.qtys.push(sumQty / nQty);
+      blockSum[c.block] += sum; blockN[c.block] += n; blockDays[c.block] += days;
+      points += n;
+    }
+    for (let b = 0; b < blocks; b++) if (blockN[b]) {
+      byBlock[b].means.push(blockSum[b] / blockN[b]); byBlock[b].n += blockN[b]; byBlock[b].days = Math.max(byBlock[b].days, blockDays[b]);
+    }
+    for (const [wd, n, sum] of item.wd ?? []) if (byDay[wd] && isInt(n) && n > 0) { byDay[wd].means.push(sum / n); byDay[wd].n += n; }
+    if ((item.cells ?? []).length || (item.wd ?? []).length) items++;
+  }
+  return {items, points,
+    cells: cells.map(c => ({cell: c.cell, wd: c.wd, block: c.block, value: meanOf(c.means), n: c.n, days: c.days, items: c.means.length,
+      qty: meanOf(c.qtys), usable: c.n >= TIMING_MIN.cellPoints && c.days >= TIMING_MIN.cellDays})),
+    blocks: byBlock.map(b => ({block: b.block, value: meanOf(b.means), n: b.n, days: b.days, items: b.means.length,
+      usable: b.n >= TIMING_MIN.blockPoints && b.days >= TIMING_MIN.blockDays})),
+    weekdays: byDay.map(d => ({wd: d.wd, value: meanOf(d.means), n: d.n, items: d.means.length,
+      usable: d.means.length > 0 && d.n >= TIMING_MIN.dayValues * d.means.length}))};
+}
+const extremes = list => {
+  const usable = list.filter(x => x.usable && isInt(x.value));
+  if (usable.length < 2) return null;
+  const best = usable.reduce((a, b) => b.value > a.value ? b : a), worst = usable.reduce((a, b) => b.value < a.value ? b : a);
+  return {best, worst, spread: best.value - worst.value, count: usable.length};
+};
+function pctWords(bp) {
+  if (!isInt(bp)) return "—";
+  const text = `${rules().texts.pct(Math.abs(bp))} %`;
+  return bp > 0 ? `un ${text} por encima` : bp < 0 ? `un ${text} por debajo` : "igual";
+}
+/** What to do with the pattern, in words: {level: "sin-datos" | "pocos" | "plano" | "claro", title, lines: [text], best,
+ * worst (the best and worst usable cells when they differ enough, else null)}. The weekday × time cells, the time of day
+ * and the weekday are read apart, each when it has enough data. */
+export function timingAdvice(pattern) {
+  if (!pattern || (pattern.points === 0 && !pattern.weekdays.some(d => d.n > 0))) {
+    return {level: "sin-datos", title: "Aún no hay escaneos de estos objetos", best: null, worst: null,
+      lines: ["Escanea la subasta con Auctionator a distintas horas y días: con cada escaneo que se sube, aquí aparece cuándo se paga más."]};
+  }
+  const cells = extremes(pattern.cells), blocks = extremes(pattern.blocks), days = extremes(pattern.weekdays);
+  const lines = [], cellsClear = !!cells && cells.spread >= TIMING_MIN.spreadBp;
+  let level = "pocos";
+  if (cellsClear) {
+    level = "claro";
+    const b = cells.best, w = cells.worst;
+    lines.push(`Mejor momento para poner a la venta: el ${WEEKDAYS_LONG[b.wd]} ${BLOCK_TEXT[b.block]}. Su precio más bajo suele estar ${pctWords(b.value)} de su nivel de esa semana (${plural(b.n, "escaneo", "escaneos")} de ${plural(b.days, "día", "días")}).`);
+    lines.push(`El peor: el ${WEEKDAYS_LONG[w.wd]} ${BLOCK_TEXT[w.block]} (${formatPct(w.value)}).`);
+  }
+  if (blocks) {
+    if (blocks.spread >= TIMING_MIN.spreadBp) {
+      level = "claro";
+      lines.push(`Por horas, sea el día que sea: mejor ${BLOCK_TEXT[blocks.best.block]} (${formatPct(blocks.best.value)}), peor ${BLOCK_TEXT[blocks.worst.block]} (${formatPct(blocks.worst.value)}).`);
+    } else {
+      if (level === "pocos") level = "plano";
+      lines.push(`Por horas apenas cambia (de ${formatPct(blocks.worst.value)} a ${formatPct(blocks.best.value)}).`);
+    }
+  }
+  if (days) {
+    if (days.spread >= TIMING_MIN.spreadBp) {
+      level = "claro";
+      lines.push(`Por días, con el precio de cada día: mejor el ${WEEKDAYS_LONG[days.best.wd]} (${formatPct(days.best.value)}), peor el ${WEEKDAYS_LONG[days.worst.wd]} (${formatPct(days.worst.value)}).`);
+    } else {
+      if (level === "pocos") level = "plano";
+      lines.push(`Por días de la semana apenas cambia (de ${formatPct(days.worst.value)} a ${formatPct(days.best.value)}).`);
+    }
+  }
+  if (level === "plano") lines.push("Vende cuando te venga bien: lo que cuenta es no malvender por debajo del precio normal.");
+  if (level === "pocos") lines.unshift("Aún hay pocos escaneos para ver un patrón. Escanea a distintas horas (mañana, tarde y noche) y distintos días.");
+  const title = {pocos: "Faltan escaneos para ver un patrón", plano: "No se nota un momento mejor", claro: "Cuándo se paga más"}[level];
+  return {level, title, lines, best: cellsClear ? cells.best : null, worst: cellsClear ? cells.worst : null};
+}
+/** The heatmap: one row per weekday, one column per block of four hours; amber above the items' level that week, blue
+ * below, stronger the further (full at ±10 %). Cells without enough scans stay empty with a dashed edge and their count
+ * in the tooltip; the best cell of the advice gets a ring. Returns {node, cells}. */
+export function timingHeatmapSVG(pattern, {best = null, width = 440} = {}) {
+  const left = 40, top = 22, cols = BLOCK_LABELS.length, cellW = (width - left - 4) / cols, cellH = 30, height = top + 7 * cellH + 4;
+  const cells = pattern?.cells ?? [];
+  const cell = c => {
+    const x = round1(left + c.block * cellW + 1), y = round1(top + c.wd * cellH + 1), w = round1(cellW - 2), hgt = cellH - 2;
+    const name = `${WEEKDAYS_LONG[c.wd]} ${BLOCK_TEXT[c.block]}`;
+    const tip = c.n === 0 ? `${name}: nadie ha escaneado a esa hora`
+      : `${name}: ${c.usable ? formatPct(c.value) : "pocos datos"} frente a su semana · ${plural(c.n, "escaneo", "escaneos")} de ${plural(c.days, "día", "días")}`
+        + (isInt(c.qty) && c.usable ? ` · ${c.qty < 0 ? "menos" : "más"} unidades a la venta que de costumbre (${formatPct(c.qty)})` : "");
+    const strength = c.usable && isInt(c.value) ? Math.min(1, Math.abs(c.value) / 1000) : 0;
+    const ring = !!best && best.cell === c.cell;
+    return h("g", {class: "heat-cell"},
+      h("rect", {x, y, width: w, height: hgt, rx: 3, fill: c.usable ? (c.value >= 0 ? CHART.price : CHART.down) : "none",
+        "fill-opacity": c.usable ? round1(0.12 + 0.68 * strength) : 0, stroke: ring ? CHART.text : c.usable ? "none" : CHART.grid,
+        "stroke-width": ring ? 2 : 1, ...(c.usable || ring ? {} : {"stroke-dasharray": "3 3"})}),
+      h("text", {x: round1(x + w / 2), y: y + 19, "text-anchor": "middle", "font-size": 12, fill: c.usable ? CHART.text : CHART.muted},
+        c.usable ? formatPct(c.value) : c.n > 0 ? "·" : ""),
+      h("title", {}, tip));
+  };
+  const node = h("svg", {class: "heatmap", viewBox: `0 0 ${width} ${height}`, width, height, role: "img",
+    "aria-label": "Precio más bajo por día de la semana y franja horaria frente a su nivel de esa semana. Las mismas conclusiones están en las frases de arriba."},
+    h("g", {"font-size": 12, fill: CHART.muted, "text-anchor": "middle"}, BLOCK_LABELS.map((label, b) => h("text", {x: round1(left + b * cellW + cellW / 2), y: 14}, width < 420 ? label.replace(" h", "") : label))),
+    h("g", {"font-size": 12, fill: CHART.muted}, WEEKDAYS_SHORT.map((label, wd) => h("text", {x: 2, y: top + wd * cellH + 19}, label))),
+    cells.map(cell));
+  return {node, cells};
+}
+
+// ---- Pesca: qué pescar, dónde, qué hacer con cada pez (y cuándo venderlo, arriba) --------------------------------
+/** Raw fish the addon watches (Data.WATCH «comida» since 0.5.0) with the lowest fishing skill that catches it in
+ * open water (3 % or more) or in a pool. */
+export const FISH = Object.freeze([
+  {id: 6291, skill: 1}, {id: 6303, skill: 1}, {id: 6289, skill: 1}, {id: 6317, skill: 1}, {id: 6361, skill: 1}, {id: 6308, skill: 1},
+  {id: 21071, skill: 1}, {id: 6522, skill: 1}, {id: 6358, skill: 1}, {id: 6359, skill: 55}, {id: 6362, skill: 130}, {id: 8365, skill: 130},
+  {id: 21153, skill: 130}, {id: 4603, skill: 130}, {id: 13754, skill: 205}, {id: 13758, skill: 205}, {id: 13756, skill: 330}, {id: 13755, skill: 205},
+  {id: 13759, skill: 205}, {id: 13760, skill: 205}, {id: 13889, skill: 55}, {id: 13893, skill: 205}, {id: 13888, skill: 205}, {id: 13422, skill: 130},
+  {id: 13757, skill: 330},
+]);
+/** Cooking and alchemy with fish: Wowhead Classic (checked 2026-11), plus the elixirs that use the oils. qty: units made. */
+export const FISH_RECIPES = Object.freeze([
+  {prof: "cooking", product: 4592, qty: 1, skill: 50, reagents: [[6289, 1]]},
+  {prof: "cooking", product: 5095, qty: 1, skill: 50, reagents: [[6361, 1]]},
+  {prof: "cooking", product: 21072, qty: 1, skill: 80, reagents: [[21071, 1], [2678, 1]]},
+  {prof: "cooking", product: 6657, qty: 1, skill: 85, reagents: [[6522, 1], [2678, 1]]},
+  {prof: "cooking", product: 4593, qty: 1, skill: 100, reagents: [[6308, 1]]},
+  {prof: "cooking", product: 4594, qty: 1, skill: 175, reagents: [[6362, 1]]},
+  {prof: "cooking", product: 8364, qty: 1, skill: 175, reagents: [[8365, 1]]},
+  {prof: "cooking", product: 21217, qty: 1, skill: 175, reagents: [[21153, 1], [2692, 1]]},
+  {prof: "cooking", product: 6887, qty: 1, skill: 225, reagents: [[4603, 1]]},
+  {prof: "cooking", product: 13927, qty: 1, skill: 225, reagents: [[13754, 1], [3713, 1]]},
+  {prof: "cooking", product: 13930, qty: 1, skill: 225, reagents: [[13758, 1]]},
+  {prof: "cooking", product: 13928, qty: 1, skill: 240, reagents: [[13755, 1], [3713, 1]]},
+  {prof: "cooking", product: 13929, qty: 1, skill: 240, reagents: [[13756, 1], [2692, 2]]},
+  {prof: "cooking", product: 13931, qty: 1, skill: 250, reagents: [[13759, 1], [159, 1]]},
+  {prof: "cooking", product: 13932, qty: 1, skill: 250, reagents: [[13760, 1]]},
+  {prof: "cooking", product: 13933, qty: 1, skill: 275, reagents: [[13888, 1], [159, 1]]},
+  {prof: "cooking", product: 13934, qty: 1, skill: 275, reagents: [[13893, 1], [2692, 1], [3713, 1]]},
+  {prof: "cooking", product: 13935, qty: 1, skill: 275, reagents: [[13889, 1], [3713, 1]]},
+  {prof: "alchemy", product: 6370, qty: 1, skill: 80, reagents: [[6358, 2], [3371, 1]]},
+  {prof: "alchemy", product: 6371, qty: 1, skill: 130, reagents: [[6359, 2], [3371, 1]]},
+  {prof: "alchemy", product: 13423, qty: 1, skill: 250, reagents: [[13422, 1], [3372, 1]]},
+  {prof: "alchemy", product: 5634, qty: 1, skill: 150, reagents: [[6370, 2], [3820, 1], [3372, 1]]},
+  {prof: "alchemy", product: 6373, qty: 1, skill: 140, reagents: [[6371, 2], [3356, 1], [3372, 1]]},
+  {prof: "alchemy", product: 21546, qty: 1, skill: 250, reagents: [[6371, 3], [4625, 3], [8925, 1]]},
+  {prof: "alchemy", product: 13445, qty: 1, skill: 265, reagents: [[13423, 2], [8838, 1], [8925, 1]]},
+]);
+/** What a merchant pays for fish the panel may have no price of (sell) and what spices and vials cost there (buy), copper. */
+export const FISH_VENDOR = Object.freeze({
+  6291: {name: "Pececito luminoso crudo", sell: 1},
+  6289: {name: "Pargo de loco boquilargo crudo", sell: 1},
+  6308: {name: "Siluro mostacherizo crudo", sell: 2},
+  6362: {name: "Bacalao Piedrescama crudo", sell: 4},
+  4603: {name: "Serviola moteada cruda", sell: 4},
+  8365: {name: "Trucha cabeza de mitril cruda", sell: 4},
+  13754: {name: "Vigorpez lustroso crudo", sell: 6},
+  13893: {name: "Vigorpez crudo grande", sell: 15},
+  13758: {name: "Branquirrojo crudo", sell: 4},
+  13759: {name: "Pargo nocturno crudo", sell: 10},
+  13760: {name: "Salmón escama de sol crudo", sell: 10},
+  13889: {name: "Salmón escama blanca crudo", sell: 5},
+  13756: {name: "Lubina cruda", sell: 9},
+  13755: {name: "Calamar de invierno", sell: 7},
+  21071: {name: "Sabiola cruda", sell: 25},
+  21153: {name: "Sabiola cruda superior", sell: 125},
+  6361: {name: "Atún blanco arco iris crudo", sell: 2},
+  6317: {name: "Frenesí del lago crudo", sell: 2},
+  6303: {name: "Caballa suave cruda", sell: 1},
+  6358: {name: "Bocanegra graso", sell: 4},
+  6359: {name: "Pargo de Fuego", sell: 5},
+  13422: {name: "Anguila Escama Tormentosa", sell: 10},
+  6522: {name: "Pez descarriado", sell: 4},
+  13888: {name: "Langosta pinza oscura", sell: 12},
+  13757: {name: "Anguila relámpago", sell: 10},
+  5523: {name: "Percebe pequeño", sell: 15},
+  5524: {name: "Almeja de concha espesa", sell: 21},
+  7973: {name: "Almeja de boca grande", sell: 46},
+  7070: {name: "Elemental de agua", sell: 400},
+  3820: {name: "Alga estranguladora", sell: 100},
+  2678: {name: "Especias suaves", buy: 10},
+  2692: {name: "Especias picantes", buy: 40},
+  3713: {name: "Especias calmantes", buy: 160},
+  159: {name: "Agua de manantial refrescante", buy: 25},
+  3371: {name: "Vial vacío", buy: 20},
+  3372: {name: "Vial con plomo", buy: 200},
+  8925: {name: "Vial de cristal", buy: 2500},
+});
+/** Open water by zone: catches [[itemID, % of casts]] from Wowhead Classic (zones with 1 000+ casts; Eastern Plaguelands
+ * comes as two samples, its lakes and its coast; the rest of 100 % is junk), clean: the skill without fish getting away,
+ * skill: the least to fish there (clean − 95). */
+export const FISH_ZONES = Object.freeze([
+  {key: "elwynn-forest", name: "Bosque de Elwynn", skill: 1, clean: 25, catches: [[6291, 59], [6289, 37.1]]},
+  {key: "tirisfal-glades", name: "Claros de Tirisfal", skill: 1, clean: 25, catches: [[6291, 45.4], [6289, 29], [6303, 1.2], [8365, 1.1], [6308, 0.8]]},
+  {key: "dun-morogh", name: "Dun Morogh", skill: 1, clean: 25, catches: [[6291, 60], [6289, 38.1]]},
+  {key: "durotar", name: "Durotar", skill: 1, clean: 25, catches: [[6303, 59.7], [6291, 22.2], [6289, 15.4], [6308, 0.6]]},
+  {key: "mulgore", name: "Mulgore", skill: 1, clean: 25, catches: [[6291, 59.8], [6289, 38.2]]},
+  {key: "teldrassil", name: "Teldrassil", skill: 1, clean: 25, catches: [[6303, 56.2], [6291, 25.5], [6289, 16.2]]},
+  {key: "silverpine-forest", name: "Bosque de Argénteos", skill: 1, clean: 75, catches: [[6358, 36.4], [6361, 18.7], [6303, 12.3], [21071, 5.4], [6289, 5.2], [6308, 1.9], [6291, 1.3]]},
+  {key: "thunder-bluff", name: "Cima del Trueno", skill: 1, clean: 75, catches: [[6289, 60], [6308, 21.9], [6291, 17]]},
+  {key: "stormwind-city", name: "Ciudad de Ventormenta", skill: 1, clean: 75, catches: [[6289, 60], [6308, 21.9], [6291, 17.1]]},
+  {key: "darkshore", name: "Costa Oscura", skill: 1, clean: 75, catches: [[6361, 19.1], [6358, 16.3], [6303, 13.1], [6289, 9.8], [6308, 3.5], [6291, 2.9]]},
+  {key: "darnassus", name: "Darnassus", skill: 1, clean: 75, catches: [[6289, 59.9], [6308, 22], [6291, 17]]},
+  {key: "undercity", name: "Entrañas", skill: 1, clean: 75, catches: [[6289, 41.7], [6308, 15], [6291, 11.7]]},
+  {key: "loch-modan", name: "Loch Modan", skill: 1, clean: 75, catches: [[6289, 30], [6317, 21.7], [21071, 21.4], [6308, 11.6], [6291, 8.7]]},
+  {key: "the-barrens", name: "Los Baldíos", skill: 1, clean: 75, catches: [[6522, 26.6], [6358, 18.3], [6289, 17.9], [6361, 8], [6308, 6.5], [6303, 5.5], [6291, 5.1], [6359, 0.6]]},
+  {key: "orgrimmar", name: "Orgrimmar", skill: 1, clean: 75, catches: [[6289, 59.8], [6308, 22.3], [6291, 16.9]]},
+  {key: "westfall", name: "Páramos de Poniente", skill: 1, clean: 75, catches: [[6358, 41.1], [6361, 20.3], [6303, 13.9], [6289, 4.3], [6308, 1.7], [6291, 1.1]]},
+  {key: "duskwood", name: "Bosque del Ocaso", skill: 55, clean: 150, catches: [[6308, 47.2], [6289, 30.4], [13889, 5.2], [13759, 2.2], [13760, 2.1], [13757, 1.2], [13758, 0.7]]},
+  {key: "hillsbrad-foothills", name: "Laderas de Trabalomas", skill: 55, clean: 150, catches: [[21071, 25.1], [6358, 16.1], [6308, 13.4], [6361, 12.3], [6359, 11.9], [6289, 7.4]]},
+  {key: "wetlands", name: "Los Humedales", skill: 55, clean: 150, catches: [[6361, 48.8], [6358, 24.4], [6359, 17], [6308, 1.8], [6289, 1]]},
+  {key: "redridge-mountains", name: "Montañas Crestagrana", skill: 55, clean: 150, catches: [[6308, 63.9], [6289, 35.2]]},
+  {key: "stonetalon-mountains", name: "Sierra Espolón", skill: 55, clean: 150, catches: [[6308, 48.9], [6289, 27.3], [6359, 8.7], [21071, 6.8]]},
+  {key: "ashenvale", name: "Vallefresno", skill: 55, clean: 150, catches: [[6308, 39.2], [6289, 21.3], [6361, 19.3], [6358, 7.8], [21071, 5.6], [6359, 3.1], [13758, 0.8]]},
+  {key: "desolace", name: "Desolace", skill: 130, clean: 225, catches: [[8365, 26.5], [6362, 17.5], [6359, 14.8], [6308, 14.4], [6358, 11], [4603, 6.4], [13758, 1]]},
+  {key: "thousand-needles", name: "Las Mil Agujas", skill: 130, clean: 225, catches: [[8365, 62.8], [6308, 35], [6522, 0.4]]},
+  {key: "dustwallow-marsh", name: "Marjal Revolcafango", skill: 130, clean: 225, catches: [[6362, 27.1], [8365, 23.6], [6308, 12.9], [6359, 10.9], [4603, 10], [6358, 9.9]]},
+  {key: "alterac-mountains", name: "Montañas de Alterac", skill: 130, clean: 225, catches: [[21153, 50], [8365, 23.4], [6308, 12.4]]},
+  {key: "swamp-of-sorrows", name: "Pantano de las Penas", skill: 130, clean: 225, catches: [[6362, 49], [4603, 17.6], [6359, 10.4], [6358, 10.3], [8365, 7.5], [6308, 4]]},
+  {key: "arathi-highlands", name: "Tierras Altas de Arathi", skill: 130, clean: 225, catches: [[8365, 46.2], [6308, 25.6], [6362, 8.8], [6359, 6.4], [6358, 5.3], [4603, 3.2]]},
+  {key: "stranglethorn-vale", name: "Vega de Tuercespina", skill: 130, clean: 225, catches: [[6362, 18.4], [6359, 17.8], [6358, 15.7], [4603, 7.3], [21153, 5.2], [13422, 4.9], [8365, 2.8], [6308, 1.5], [13889, 0.4]], note: "la isla Jaguero pide 300"},
+  {key: "azshara", name: "Azshara", skill: 205, clean: 300, catches: [[13888, 26.1], [13755, 13.7], [13422, 11.8], [4603, 11.1], [7973, 7.9], [13893, 5.4], [13758, 4.1], [6359, 3.3], [13754, 2.4], [6362, 2.3], [6358, 1.7], [13759, 1.4], [13756, 1.1], [8365, 0.8], [13760, 0.8], [7070, 0.7]], note: "la bahía de las Tormentas pide 425"},
+  {key: "moonglade", name: "Claro de la Luna", skill: 205, clean: 300, catches: [[13758, 50.2], [13759, 21.8], [8365, 10], [6358, 10], [13760, 6.2], [13757, 0.7]]},
+  {key: "un-goro-crater", name: "Cráter de Un'Goro", skill: 205, clean: 300, catches: [[13758, 49.5], [13759, 21.6], [8365, 10.2], [6358, 10], [13760, 6.3], [13757, 0.9]]},
+  {key: "feralas", name: "Feralas", skill: 205, clean: 300, catches: [[13758, 31.8], [13759, 12.1], [6358, 9.3], [4603, 9], [8365, 6.3], [13760, 5.7], [6359, 5.3], [13422, 5], [13754, 2.2], [6362, 2.2], [7973, 1.9], [13755, 1.7], [13757, 0.9], [13889, 0.7], [13756, 0.5]], note: "el lago Jademir puede pedir más"},
+  {key: "felwood", name: "Frondavil", skill: 205, clean: 300, catches: [[13758, 50.6], [13759, 18.7], [8365, 9.9], [6358, 9.6], [13760, 8.8], [13757, 1.4]]},
+  {key: "tanaris", name: "Tanaris", skill: 205, clean: 300, catches: [[4603, 27.4], [6359, 14.3], [13422, 13.6], [6358, 7.7], [6362, 7], [13754, 6.5], [7973, 5.9], [13755, 5.3], [13756, 1.6]]},
+  {key: "western-plaguelands", name: "Tierras de la Peste del Oeste", skill: 205, clean: 300, catches: [[13758, 50.3], [13759, 20], [8365, 10.1], [6358, 10], [13760, 7.7], [13757, 0.9]]},
+  {key: "the-hinterlands", name: "Tierras del Interior", skill: 205, clean: 300, catches: [[13758, 24.2], [4603, 21.5], [13759, 10], [13754, 5.6], [6359, 5.3], [6362, 5.3], [13422, 5.1], [6358, 4.8], [8365, 4.7], [7973, 4.1], [13760, 3.2], [13755, 2.9], [13756, 2], [13757, 0.3]]},
+  {key: "winterspring", name: "Cuna del Invierno", skill: 330, clean: 425, catches: [[13889, 39.4], [13759, 19.8], [13760, 10.6], [13757, 6.8], [13758, 5]], note: "habilidad orientativa: las guías dan 300 o 425"},
+  {key: "deadwind-pass", name: "Paso de la Muerte", skill: 330, clean: 425, catches: [[13889, 40.1], [13759, 19], [13760, 10.7], [13757, 7.8], [13758, 4.8]], note: "habilidad orientativa: las guías dan 300 o 425"},
+  {key: "eastern-plaguelands", name: "Tierras de la Peste del Este (lagos)", skill: 330, clean: 425, catches: [[13889, 37.4], [13759, 19.1], [13760, 10.9], [13757, 7.6], [13758, 6.9], [8365, 0.5], [6358, 0.5]], note: "habilidad orientativa: las guías dan 300 o 425"},
+  {key: "eastern-plaguelands-coast", name: "Tierras de la Peste del Este (costa)", skill: 330, clean: 425, catches: [[13888, 45.2], [13756, 20.3], [13422, 11.3], [7973, 9.6], [13893, 8.2], [4603, 3.1]], note: "pocos datos: unas 2 000 capturas en Wowhead; habilidad orientativa"},
+]);
+/** Fishing pools: Wowhead has no loot table for them; the guides say most catches are the pool's fish, so 4 out of 5 count. */
+export const FISH_POOLS = Object.freeze([
+  {key: "bocanegra", name: "Banco de bocanegra graso", skill: 1, clean: 75, catches: [[6358, 80]], where: "costas de Costa Oscura, Bosque de Argénteos, Los Baldíos, Páramos de Poniente y el lago de Loch Modan"},
+  {key: "sabiola", name: "Banco de sabiolas", skill: 1, clean: 75, catches: [[21071, 80]], where: "lagos y ríos de Loch Modan, Bosque de Argénteos, Vallefresno, Laderas de Trabalomas y Sierra Espolón"},
+  {key: "descarriado", name: "Banco de peces descarriados", skill: 1, clean: 75, catches: [[6522, 80]], where: "oasis de Los Baldíos y las Cuevas de los Lamentos"},
+  {key: "pargo-fuego", name: "Banco de pargos de fuego", skill: 55, clean: 150, catches: [[6359, 80]], where: "costas de nivel 20-30: Los Humedales, Laderas de Trabalomas, Sierra Espolón"},
+  {key: "petroleo", name: "Vertido de petróleo", skill: 55, clean: 150, catches: [[6359, 60]], where: "lago de Sierra Espolón (da menos pargos que un banco)"},
+  {key: "sabiola-superior", name: "Banco superior de sabiolas", skill: 130, clean: 225, catches: [[21153, 80]], where: "ríos y lagos de interior de las Montañas de Alterac y la Vega de Tuercespina"},
+  {key: "anguila", name: "Banco de anguilas Escama Tormentosa", skill: 205, clean: 300, catches: [[13422, 80]], where: "costas de Azshara, Feralas y Tanaris"},
+]);
+/** Winter Squid only bites in winter and Summer Bass only in summer; Nightfin Snapper at night and Sunscale Salmon by day. */
+export const FISH_WHEN = Object.freeze({13755: {season: "invierno"}, 13756: {season: "verano"}, 13759: {night: true}, 13760: {day: true}});
+/** Catches an hour fishing on your own, without pools (the cast, the bite and looting); the player can change it. */
+export const CATCHES_PER_HOUR = 200;
+/** Catches a pool gives before it disappears, roughly. */
+export const POOL_CATCHES = 4;
+
+const fishLabel = (items, id) => { const e = items.get(id); return e ? nameOf(e) : FISH_VENDOR[id]?.name ?? `Objeto ${id}`; };
+/** What one unit of each item is worth to you, doing the best you can with it: selling it at the market (after the cut),
+ * to a merchant, or turning it into something worth more with the recipes your skills allow (an oil is worth what its
+ * elixir pays, if that is more). skills: {cooking, alchemy}, null for any. Returns worth(id) -> {id, name, options:
+ * [{kind, label, value, ok, ...}] best first, best (the best option you can do, or null)}. A recipe counts only when its
+ * product and every other reagent have a price: spices and vials at the merchant, the rest at the market (today's or the
+ * last days'). */
+export function fishWorth(summary, {cooking = null, alchemy = null} = {}) {
+  const items = itemsById(summary), cutBp = summary?.cutBp ?? rules().CUT_BP, memo = new Map(), using = new Map();
+  for (const r of FISH_RECIPES) for (const [id] of r.reagents) { if (!using.has(id)) using.set(id, []); using.get(id).push(r); }
+  const skillOf = prof => prof === "cooking" ? cooking : alchemy;
+  function worth(id, depth = 0) {
+    if (memo.has(id)) return memo.get(id);
+    const e = items.get(id), options = [], sale = salePrice(e);
+    if (sale) options.push({kind: "subasta", label: "Venderlo en la subasta", value: afterCut(sale.price, cutBp), source: sale.source, ok: true});
+    const vendor = isInt(e?.vendor) && e.vendor > 0 ? e.vendor : FISH_VENDOR[id]?.sell ?? null;
+    if (isInt(vendor) && vendor > 0) options.push({kind: "mercader", label: "Vendérselo al mercader", value: vendor, ok: true});
+    if (depth < 3) for (const r of using.get(id) ?? []) {
+      const product = worth(r.product, depth + 1);
+      if (!product.best) continue;
+      let cost = 0, missing = false;
+      const others = [];
+      for (const [rid, n] of r.reagents) {
+        if (rid === id) continue;
+        const merchant = FISH_VENDOR[rid]?.buy ?? VENDOR_ITEMS[rid]?.buy ?? null, bought = isInt(merchant) ? null : buyPrice(items.get(rid));
+        const unit = isInt(merchant) ? merchant : bought?.price ?? null;
+        if (!isInt(unit)) { missing = true; break; }
+        cost += unit * n;
+        others.push(`${n} × ${fishLabel(items, rid)}${isInt(merchant) ? " del mercader" : ""}`);
+      }
+      if (missing) continue;
+      const mine = r.reagents.find(([rid]) => rid === id)[1], skill = skillOf(r.prof);
+      const chain = product.best.kind === "cooking" || product.best.kind === "alchemy" ? product.best : null;
+      options.push({kind: r.prof, label: `${r.prof === "cooking" ? "Cocinarlo" : "Destilarlo"}: ${fishLabel(items, r.product)}${chain ? ` y después ${fishLabel(items, chain.product)}` : ""}`,
+        value: Math.floor((product.best.value * r.qty - cost) / mine), product: r.product, need: mine, skill: r.skill, prof: r.prof,
+        chainSkill: chain ? chain.skill : null, ok: !isInt(skill) || skill >= r.skill, cost, others,
+        sellAs: product.best.kind === "mercader" ? "al mercader" : chain ? null : "en la subasta"});
+    }
+    options.sort((a, b) => b.value - a.value || a.kind.localeCompare(b.kind));
+    const result = {id, name: fishLabel(items, id), options, best: options.find(o => o.ok) ?? null};
+    memo.set(id, result);
+    return result;
+  }
+  return worth;
+}
+
+/** The season of a day index: "verano" from April to September, "invierno" the rest (orientative: the guides do not agree on
+ * the exact day). */
+export function fishSeason(T) {
+  const month = new Date((rules().DAY0 + T * 86400 + 43200) * 1000).getUTCMonth() + 1;
+  return month >= 4 && month <= 9 ? "verano" : "invierno";
+}
+const inSeason = (id, season) => !FISH_WHEN[id]?.season || FISH_WHEN[id].season === season;
+/** Expected value of one catch from [[id, % of casts]]: out-of-season fish are left out and the others take their share
+ * (the junk keeps its own). {value, pct (the share of the fish with a price), parts: [{id, name, pct, value, best, bring}]
+ * by what they bring}. */
+export function catchValue(catches, worth, season) {
+  const all = catches.reduce((s, [, pct]) => s + pct, 0), live = catches.filter(([id]) => inSeason(id, season));
+  const liveTotal = live.reduce((s, [, pct]) => s + pct, 0);
+  if (liveTotal <= 0) return {value: 0, pct: 0, parts: []};
+  const scale = all / liveTotal;
+  let milli = 0, priced = 0;
+  const parts = live.map(([id, pct]) => {
+    const w = worth(id), share = pct * scale / 100, value = w.best ? w.best.value : null;
+    if (value !== null) { milli += value * share * 1000; priced += pct; }
+    return {id, name: w.name, pct: Math.round(pct * scale * 10) / 10, value, best: w.best, bring: value === null ? 0 : value * share};
+  }).sort((a, b) => b.bring - a.bring || b.pct - a.pct);
+  return {value: Math.floor(milli / 1000), pct: Math.round(priced / liveTotal * 1000) / 10, parts};
+}
+const okSkill = (need, have) => !isInt(have) || have >= need;
+/** Open water by what a catch is worth there, the zones you can fish (skill) only. rate: catches per hour. A zone where
+ * less than half of what bites has a price goes to unpriced. Returns {rows (best first), unpriced, season}. */
+export function fishZones(summary, {fishing = null, cooking = null, alchemy = null, rate = CATCHES_PER_HOUR} = {}) {
+  const worth = fishWorth(summary, {cooking, alchemy}), season = fishSeason(summary?.T ?? 0), rows = [];
+  let unpriced = 0;
+  for (const zone of FISH_ZONES) {
+    if (!okSkill(zone.skill, fishing)) continue;
+    const c = catchValue(zone.catches, worth, season);
+    if (c.pct < 50) { unpriced++; continue; }
+    rows.push({...zone, ...c, perHour: c.value * rate, escapes: isInt(fishing) && fishing < zone.clean});
+  }
+  rows.sort((a, b) => b.value - a.value || a.skill - b.skill || a.key.localeCompare(b.key));
+  return {rows, unpriced, season};
+}
+/** Fishing pools you can fish, by what a catch and a whole pool (POOL_CATCHES catches) are worth. */
+export function fishPools(summary, {fishing = null, cooking = null, alchemy = null} = {}) {
+  const worth = fishWorth(summary, {cooking, alchemy}), season = fishSeason(summary?.T ?? 0), rows = [];
+  let unpriced = 0;
+  for (const pool of FISH_POOLS) {
+    if (!okSkill(pool.skill, fishing)) continue;
+    const c = catchValue(pool.catches, worth, season);
+    if (c.pct < 50) { unpriced++; continue; }
+    rows.push({...pool, ...c, perPool: c.value * POOL_CATCHES, escapes: isInt(fishing) && fishing < pool.clean});
+  }
+  rows.sort((a, b) => b.value - a.value || a.skill - b.skill || a.key.localeCompare(b.key));
+  return {rows, unpriced, season};
+}
+/** Every fish with a price: selling it raw against the best you can do with it. gainBp: the best against the market (null
+ * without a market price); locked: what pays more but needs more skill. Returns {rows (by best value), unpriced}. */
+export function fishUses(summary, {fishing = null, cooking = null, alchemy = null} = {}) {
+  const worth = fishWorth(summary, {cooking, alchemy}), items = itemsById(summary), season = fishSeason(summary?.T ?? 0), rows = [];
+  let unpriced = 0;
+  for (const fish of FISH) {
+    if (!okSkill(fish.skill, fishing)) continue;
+    const w = worth(fish.id);
+    if (!w.best) { unpriced++; continue; }
+    const market = w.options.find(o => o.kind === "subasta") ?? null, vendor = w.options.find(o => o.kind === "mercader") ?? null;
+    const gainBp = market && market.value > 0 ? rules().idiv((w.best.value - market.value) * 10000, market.value) : null;
+    rows.push({...fish, name: w.name, e: items.get(fish.id) ?? null, options: w.options, best: w.best, market, vendor, gainBp,
+      locked: w.options.filter(o => !o.ok && o.value > w.best.value), when: FISH_WHEN[fish.id] ?? null, outOfSeason: !inSeason(fish.id, season)});
+  }
+  rows.sort((a, b) => b.best.value - a.best.value || a.id - b.id);
+  return {rows, unpriced};
+}
+/** The groups "Cuándo vender" can show: every fish and what is made with it, each part, and the whole market. */
+export function fishGroups() {
+  const cooked = FISH_RECIPES.filter(r => r.prof === "cooking").map(r => r.product);
+  const alchemy = FISH_RECIPES.filter(r => r.prof === "alchemy").map(r => r.product);
+  const fish = FISH.map(f => f.id);
+  return [{key: "pesca", label: "Todo lo de pesca", ids: [...new Set([...fish, ...cooked, ...alchemy])]},
+    {key: "crudo", label: "Pescado crudo", ids: fish},
+    {key: "cocinado", label: "Comida de pescado", ids: [...new Set(cooked)]},
+    {key: "aceites", label: "Aceites y elixires", ids: [...new Set(alchemy)]},
+    {key: "todo", label: "Todo el mercado", ids: null}];
+}
+/** The four answers at the top of the Pesca view, shaped like bestCards: where to fish without pools, the best pool, what
+ * to do with the catch and when to sell. */
+export function fishCards(zones, pools, uses, advice, {rate = CATCHES_PER_HOUR} = {}) {
+  const zone = zones.rows[0], pool = pools.rows[0], topUse = uses.rows[0];
+  const gain = uses.rows.filter(r => r.market && (r.best.kind === "cooking" || r.best.kind === "alchemy") && isInt(r.gainBp) && r.gainBp >= 1000)
+    .sort((a, b) => (b.best.value - b.market.value) - (a.best.value - a.market.value) || a.id - b.id)[0];
+  const main = row => row.parts.filter(p => p.bring > 0).slice(0, 2).map(p => p.name).join(" y ");
+  return [
+    zone ? {key: "zone", label: "Dónde pescar sin bancos", target: "#zones-section", good: false, name: zone.name, id: null, amount: zone.perHour, per: "por hora",
+      note: `≈ ${formatGSC(zone.value)} por captura a ${rate} capturas por hora · sobre todo ${main(zone)}${zone.escapes ? ` · con menos de ${zone.clean} de pesca se te escapan peces` : ""}`}
+      : {key: "zone", label: "Dónde pescar sin bancos", target: "#zones-section", good: false, name: "Sin datos", id: null, amount: null, per: "", note: "Faltan precios de lo que se pesca."},
+    pool ? {key: "pool", label: "El mejor banco", target: "#pools-section", good: false, name: pool.name, id: null, amount: pool.perPool, per: "por banco",
+      note: `≈ ${formatGSC(pool.value)} por captura · ${pool.where}`}
+      : {key: "pool", label: "El mejor banco", target: "#pools-section", good: false, name: "Sin datos", id: null, amount: null, per: "", note: "Faltan precios de lo que dan los bancos."},
+    gain ? {key: "use", label: "Qué hacer con lo pescado", target: "#uses-section", good: true, name: gain.name, id: gain.id, amount: gain.best.value - gain.market.value, per: "más por pez",
+      note: `${gain.best.label}: ${formatPct(gain.gainBp)} que venderlo crudo`}
+      : {key: "use", label: "Qué hacer con lo pescado", target: "#uses-section", good: false, name: topUse ? "Véndelo crudo" : "Sin datos", id: null, amount: null, per: "",
+        note: topUse ? "Hoy ninguna receta paga al menos un 10 % más que vender el pescado crudo." : "Faltan precios del pescado."},
+    {key: "sell", label: "Cuándo vender", target: "#sell-section", good: advice.level === "claro" && !!advice.best,
+      name: advice.best ? `El ${WEEKDAYS_LONG[advice.best.wd]} ${BLOCK_TEXT[advice.best.block]}` : advice.title, id: null, amount: null, per: "",
+      note: advice.best ? `Su precio más bajo suele estar ${pctWords(advice.best.value)} de su nivel de esa semana.` : advice.lines[0] ?? ""}];
+}
+
 // =================================================================================================================
 // Page (browser only)
 // =================================================================================================================
@@ -751,7 +1163,8 @@ function boot(doc, win) {
   const $ = selector => doc.querySelector(selector);
   const state = {me: null, csrf: "", market: null, summary: null, detail: null, filters: {q: "", cat: "", show: "", conf: ""},
     sort: {key: "", dir: "asc"}, view: "hoy", lastUpload: null, pollTimer: null, members: null, busy: false,
-    compensa: {prof: "", skill: "", budget: "", rare: false, cat: ""}, favorites: new Set()};
+    compensa: {prof: "", skill: "", budget: "", rare: false, cat: ""}, favorites: new Set(),
+    pesca: {skill: "", cook: "", alch: "", rate: "", group: "pesca"}, timing: null, timingKey: null, timingLoading: false, timingError: ""};
   let toastTimer;
   let cartera = null;
   /** The portfolio tab, while the owner is the one signed in: this page may stay open after they log out. */
@@ -817,9 +1230,9 @@ function boot(doc, win) {
   }
 
   // ---- views
-  const VIEWS = ["hoy", "mercado", "compensa", "balance", "cartera", "hermandad"];
+  const VIEWS = ["hoy", "mercado", "compensa", "pesca", "balance", "cartera", "hermandad"];
   const VIEW_ALIASES = {miembros: "hermandad", unirse: "hermandad"};
-  const VIEWS_WITH_MARKET = ["hoy", "mercado", "compensa", "balance", "cartera"];
+  const VIEWS_WITH_MARKET = ["hoy", "mercado", "compensa", "pesca", "balance", "cartera"];
   function showOnly(id) {
     const ids = [].concat(id);
     for (const section of doc.querySelectorAll("[data-screen]")) section.hidden = !ids.includes(section.id);
@@ -860,6 +1273,7 @@ function boot(doc, win) {
     $("#market-bar").hidden = !VIEWS_WITH_MARKET.includes(view);
     if (view === "hermandad" && state.me?.canAdmin) loadMembers();
     if (view === "compensa") renderCompensa();
+    if (view === "pesca") renderPesca();
     if (view === "cartera") owned()?.load();
     if (item && state.summary) openDetail(Number(item[1]));
     else if (!item && $("#detail").open) $("#detail").close();
@@ -984,7 +1398,7 @@ function boot(doc, win) {
   // The previous render stays (dimmed) while it reloads, so nothing jumps.
   async function loadMarket() {
     if (!state.market) { state.summary = null; renderMarket(); return; }
-    const frames = [$("#screen-hoy"), $("#screen-mercado"), $("#screen-compensa")];
+    const frames = [$("#screen-hoy"), $("#screen-mercado"), $("#screen-compensa"), $("#screen-pesca")];
     for (const frame of frames) { frame.setAttribute("aria-busy", "true"); frame.classList.add("refreshing"); }
     try {
       const summary = await request(`/api/guild/market?market=${encodeURIComponent(state.market)}`);
@@ -1019,6 +1433,8 @@ function boot(doc, win) {
     $("#balance-content").hidden = !s;
     $("#compensa-empty").hidden = !!s;
     $("#compensa-content").hidden = !s;
+    $("#pesca-empty").hidden = !!s;
+    $("#pesca-content").hidden = !s;
     if (!s) {
       $("#market-empty-text").textContent = state.me?.markets?.length
         ? "Todavía no hay datos de ese mercado."
@@ -1026,6 +1442,7 @@ function boot(doc, win) {
       $("#market-empty-admin").hidden = !state.me?.canAdmin;
       $("#banners").replaceChildren();
       $("#compensa-banners").replaceChildren();
+      $("#pesca-banners").replaceChildren();
       $("#tab-balance").hidden = true;
       renderHoy();
       return;
@@ -1036,6 +1453,7 @@ function boot(doc, win) {
       el("p", {}, el("strong", {text: b.title + ". "}), b.text)));
     $("#banners").replaceChildren(...banners());
     $("#compensa-banners").replaceChildren(...banners());
+    $("#pesca-banners").replaceChildren(...banners());
     $("#hoy-banners").replaceChildren(...banners());
     $("#caveat").textContent = `Recuerda: ${s.caveat}. Los cálculos son estimaciones con los precios que la hermandad ha visto; confírmalos siempre en la subasta.`;
     $("#compensa-caveat").textContent = $("#caveat").textContent;
@@ -1045,6 +1463,7 @@ function boot(doc, win) {
     renderBalance();
     renderHoy();
     if (state.view === "compensa") renderCompensa();
+    if (state.view === "pesca") renderPesca();
   }
 
   // ---- "Chollos de hoy"
@@ -1261,7 +1680,7 @@ function boot(doc, win) {
   }
   function rankRow({id, name, tag, track, value, detail}) {
     return el("li", {class: "rank-row"},
-      el("div", {class: "rank-name"}, itemButton(id, name), tag ? el("span", {class: "rank-tag", text: tag}) : null),
+      el("div", {class: "rank-name"}, id === null ? el("span", {class: "rank-place", text: name}) : itemButton(id, name), tag ? el("span", {class: "rank-tag", text: tag}) : null),
       el("div", {"aria-hidden": "true"}, track),
       el("div", {class: "rank-value"}, ...value),
       detail ? el("p", {class: "rank-detail", text: detail}) : null);
@@ -1390,6 +1809,174 @@ function boot(doc, win) {
     });
     frame.addEventListener("blur", hide);
     return frame;
+  }
+
+  // ---- "Pesca": what to fish, where, what to do with it and when to sell, from the summary and /api/guild/timing
+  const PESCA_SAVED = [["#fish-skill", "skill"], ["#fish-cook", "cook"], ["#fish-alch", "alch"], ["#fish-rate", "rate"]];
+  const savePesca = () => { try { win.localStorage.setItem("hermandad.pesca", JSON.stringify(state.pesca)); } catch { /* private mode */ } };
+  try {
+    const saved = JSON.parse(win.localStorage.getItem("hermandad.pesca") ?? "{}");
+    for (const [id, key] of PESCA_SAVED) if (typeof saved?.[key] === "string") { $(id).value = saved[key].slice(0, 3); state.pesca[key] = $(id).value; }
+    if (typeof saved?.group === "string") state.pesca.group = saved.group;
+  } catch { /* private mode or an old value */ }
+  for (const [id, key] of PESCA_SAVED) {
+    $(id).addEventListener("input", event => { state.pesca[key] = event.target.value; savePesca(); renderPesca(); });
+  }
+  $("#sell-group").addEventListener("change", event => { state.pesca.group = event.target.value; savePesca(); renderPesca(); });
+  let heatWidth = 0, heatTimer;
+  win.addEventListener("resize", () => {
+    clearTimeout(heatTimer);
+    heatTimer = setTimeout(() => { if (state.view === "pesca" && state.summary && $("#sell-holder").clientWidth !== heatWidth) renderPesca(); }, 150);
+  });
+  /** The player's skills and pace: a number in range, or null (show everything). */
+  function pescaInputs() {
+    const read = (text, low, high) => {
+      const t = String(text ?? "").trim();
+      return /^\d{1,3}$/.test(t) && Number(t) >= low && Number(t) <= high ? Number(t) : null;
+    };
+    const p = state.pesca;
+    const out = {fishing: read(p.skill, 1, 450), cooking: read(p.cook, 1, 300), alchemy: read(p.alch, 1, 300), rate: read(p.rate, 10, 999) ?? CATCHES_PER_HOUR};
+    out.bad = [["skill", "Pesca", out.fishing, 450], ["cook", "Cocina", out.cooking, 300], ["alch", "Alquimia", out.alchemy, 300], ["rate", "Capturas por hora", read(p.rate, 10, 999), 999]]
+      .filter(([key, , value]) => String(p[key] ?? "").trim() && value === null).map(([, label, , high]) => `${label}: escribe un número hasta ${high}.`);
+    return out;
+  }
+  /** /api/guild/timing once per market and upload (the server keeps it two hours); the view redraws when it arrives. */
+  async function loadTiming() {
+    const market = state.market, key = `${market}|${state.lastUpload ?? ""}`;
+    if (!market || state.timingKey === key) return;
+    state.timingKey = key; state.timingError = ""; state.timingLoading = true;
+    try {
+      const data = await request(`/api/guild/timing?market=${encodeURIComponent(market)}`);
+      if (state.market === market) state.timing = {market, data};
+    } catch (error) {
+      if (error.status === 401) { handle(error); return; }
+      if (state.market === market) { state.timing = {market, data: null}; state.timingError = error.status === 404 ? "" : error.message; }
+    } finally {
+      state.timingLoading = false;
+      if (state.view === "pesca") renderPesca();
+    }
+  }
+  const verb = best => !best ? "sin precio" : best.kind === "subasta" ? "véndelo" : best.kind === "mercader" ? "al mercader" : best.kind === "cooking" ? "cocínalo" : "destílalo";
+  const catchText = (row, n = 4) => row.parts.filter(p => p.pct >= 1).slice(0, n).map(p => `${p.name} ${String(p.pct).replace(".", ",")} % (${verb(p.best)}${isInt(p.value) ? `, ${formatGSC(p.value)}` : ""})`).join(" · ");
+  function renderPesca() {
+    const s = state.summary;
+    if (!s) return;
+    loadTiming();
+    const inputs = pescaInputs();
+    $("#fish-feedback").hidden = inputs.bad.length === 0;
+    $("#fish-feedback").textContent = inputs.bad.join(" ");
+    $("#fish-rate").placeholder = String(CATCHES_PER_HOUR);
+    const byId = new Map(s.items.map(e => [e.id, e]));
+    const pricedFish = FISH.filter(f => byId.has(f.id)).length;
+    $("#fish-missing").hidden = pricedFish > 0;
+    $("#fish-missing").textContent = "Aún no hay precios de pescado en este mercado: con el addon Oro de Hermandad 0.5.0 se apunta el pescado en cada escaneo de Auctionator. Mientras tanto, abajo solo cuenta lo que paga el mercader.";
+    const zones = fishZones(s, inputs), pools = fishPools(s, inputs), uses = fishUses(s, inputs);
+    $("#fish-season").textContent = zones.season === "invierno"
+      ? "Ahora es invierno en el juego: pica el calamar de invierno y no la lubina (de abril a septiembre, al revés). El pargo nocturno sale de noche y el salmón escama de sol de día: las cuentas usan la media del día."
+      : "Ahora es verano en el juego: pica la lubina y no el calamar de invierno (de octubre a marzo, al revés). El pargo nocturno sale de noche y el salmón escama de sol de día: las cuentas usan la media del día.";
+    const advice = renderSell();
+    $("#fish-cards").replaceChildren(...fishCards(zones, pools, uses, advice, {rate: inputs.rate}).map(c => bestCardNode(c, () => $(c.target).scrollIntoView())));
+    renderZones(zones, inputs);
+    renderPools(pools);
+    renderUses(uses);
+    $("#pesca-caveat").textContent = "De dónde sale: lo que pica en cada zona y las recetas son de Wowhead Classic (pueden cambiar en Forever); los bancos no tienen datos allí y se cuentan con 4 de cada 5 capturas de su pez. "
+      + "Los precios son los que ha visto la hermandad, tras la comisión de la subasta; las especias y los viales, a precio de mercader. " + $("#caveat").textContent;
+  }
+  /** "Cuándo vender": the group select, the advice, the heatmap and its table. Returns the advice for the cards. */
+  function renderSell() {
+    const timing = state.timing?.market === state.market ? state.timing.data : null;
+    const groups = fishGroups(), select = $("#sell-group");
+    const withData = new Set((timing?.items ?? []).filter(i => (i.cells ?? []).length || (i.wd ?? []).length).map(i => i.id));
+    const byId = new Map((state.summary?.items ?? []).map(e => [e.id, e]));
+    const singles = groups[0].ids.filter(id => withData.has(id)).map(id => ({id, name: byId.get(id) ? nameOf(byId.get(id)) : FISH_VENDOR[id]?.name ?? `Objeto ${id}`}))
+      .sort((a, b) => a.name.localeCompare(b.name, "es"));
+    const signature = JSON.stringify(singles.map(x => x.id));
+    if (select.dataset.signature !== signature || !select.options.length) {
+      select.dataset.signature = signature;
+      select.replaceChildren(el("optgroup", {label: "Grupos"}, ...groups.map(g => el("option", {value: g.key, text: g.label}))),
+        singles.length ? el("optgroup", {label: "Un objeto"}, ...singles.map(x => el("option", {value: "id:" + x.id, text: x.name}))) : null);
+    }
+    const wanted = state.pesca.group || "pesca";
+    select.value = [...select.options].some(o => o.value === wanted) ? wanted : "pesca";
+    const chosen = select.value, group = groups.find(g => g.key === chosen);
+    const ids = chosen.startsWith("id:") ? [Number(chosen.slice(3))] : group?.ids ?? null;
+    const pattern = timing ? timingPattern(timing, ids) : null;
+    const advice = pattern ? timingAdvice(pattern) : {level: "sin-datos", title: state.timingLoading ? "Cargando los escaneos…" : "Aún no hay escaneos", best: null, worst: null,
+      lines: [state.timingError || (state.timingLoading ? "" : "Escanea la subasta con Auctionator a distintas horas y días: con cada escaneo que se sube, aquí aparece cuándo se paga más.")].filter(Boolean)};
+    const allPattern = timing && chosen !== "todo" && pattern && pattern.points === 0 ? timingPattern(timing, null) : null;
+    $("#sell-feedback").hidden = !(allPattern && allPattern.points > 0);
+    $("#sell-feedback").textContent = allPattern && allPattern.points > 0
+      ? "De esto aún no hay escaneos con hora (llegan desde el addon 0.5.0). Mientras tanto, «Todo el mercado» ya tiene escaneos y suele seguir el mismo ritmo." : "";
+    $("#sell-advice").replaceChildren(el("h3", {text: advice.title}), ...advice.lines.map(line => el("p", {text: line})));
+    const show = !!pattern && pattern.points > 0;
+    $("#sell-legend").hidden = !show;
+    $("#sell-twin").hidden = !show;
+    const holder = $("#sell-holder");
+    heatWidth = holder.clientWidth;
+    if (!show) { holder.replaceChildren(); $("#sell-table").replaceChildren(); return advice; }
+    const chart = timingHeatmapSVG(pattern, {best: advice.best, width: Math.max(300, Math.min(640, heatWidth || 440))});
+    holder.replaceChildren(svg(chart.node));
+    const cellText = c => c.n === 0 ? "—" : c.usable ? formatPct(c.value) : `pocos (${c.n})`;
+    $("#sell-table").replaceChildren(twinTable([["Día"], ...BLOCK_LABELS.map(label => [label, true]), ["Con el precio del día", true]],
+      [...WEEKDAYS_LONG.map((day, wd) => [day, ...pattern.cells.filter(c => c.wd === wd).map(c => num(cellText(c))),
+        num(pattern.weekdays[wd].usable ? formatPct(pattern.weekdays[wd].value) : pattern.weekdays[wd].n ? `pocos (${pattern.weekdays[wd].n})` : "—")]),
+      ["Cualquier día", ...pattern.blocks.map(b => num(b.n === 0 ? "—" : b.usable ? formatPct(b.value) : `pocos (${b.n})`)), num("")]]));
+    return advice;
+  }
+  function renderZones(zones, inputs) {
+    const top = zones.rows.slice(0, 10), max = top[0]?.perHour || 1;
+    $("#zones-empty").hidden = top.length > 0;
+    $("#zones-empty").textContent = zones.unpriced ? "Faltan precios de lo que se pesca: aparecerán cuando alguien escanee la subasta con el addon 0.5.0." : "Con esa habilidad de pesca aún no hay ninguna zona: déjala vacía para verlas todas.";
+    $("#zones-twin").hidden = top.length === 0;
+    const tag = z => `habilidad ${z.skill}${z.clean > z.skill ? ` · sin que se escapen, ${z.clean}` : ""}${z.escapes ? " · se te escapará alguno" : ""}${z.note ? ` · ${z.note}` : ""}`;
+    $("#zones-list").replaceChildren(...top.map(z => {
+      const fill = el("span", {class: "rank-fill"});
+      fill.style.width = Math.max(1, Math.round(100 * z.perHour / max)) + "%";
+      return rankRow({id: null, name: z.name, tag: tag(z), track: el("span", {class: "rank-base"}, fill), value: [money(z.perHour), el("small", {text: "por hora"})],
+        detail: `≈ ${formatGSC(z.value)} por captura a ${inputs.rate} capturas por hora. Pica: ${catchText(z)}.`});
+    }));
+    $("#zones-table").replaceChildren(twinTable([["Zona"], ["Habilidad", true], ["Sin escapes", true], ["Por captura", true], ["Por hora", true], ["Lo que pica"]],
+      zones.rows.map(z => [z.name, num(String(z.skill)), num(String(z.clean)), num(money(z.value)), num(money(z.perHour)), el("td", {class: "twin-wrap", text: catchText(z, 8)})])));
+  }
+  function renderPools(pools) {
+    const top = pools.rows, max = top[0]?.perPool || 1;
+    $("#pools-empty").hidden = top.length > 0;
+    $("#pools-empty").textContent = pools.unpriced ? "Faltan precios del pescado de los bancos." : "Con esa habilidad de pesca aún no hay bancos: déjala vacía para verlos todos.";
+    $("#pools-twin").hidden = top.length === 0;
+    $("#pools-list").replaceChildren(...top.map(p => {
+      const fill = el("span", {class: "rank-fill"});
+      fill.style.width = Math.max(1, Math.round(100 * p.perPool / max)) + "%";
+      const fish = p.parts[0];
+      return rankRow({id: null, name: p.name, tag: `habilidad ${p.skill} · sin que se escapen, ${p.clean}${p.escapes ? " · se te escapará alguno" : ""}`, track: el("span", {class: "rank-base"}, fill),
+        value: [money(p.perPool), el("small", {text: "por banco"})],
+        detail: `${p.where[0].toUpperCase()}${p.where.slice(1)}. ≈ ${formatGSC(p.value)} por captura${fish ? `: ${fish.name} (${verb(fish.best)}${isInt(fish.value) ? `, ${formatGSC(fish.value)}` : ""})` : ""}.`});
+    }));
+    $("#pools-table").replaceChildren(twinTable([["Banco"], ["Habilidad", true], ["Por captura", true], ["Por banco", true], ["Dónde"]],
+      pools.rows.map(p => [p.name, num(String(p.skill)), num(money(p.value)), num(money(p.perPool)), el("td", {class: "twin-wrap", text: p.where})])));
+  }
+  function renderUses(uses) {
+    const top = uses.rows.slice(0, 15), max = top[0]?.best.value || 1;
+    $("#uses-empty").hidden = top.length > 0;
+    $("#uses-empty").textContent = uses.unpriced ? "Faltan precios del pescado: aparecerán cuando alguien escanee la subasta con el addon 0.5.0." : "Con esa habilidad de pesca aún no hay peces: déjala vacía para verlos todos.";
+    $("#uses-twin").hidden = top.length === 0;
+    const how = o => `${o.label}${o.others?.length ? ` (con ${o.others.join(", ")})` : ""}`;
+    const tag = r => `pesca ${r.skill}${r.when?.season ? ` · solo en ${r.when.season}${r.outOfSeason ? ", ahora no pica" : ""}` : ""}${r.when?.night ? " · de noche" : ""}${r.when?.day ? " · de día" : ""}`;
+    const detail = r => {
+      const parts = [how(r.best)];
+      if (r.best.kind !== "subasta") parts.push(!r.market ? "crudo aún sin precio en la subasta" : isInt(r.gainBp) && r.gainBp > 0
+        ? `${formatPct(r.gainBp)} que venderlo crudo en la subasta (${formatGSC(r.market.value)})` : `crudo en la subasta, ${formatGSC(r.market.value)}`);
+      if (r.best.kind !== "mercader" && r.vendor) parts.push(`al mercader, ${formatGSC(r.vendor.value)}`);
+      if (r.locked.length) parts.push(`con ${r.locked[0].prof === "cooking" ? "cocina" : "alquimia"} ${r.locked[0].chainSkill ?? r.locked[0].skill}: ${r.locked[0].label.toLowerCase()}, ${formatGSC(r.locked[0].value)}`);
+      return parts.join(" · ");
+    };
+    $("#uses-list").replaceChildren(...top.map(r => {
+      const fill = el("span", {class: "rank-fill"});
+      fill.style.width = Math.max(1, Math.round(100 * r.best.value / max)) + "%";
+      return rankRow({id: r.id, name: r.name, tag: tag(r), track: el("span", {class: "rank-base"}, fill),
+        value: [money(r.best.value), el("small", {text: `por pez · ${verb(r.best)}`})], detail: detail(r)});
+    }));
+    $("#uses-table").replaceChildren(twinTable([["Pez"], ["Pesca", true], ["Crudo en la subasta", true], ["Al mercader", true], ["Lo mejor"], ["Vale", true], ["Frente a crudo", true]],
+      uses.rows.map(r => [itemButton(r.id, r.name), num(String(r.skill)), num(money(r.market?.value)), num(money(r.vendor?.value)), el("td", {class: "twin-wrap", text: how(r.best)}), num(money(r.best.value)), num(pctNode(r.gainBp))])));
   }
 
   // ---- item detail

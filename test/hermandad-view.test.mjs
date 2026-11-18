@@ -13,6 +13,7 @@ import * as E from "../src/especular.mjs";
 import worker, {Portfolio} from "../src/worker.mjs";
 import {GuildMarket, GuildStore, goldCell, pctCell, textCell, WATCHLIST} from "../src/guild.mjs";
 import * as H from "../public/hermandad.js";
+import {buildTiming} from "../src/timing.mjs";
 
 H.setEspecular(E);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -516,8 +517,9 @@ test("every element the page script looks up exists in the HTML", () => {
   assert.ok(wanted.size > 40);
   for (const id of wanted) assert.ok(ids.has(id), `#${id} is missing from hermandad.html`);
   assert.equal(new Set([...html.matchAll(/\sid="([^"]+)"/g)].map(m => m[1])).size, [...html.matchAll(/\sid="([^"]+)"/g)].length, "ids are unique");
-  for (const screen of ["loading", "login", "fatal", "hoy", "mercado", "compensa", "balance", "cartera", "miembros", "unirse"]) assert.match(html, new RegExp(`id="screen-${screen}" data-screen`));
+  for (const screen of ["loading", "login", "fatal", "hoy", "mercado", "compensa", "pesca", "balance", "cartera", "miembros", "unirse"]) assert.match(html, new RegExp(`id="screen-${screen}" data-screen`));
   assert.match(html, /<a href="#compensa" data-tab="compensa">/);
+  assert.match(html, /<a href="#pesca" data-tab="pesca">/);
   const headers = [...html.matchAll(/<th scope="col"(?: data-sort="(\w+)")?/g)].filter((m, i) => i < 11).map(m => m[1] ?? null);
   assert.deepEqual(headers, ["name", "hoy", "N", "d1", "d7", "range", null, "Q", "members", "conf", "verdict"]);
   for (const key of headers.filter(Boolean)) assert.ok(H.SORTS[key], key);
@@ -734,4 +736,207 @@ test("against the real market: launch week says 'Aprendiendo precios'; a falling
   assert.deepEqual(banners.map(b => b.kind), ["falling"]);
   assert.match(banners[0].text, /^6 de 6 objetos con precio normal han caído más de un 10 % en una semana/);
   assert.match(H.cholloEmptyText(falling), /^El mercado está bajando/);
+});
+
+// ---- Cuándo vender ------------------------------------------------------------------------------------------
+/** Two weeks of scans of two items: Sunday evenings 12 % above the week's level, Tuesday mornings 8 % below. */
+function sellingWeeks(T = 2530) {
+  const points = [];
+  for (const [id, base] of [[13759, 4000], [13760, 1500]]) {
+    for (let d = T - 13; d <= T; d++) {
+      const wd = E.weekdayOf(d);
+      for (const [hour, person] of [[9, 1], [13, 2], [17, 1], [21, 2]]) {
+        let lo = base;
+        if (wd === 6 && hour === 21) lo = Math.round(base * 1.12);
+        if (wd === 1 && hour === 9) lo = Math.round(base * 0.92);
+        points.push({item_id: id, person, t: at(d, hour), lo, qty: wd === 6 && hour === 21 ? 20 : 60});
+      }
+    }
+  }
+  return buildTiming({points, T});
+}
+
+test("timingPattern weighs every item the same and keeps cells, times of day and weekdays apart", () => {
+  const timing = sellingWeeks(), pattern = H.timingPattern(timing);
+  assert.equal(pattern.items, 2);
+  assert.equal(pattern.points, 2 * 14 * 4);
+  assert.equal(pattern.cells.length, 42);
+  const sundayNight = pattern.cells[6 * 6 + 5], tuesdayMorning = pattern.cells[1 * 6 + 2], empty = pattern.cells[0];
+  assert.deepEqual([sundayNight.wd, sundayNight.block, sundayNight.n, sundayNight.days, sundayNight.items, sundayNight.usable], [6, 5, 4, 2, 2, true]);
+  assert.equal(sundayNight.value, 1200);
+  assert.ok(sundayNight.qty < -5000, "fewer units on sale then");
+  assert.equal(tuesdayMorning.value, -800);
+  assert.deepEqual([empty.n, empty.value, empty.usable], [0, null, false]);
+  // Only one of the two items: the same shape.
+  const one = H.timingPattern(timing, [13760]);
+  assert.equal(one.items, 1);
+  assert.equal(one.cells[6 * 6 + 5].value, 1200);
+  assert.equal(H.timingPattern(timing, [1]).points, 0);
+  // Times of day: the evening block has the Sunday spike spread over seven weekdays.
+  assert.ok(pattern.blocks[5].value > 0 && pattern.blocks[2].value < 0);
+  assert.deepEqual(pattern.weekdays.map(d => d.n), [0, 0, 0, 0, 0, 0, 0], "no day values in this timing");
+});
+
+test("timingAdvice names the best and worst moment, and says so when there is too little or no difference", () => {
+  const advice = H.timingAdvice(H.timingPattern(sellingWeeks()));
+  assert.equal(advice.level, "claro");
+  assert.equal(advice.title, "Cuándo se paga más");
+  assert.deepEqual([advice.best.wd, advice.best.block, advice.worst.wd, advice.worst.block], [6, 5, 1, 2]);
+  assert.equal(advice.lines[0], "Mejor momento para poner a la venta: el domingo de 20 a 24 h. Su precio más bajo suele estar un 12 % por encima de su nivel de esa semana (4 escaneos de 2 días).");
+  assert.equal(advice.lines[1], "El peor: el martes de 8 a 12 h (-8 %).");
+  // Nothing scanned.
+  const none = H.timingAdvice(H.timingPattern({items: []}));
+  assert.equal(none.level, "sin-datos");
+  assert.match(none.lines[0], /^Escanea la subasta con Auctionator a distintas horas/);
+  // Flat prices: a pattern of nothing.
+  const points = [];
+  for (let d = 2530 - 13; d <= 2530; d++) for (const hour of [9, 13, 17, 21]) points.push({item_id: 1, person: 1, t: at(d, hour), lo: 1000, qty: 5});
+  const flat = H.timingAdvice(H.timingPattern(buildTiming({points, T: 2530})));
+  assert.equal(flat.level, "plano");
+  assert.equal(flat.best, null);
+  assert.match(flat.lines.at(-1), /^Vende cuando te venga bien/);
+  // Two days of scans: too few.
+  const few = H.timingAdvice(H.timingPattern(buildTiming({points: points.slice(-8), T: 2530})));
+  assert.equal(few.level, "pocos");
+  assert.match(few.lines[0], /^Aún hay pocos escaneos/);
+});
+
+test("timingAdvice reads the weekday profile from the day values when there are no hours to compare", () => {
+  const days = [];
+  for (let d = 2530 - 40; d < 2530; d++) days.push({item_id: 5, day: d, v: E.weekdayOf(d) === 5 ? 1100 : 1000});
+  const advice = H.timingAdvice(H.timingPattern(buildTiming({days, T: 2530})));
+  assert.equal(advice.level, "claro");
+  assert.equal(advice.best, null, "no cell to point at");
+  assert.equal(advice.lines.at(-1), "Por días, con el precio de cada día: mejor el sábado (+10 %), peor el lunes (0 %).");
+});
+
+test("the heatmap draws 42 cells, fills only what has enough scans and rings the best one", () => {
+  const pattern = H.timingPattern(sellingWeeks()), advice = H.timingAdvice(pattern);
+  const {node, cells} = H.timingHeatmapSVG(pattern, {best: advice.best});
+  assert.equal(cells.length, 42);
+  const markup = svgText(node);
+  assert.equal((markup.match(/<rect /g) ?? []).length, 42);
+  assert.equal((markup.match(/stroke-width="2"/g) ?? []).length, 1, "one ring");
+  assert.match(markup, /<title>domingo de 20 a 24 h: \+12 % frente a su semana · 4 escaneos de 2 días · menos unidades a la venta que de costumbre/);
+  assert.match(markup, /<title>lunes de 0 a 4 h: nadie ha escaneado a esa hora<\/title>/);
+  assert.ok(fontSizes(markup).every(size => size >= 12));
+  assert.ok(!/NaN|undefined/.test(markup));
+  assert.match(markup, new RegExp(`fill="${H.CHART.price}"`));
+  assert.match(markup, new RegExp(`fill="${H.CHART.down}"`));
+});
+
+// ---- Pesca
+const fishAt = (y, m, d) => Math.floor((Date.UTC(y, m - 1, d, 12) / 1000 - E.DAY0) / 86400);
+const priced = (id, price, fields = {}) => stock(id, {cat: "comida", Rs: price, price: today(price), spark: [], ...fields});
+
+test("the fishing tables only use watched items or merchant goods, and Data.LOCAL_ONLY is what 0.5.0 added", () => {
+  const lua = read("addon/OroHermandad/Data.lua");
+  const start = lua.indexOf("Data.LOCAL_ONLY = {") + "Data.LOCAL_ONLY = {".length;
+  const localOnly = lua.slice(start, lua.indexOf("}", start)).match(/\d+/g).map(Number);
+  assert.equal(localOnly.length, 47);
+  const watched = new Set(Object.values(WATCHLIST).flat());
+  assert.equal(watched.size, 161);
+  for (const id of localOnly) assert.ok(watched.has(id), `${id} is watched`);
+  const local = new Set(localOnly);
+  for (const fish of H.FISH) assert.ok(local.has(fish.id), `raw fish ${fish.id} is new in 0.5.0`);
+  for (const recipe of H.FISH_RECIPES) {
+    assert.ok(local.has(recipe.product) || [13928, 13931, 5634].includes(recipe.product), `product ${recipe.product}`);
+    for (const [id, n] of recipe.reagents) {
+      assert.ok(Number.isInteger(n) && n >= 1);
+      assert.ok(watched.has(id) || Number.isInteger(H.FISH_VENDOR[id]?.buy), `${recipe.product}: reagent ${id}`);
+    }
+  }
+  const ids = new Set(H.FISH.map(f => f.id));
+  for (const place of [...H.FISH_ZONES, ...H.FISH_POOLS]) {
+    assert.ok(place.skill >= 1 && place.clean >= place.skill, place.key);
+    const total = place.catches.reduce((sum, [, pct]) => sum + pct, 0);
+    assert.ok(total > 0 && total <= 100.5, `${place.key}: ${total} %`);
+    for (const [id] of place.catches) assert.ok(ids.has(id) || H.FISH_VENDOR[id]?.sell, `${place.key}: ${id} has a price somewhere`);
+  }
+  assert.equal(new Set(H.FISH_ZONES.map(z => z.key)).size, H.FISH_ZONES.length, "unique zone keys");
+});
+
+test("fishWorth takes the best of selling raw, the merchant, cooking and distilling, within the player's skills", () => {
+  // Stonescale Eel (13422) -> Stonescale Oil (13423, + Leaded Vial) -> Elixir of Superior Defense (13445: 2 oils + Sungrass + Crystal Vial).
+  const s = marketOf([priced(13422, 1000), priced(13423, 4000), priced(13445, 30000), priced(8838, 600, {cat: "hierba", Rs: null})]);
+  const any = H.fishWorth(s)(13422);
+  assert.equal(any.best.kind, "alchemy");
+  // Elixir after the cut 28 500, less Sungrass 600 and a Crystal Vial 2 500 at the merchant, for 2 oils: 12 700 an oil;
+  // less the Leaded Vial (200): 12 500 an eel.
+  assert.equal(any.best.value, 12500);
+  assert.equal(any.best.label, "Destilarlo: Objeto 13423 y después Objeto 13445");
+  assert.deepEqual(any.options.map(o => o.kind), ["alchemy", "subasta", "mercader"]);
+  assert.equal(any.options.find(o => o.kind === "subasta").value, 950, "raw after the cut");
+  assert.equal(any.options.find(o => o.kind === "mercader").value, 10, "the merchant's price from the tables");
+  const noElixir = H.fishWorth(s, {alchemy: 260})(13422);
+  assert.equal(noElixir.best.value, 3800 - 200, "only the oil: sold at the market");
+  assert.equal(noElixir.best.label, "Destilarlo: Objeto 13423");
+  const noAlchemy = H.fishWorth(s, {alchemy: 100})(13422);
+  assert.equal(noAlchemy.best.kind, "subasta");
+  assert.equal(noAlchemy.options.find(o => !o.ok).value, 3600, "what the oil would give, locked");
+  // A reagent nobody has a price for leaves the recipe out instead of guessing.
+  const noHerb = H.fishWorth(marketOf([priced(13422, 1000), priced(13423, 4000), priced(13445, 30000)]))(13422);
+  assert.equal(noHerb.best.value, 3600);
+});
+
+test("catchValue leaves out what does not bite this season and gives its share to the other fish, not to the junk", () => {
+  const worth = id => ({name: `Pez ${id}`, best: {value: {1: 100, 2: 1000}[id] ?? 0, kind: "subasta"}});
+  // 13756 (Summer Bass) only bites in summer.
+  const catches = [[1, 60], [13756, 30]];
+  const summer = H.catchValue(catches, id => id === 13756 ? {name: "Lubina", best: {value: 500, kind: "subasta"}} : worth(id), "verano");
+  assert.equal(summer.value, 60 + 150);
+  const winter = H.catchValue(catches, worth, "invierno");
+  assert.equal(winter.parts.length, 1);
+  assert.equal(winter.parts[0].pct, 90, "the bass's 30 % goes to the other fish; the 10 % of junk stays");
+  assert.equal(winter.value, 90);
+  assert.equal(H.catchValue([[3, 50], [1, 40]], id => id === 3 ? {name: "x", best: null} : worth(id), "verano").pct, 44.4, "share of the catch with a price");
+  assert.equal(H.fishSeason(fishAt(2026, 11, 18)), "invierno");
+  assert.equal(H.fishSeason(fishAt(2027, 7, 1)), "verano");
+  assert.equal(H.fishSeason(fishAt(2027, 3, 31)), "invierno");
+  assert.equal(H.fishSeason(fishAt(2027, 4, 1)), "verano");
+});
+
+test("fishZones, fishPools and fishUses rank what you can fish, and fishCards answers the four questions", () => {
+  const items = [priced(13422, 2000), priced(13888, 900), priced(13933, 2500), priced(13889, 400), priced(13759, 800), priced(13755, 1000),
+    priced(4603, 120), priced(6359, 90), priced(6358, 60), priced(13758, 150), priced(6362, 80), priced(8365, 70), priced(6308, 30), priced(6289, 10), priced(6291, 5)];
+  const s = marketOf(items, {T: fishAt(2026, 11, 18)});
+  const zones = H.fishZones(s, {fishing: 300, rate: 150});
+  assert.equal(zones.season, "invierno");
+  assert.ok(zones.rows.length > 10 && zones.rows.every(z => z.skill <= 300));
+  assert.ok(!zones.rows.some(z => z.clean === 425), "425 zones need more than 300 to cast");
+  assert.equal(zones.rows[0].key, "azshara");
+  for (const z of zones.rows) assert.equal(z.perHour, z.value * 150);
+  for (let i = 1; i < zones.rows.length; i++) assert.ok(zones.rows[i - 1].value >= zones.rows[i].value);
+  assert.ok(H.fishZones(s, {fishing: 50}).rows.every(z => z.skill <= 50));
+  assert.ok(H.fishZones(s).rows.some(z => z.clean === 425), "no skill: every zone");
+  const pools = H.fishPools(s, {fishing: 300});
+  assert.equal(pools.rows[0].key, "anguila");
+  assert.equal(pools.rows[0].perPool, pools.rows[0].value * H.POOL_CATCHES);
+  const uses = H.fishUses(s, {cooking: 300});
+  const lobster = uses.rows.find(r => r.id === 13888);
+  assert.equal(lobster.best.kind, "cooking", "Lobster Stew pays more than the raw lobster");
+  assert.equal(lobster.best.value, 2375 - 25, "the stew after the cut less the spring water");
+  assert.equal(lobster.market.value, 855);
+  const cards = H.fishCards(zones, pools, uses, H.timingAdvice(null), {rate: 150});
+  assert.deepEqual(cards.map(c => c.key), ["zone", "pool", "use", "sell"]);
+  assert.equal(cards[0].name, "Azshara");
+  assert.match(cards[0].note, /a 150 capturas por hora/);
+  assert.equal(cards[2].good, true);
+  assert.equal(cards[3].good, false);
+  assert.equal(cards[3].name, "Aún no hay escaneos de estos objetos");
+  // Without fish prices only the merchant's prices count, and nothing is called a good use.
+  const bare = marketOf([], {T: fishAt(2026, 11, 18)});
+  const bareUses = H.fishUses(bare);
+  assert.ok(bareUses.rows.every(r => r.best.kind === "mercader"));
+  assert.equal(H.fishCards(H.fishZones(bare), H.fishPools(bare), bareUses, H.timingAdvice(null))[2].name, "Véndelo crudo");
+});
+
+test("fishGroups covers every fish, what is cooked or distilled from them and the whole market", () => {
+  const groups = H.fishGroups();
+  assert.deepEqual(groups.map(g => g.key), ["pesca", "crudo", "cocinado", "aceites", "todo"]);
+  assert.equal(groups[4].ids, null);
+  const all = new Set(groups[0].ids);
+  for (const g of groups.slice(1, 4)) for (const id of g.ids) assert.ok(all.has(id));
+  assert.equal(groups[1].ids.length, H.FISH.length);
+  assert.ok(groups[3].ids.includes(13445) && groups[3].ids.includes(6370));
 });

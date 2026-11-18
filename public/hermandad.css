@@ -221,6 +221,21 @@ thead th.num button{justify-content:flex-end}
 .legend .key-zone-good{background:var(--chart-good);opacity:.25}
 .legend .key-zone-up{background:var(--chart-up);opacity:.25}
 .market-map{cursor:pointer}
+/* Pesca */
+.pesca-you .filters{margin-bottom:6px}
+.pesca-you .small-print{margin:4px 0 0}
+#fish-season:empty{display:none}
+.advice{display:flex;flex-direction:column;gap:4px;font-size:13px}
+.advice:empty{display:none}
+.advice h3{margin:0;font-size:15px}
+.advice p{margin:0}
+.heatmap-holder{overflow-x:auto}
+.heatmap{display:block;max-width:100%;height:auto}
+.legend .key-dear{width:12px;height:12px;background:var(--chart-price);border-radius:2px}
+.legend .key-cheap{width:12px;height:12px;background:var(--chart-down);border-radius:2px}
+.legend .key-few{width:12px;height:12px;border:1px dashed var(--muted);border-radius:2px}
+.use-best{color:var(--gold-bright)}
+.rank-place{font-weight:600;color:var(--text)}
 .twin-wrap{white-space:normal;min-width:220px}
 
 /* Members */

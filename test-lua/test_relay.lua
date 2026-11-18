@@ -402,7 +402,7 @@ test("Con 40 compañeros en memoria, un escaneo nuevo y rehacer la caché van po
   local obs = {}
   for o = 1, c.History.OBS_PER_MARKET do
     local items = {}
-    for i, id in ipairs(c.History.FixedIDs()) do
+    for i, id in ipairs(c.History.SharedIDs()) do
       local ds, pts = {}, {}
       for d = T - 14, T do
         local p = 100 + (i * 977 + d * 13 + o * 31) % 4900
@@ -588,7 +588,7 @@ test("Una OroHermandadHist de la 0.3.1 (esquema 1) pasa al 2 sin perder nada", f
   local H = freshHistory(unit)
   local loaded = H.Load(copy(file.OroHermandadHist), {db = copy(file.OroHermandadDB), market = function() return MARKET end})
   current = nil
-  eq(loaded.schema, 2); eq(loaded.addon, "0.4.0")
+  eq(loaded.schema, 2); eq(loaded.addon, "0.5.0")
   local n = 0
   for key, market in pairs(before.markets) do
     local now = loaded.markets[key]
@@ -608,15 +608,19 @@ test("Una OroHermandadHist de la 0.3.1 (esquema 1) pasa al 2 sin perder nada", f
   setUnix(NOW)
 end)
 
-test("Una OroHermandadHist del esquema 2 se carga y se guarda sin cambiar nada; la 0.3.1 no la toca", function()
+test("Una OroHermandadHist del esquema 2 se carga y se guarda sin cambiar nada (salvo la versión); la 0.3.1 no la toca", function()
   setUnix(NOW)
   local file = saved("hist-schema2.lua")
   current = unit
   local H = freshHistory(unit)
   local loaded = H.Load(copy(file.OroHermandadHist), {db = copy(file.OroHermandadDB), market = function() return MARKET end})
-  eq(dump(loaded), dump(file.OroHermandadHist), "idéntica al cargar")
+  -- El archivo es de la 0.4.0: al cargarlo solo cambia la versión que lo escribe.
+  eq(file.OroHermandadHist.addon, "0.4.0")
+  local expected = copy(file.OroHermandadHist)
+  expected.addon = "0.5.0"
+  eq(dump(loaded), dump(expected), "idéntica al cargar")
   H.BeforeSave()
-  eq(dump(loaded), dump(file.OroHermandadHist), "idéntica al guardar")
+  eq(dump(loaded), dump(expected), "idéntica al guardar")
   -- La 0.3.1 la ve más nueva: la deja tal cual y apaga su historial (volver a la 0.4.0 la recupera).
   local L = {Data = unit.ns.Data, Items = unit.ns.Items, Spec = unit.ns.Spec, Prices = unit.ns.Prices}
   assert(loadfile(LEGACY .. "History-0.3.1.lua"))("OroHermandad", L)
@@ -673,20 +677,22 @@ local function obsFrom(items, seen)
   return {seen = seen, s = tostring(seen), items = out}
 end
 
-test("Topes: lo tuyo (768 KB) se mide sin lo de los compañeros, que tiene sus 2 MB y sus pasos", function()
+test("Topes: lo tuyo (1,25 MB) se mide sin lo de los compañeros, que tiene sus 2 MB y sus pasos", function()
   current = unit
   local H = freshHistory(unit)
-  local fixed = H.FixedIDs()
+  -- Los compañeros solo comparten la lista de la 0.4.0 (114 objetos); lo tuyo es la lista fija entera (161).
+  local fixed = H.SharedIDs()
   local today = Spec.DayIndex(NOW)
-  -- Lo tuyo cabe (114 objetos x 120 días, ~610 KB) y lo de los compañeros también, pero juntos pasan de 768 KB:
-  -- lo tuyo no se recorta.
-  local own = bigItems(fixed, 120, 4, 14 * 4, NOW)
+  -- Lo tuyo cabe (161 objetos x 120 días, ~860 KB) y lo de 6 compañeros también (~560 KB), pero juntos pasan de
+  -- 1,25 MB: lo tuyo no se recorta.
+  local own = bigItems(H.FixedIDs(), 120, 4, 14 * 4, NOW)
   local mateItems = bigItems(fixed, 15, 4, 12, NOW)
-  local hist = {schema = 2, markets = {[MARKET] = {updated = NOW, items = copy(own), dep = {}, obs = {
-    ["0000000a"] = obsFrom(mateItems, NOW - 60), ["0000000b"] = obsFrom(mateItems, NOW - 120), ["0000000c"] = obsFrom(mateItems, NOW - 180)}}}}
+  local mates = {}
+  for i = 1, 6 do mates[string.format("%08x", 9 + i)] = obsFrom(mateItems, NOW - 60 * i) end
+  local hist = {schema = 2, markets = {[MARKET] = {updated = NOW, items = copy(own), dep = {}, obs = mates}}}
   local loaded = H.Load(hist, {db = {}, market = function() return MARKET end})
   local info = H.LoadInfo()
-  assert(Spec.EstimateSize(loaded) > Spec.MAX_BYTES, "juntos pasan de 768 KB: " .. Spec.EstimateSize(loaded))
+  assert(Spec.EstimateSize(loaded) > Spec.MAX_BYTES, "juntos pasan de 1,25 MB: " .. Spec.EstimateSize(loaded))
   eq(info.shrinkStep, 0, "lo tuyo no se recorta"); eq(info.obsStep, 0, "lo de los compañeros cabe")
   eq(dump(loaded.markets[MARKET].items), dump(own), "lo tuyo intacto")
   -- Los pasos, con un tope a medida (ShrinkObs lo admite): 6 compañeros de 15 días con 3 días de puntos.
@@ -1484,7 +1490,7 @@ end)
 -- Otra hermandad del mismo reino: lo de aquí no llega a los clientes de las pruebas anteriores.
 local OTHER = "Los de Siempre"
 local FIXED_IDS = unit.History.FixedIDs()
--- Un escaneo de los 114 objetos de la lista fija con precios de 6 cifras: 9 partes por escaneo.
+-- Un escaneo de la lista fija (161 objetos) con precios de 6 cifras: se comparten 114, en 9 partes por escaneo.
 local function wholeScan(seed)
   local items = {}
   for i, id in ipairs(FIXED_IDS) do items[id] = {60000 + ((i * 7919 + seed * 104729) % 900000), 1000 + (i * 37) % 4000, 100 + i % 50} end

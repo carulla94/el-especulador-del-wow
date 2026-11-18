@@ -141,6 +141,7 @@ function rng(seed) {
 test("without the GUILD binding every guild route answers 503 and nothing reaches Portfolio", async t => {
   const f = fixture(t, {guild: false});
   const routes = [["GET", "/api/guild/me"], ["GET", "/api/guild/market?market=a-Alliance"], ["GET", "/api/guild/item?market=a-Alliance&id=1"],
+    ["GET", "/api/guild/timing?market=a-Alliance"],
     ["GET", "/api/guild/export.csv?market=a-Alliance"], ["GET", "/api/guild/members"], ["GET", "/api/guild/download/sincronizador"],
     ["POST", "/api/guild/sync"], ["POST", "/api/guild/login"], ["POST", "/api/guild/logout"], ["POST", "/api/guild/members"],
     ["POST", "/api/guild/members/role"], ["POST", "/api/guild/members/revoke"], ["POST", "/api/guild/keys"], ["POST", "/api/guild/keys/revoke"],
@@ -174,8 +175,8 @@ test("wrangler and the worker entry add GuildMarket without touching Portfolio o
   assert.deepEqual(config.migrations, [{tag: "v1", new_sqlite_classes: ["Portfolio"]}, {tag: "v2", new_sqlite_classes: ["GuildMarket"]}]);
   assert.equal(config.main, "src/worker.mjs");
   assert.equal(WorkerGuildMarket, GuildMarket);
-  assert.equal(WATCH_IDS.length, 114);
-  assert.equal(new Set(WATCH_IDS).size, 114);
+  assert.equal(WATCH_IDS.length, 161);
+  assert.equal(new Set(WATCH_IDS).size, 161);
 });
 
 test("the server's watchlist is the addon's Data.WATCH, category by category", () => {
@@ -504,13 +505,13 @@ test("pre-launch days, days past retention, points older than 14 days and unknow
     [[2589, 1, 2], [2592, 3, 7]], "a deposit counts only for an item the market has");
 });
 
-test("each member keeps at most 200 points per item, the newest ones", async t => {
+test("each member keeps at most 400 points per item, the newest ones", async t => {
   const f = fixture(t), owner = await f.owner(), ana = await f.member(owner, "Ana");
-  const points = (from, count) => Array.from({length: count}, (_, i) => [at(T0 - 5, 0) + (from + i) * 1800, 900 + i, 5, 1]);
+  const points = (from, count) => Array.from({length: count}, (_, i) => [at(T0 - 12, 0) + (from + i) * 1800, 900 + i, 5, 1]);
   await f.sync(ana.key, upload([item(2589, {days: flat(900, T0, T0), points: points(0, 130)})]));
-  await f.sync(ana.key, upload([item(2589, {points: points(130, 130)})]));
+  for (const from of [130, 260, 390]) await f.sync(ana.key, upload([item(2589, {points: points(from, 130)})]));
   const kept = f.gdb.prepare("SELECT count(*) AS n, min(t) AS first, max(t) AS last FROM guild_obs_point").get();
-  assert.deepEqual({...kept}, {n: 200, first: at(T0 - 5, 0) + 60 * 1800, last: at(T0 - 5, 0) + 259 * 1800});
+  assert.deepEqual({...kept}, {n: 400, first: at(T0 - 12, 0) + 120 * 1800, last: at(T0 - 12, 0) + 519 * 1800});
 });
 
 test("the cloud needs two members for ALTA, and the lowest point today breaks ties by the newest", async t => {
@@ -559,13 +560,13 @@ test("caps: 50 active members and keys, 24 uploads a day, 60 attempts an hour, 3
   f.advance(3600000);
   assert.equal((await f.sync(b.key, upload([]))).status, 200);
 
-  // 300 items per market: the 114 watchlist items always fit, the rest share 186 slots.
+  // 300 items per market: the 161 watchlist items always fit, the rest share 139 slots.
   const c = members[3];
   const extras = Array.from({length: 300}, (_, i) => item(200000 + i, {cat: "otro", days: flat(5, f.T, f.T)}));
   const first = await (await f.sync(c.key, upload(extras))).json();
-  assert.deepEqual([first.markets[0].items, first.markets[0].skippedItems.length, first.markets[0].skippedItems[0]], [186, 114, 200186]);
+  assert.deepEqual([first.markets[0].items, first.markets[0].skippedItems.length, first.markets[0].skippedItems[0]], [139, 161, 200139]);
   const watched = await (await f.sync(c.key, upload(WATCH_IDS.map(id => item(id, {days: flat(5, f.T, f.T)}))))).json();
-  assert.deepEqual([watched.markets[0].items, watched.markets[0].skippedItems], [114, []]);
+  assert.deepEqual([watched.markets[0].items, watched.markets[0].skippedItems], [161, []]);
   assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_items WHERE market=?").get(MARKET).n, LIMITS.itemsPerMarket);
   const late = await (await f.sync(replacement.key, upload([item(300001, {days: flat(5, T0 + 1, T0 + 1)})]))).json();
   assert.deepEqual(late.markets[0].skippedItems, [300001]);
@@ -584,18 +585,21 @@ test("caps: 50 active members and keys, 24 uploads a day, 60 attempts an hour, 3
   assert.equal(f.gdb.prepare("SELECT count(DISTINCT market) AS n FROM guild_member_markets").get().n, 20);
 });
 
-test("retention keeps 180 days of days and receipts and 14 days of points", async t => {
+test("retention keeps 180 days of days and receipts and 28 days of points", async t => {
   const f = fixture(t), owner = await f.owner(), ana = await f.member(owner, "Ana");
   await f.sync(ana.key, upload([item(2589, {days: flat(1000, T0 - 20, T0), points: [[at(T0 - 13), 900, 1, 1], [at(T0, 8), 950, 1, 1]]})]));
   f.setTime(T0 + 10);
   await f.sync(ana.key, upload([item(2589, {days: flat(1100, T0 + 10, T0 + 10)})]));
-  assert.deepEqual(f.gdb.prepare("SELECT t FROM guild_obs_point ORDER BY t").all().map(r => r.t), [at(T0, 8)], "points older than 14 days are gone");
+  assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_obs_point").get().n, 2, "23 days old: kept for «Cuándo vender»");
+  f.setTime(T0 + 16);
+  await f.sync(ana.key, upload([item(2589, {days: flat(1100, T0 + 16, T0 + 16)})]));
+  assert.deepEqual(f.gdb.prepare("SELECT t FROM guild_obs_point ORDER BY t").all().map(r => r.t), [at(T0, 8)], "points older than 28 days are gone");
   f.setTime(T0 + 175);
   await f.sync(ana.key, upload([item(2589, {days: flat(1200, T0 + 175, T0 + 175)})]));
   const daysLeft = () => f.gdb.prepare("SELECT min(day) AS lo, count(*) AS n FROM guild_obs_day").get();
-  assert.deepEqual({...daysLeft()}, {lo: T0 + 175 - 180, n: 6 + 1 + 1}, "days before T-180 are deleted");
+  assert.deepEqual({...daysLeft()}, {lo: T0 + 175 - 180, n: 6 + 2 + 1}, "days before T-180 are deleted");
   assert.equal(f.gdb.prepare("SELECT min(day) AS lo FROM guild_day_agg").get().lo, T0 - 5);
-  assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_uploads").get().n, 3);
+  assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_uploads").get().n, 4);
   f.setTime(T0 + 200);
   await f.sync(ana.key, upload([item(2589, {days: flat(1300, T0 + 200, T0 + 200)})]));
   assert.deepEqual(f.gdb.prepare("SELECT day FROM guild_obs_day ORDER BY day").all().map(r => r.day), [T0 + 175, T0 + 200]);
@@ -1093,14 +1097,14 @@ test("a purge or the retention frees the slots and names of items left without d
   // An item that brings nothing storable gets no row, so it cannot hold a slot.
   const nothing = await (await f.sync(ana.key, upload(Array.from({length: 300}, (_, i) => item(500000 + i, {cat: "otro", days: [[2400, 5, 5, 5, 1, 1, "a"]]}))))).json();
   assert.deepEqual([nothing.markets[0].items, nothing.markets[0].skippedItems, listed()], [0, [], []]);
-  const junk = Array.from({length: 186}, (_, i) => item(900000 + i, {name: "BASURA " + i, cat: "otro", days: flat(1000, T0, T0)}));
+  const junk = Array.from({length: 139}, (_, i) => item(900000 + i, {name: "BASURA " + i, cat: "otro", days: flat(1000, T0, T0)}));
   assert.equal((await f.sync(ana.key, upload([item(2770, {name: "Mena de cobre", cat: "metal", days: flat(500, T0, T0)}), ...junk], {deposits: [[900001, 3, 40]]}))).status, 200);
   await f.sync(bruno.key, upload([item(900005, {name: "Compartido", cat: "otro", days: flat(900, T0, T0)})]));
   const full = await (await f.sync(bruno.key, upload([item(12345, {name: "Mi extra", cat: "otro", days: flat(700, T0, T0)})]))).json();
-  assert.deepEqual(full.markets[0].skippedItems, [12345], "Ana's 186 extras fill every free slot");
+  assert.deepEqual(full.markets[0].skippedItems, [12345], "Ana's 139 extras fill every free slot");
 
   const purge = await f.post("/api/guild/members/revoke", {memberId: ana.id, purge: true}, owner);
-  assert.deepEqual(await purge.json(), {revoked: true, memberId: ana.id, purged: 187 + 1});
+  assert.deepEqual(await purge.json(), {revoked: true, memberId: ana.id, purged: 140 + 1});
   assert.deepEqual(listed(), [[900005, ""]], "only the item Bruno also has stays, without the name Ana gave it");
   assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_deposits").get().n, 0);
   assert.deepEqual(f.gdb.prepare("SELECT DISTINCT member_id FROM guild_item_vendor").all().map(r => r.member_id), [bruno.id]);
@@ -1170,15 +1174,15 @@ test("the daily retention commits on its own, so a refused upload neither undoes
   const points = Array.from({length: 40}, (_, i) => [at(T0 - 1, 0) + i * 1800, 900, 5, 2]);
   assert.equal((await f.sync(ana.key, upload(ids.map(id => item(id, {cat: "otro", days: flat(1000, T0, T0), points}))))).status, 200);
   assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_obs_point").get().n, 1200);
-  // Twenty days later those points are past the 14 days: the retention deletes 1200 rows, which leaves too little
+  // Thirty days later those points are past the 28 days: the retention deletes 1200 rows, which leaves too little
   // of a 2000-row budget for 20 new items with 10 days each (885 rows at most).
   f.env.GUILD_WRITE_ROWS_PER_DAY = "2000";
-  f.setTime(T0 + 20);
-  const fresh = upload(Array.from({length: 20}, (_, i) => item(400000 + i, {cat: "otro", days: flat(1000, T0 + 11, T0 + 20)})));
+  f.setTime(T0 + 30);
+  const fresh = upload(Array.from({length: 20}, (_, i) => item(400000 + i, {cat: "otro", days: flat(1000, T0 + 21, T0 + 30)})));
   const used = () => f.gdb.prepare("SELECT written FROM guild_write_budget WHERE day=?").get(Math.floor(f.nowSec / DAY)).written;
   assert.equal((await f.sync(ana.key, fresh)).status, 429);
   assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_obs_point").get().n, 0, "the retention stayed done");
-  assert.equal(f.gdb.prepare("SELECT value FROM guild_meta WHERE key='retention_day'").get().value, String(T0 + 20));
+  assert.equal(f.gdb.prepare("SELECT value FROM guild_meta WHERE key='retention_day'").get().value, String(T0 + 30));
   const afterFirst = used();
   assert.ok(afterFirst > 1200, "the refused attempt counted its retention");
   f.queries.length = 0;
@@ -1186,7 +1190,7 @@ test("the daily retention commits on its own, so a refused upload neither undoes
   assert.equal((await f.sync(ana.key, fresh)).status, 429);
   assert.ok(!f.queries.some(q => /^DELETE FROM guild_obs_point WHERE t</.test(q)), "a retry does not run the retention again");
   assert.ok(used() - afterFirst <= 3, "a refused retry costs its rate limit and the counter, nothing more");
-  f.setTime(T0 + 21, 1, 30);
+  f.setTime(T0 + 31, 1, 30);
   const next = await f.sync(ana.key, fresh);
   assert.equal(next.status, 200, await next.clone().text());
   assert.ok(used() < 1200);
@@ -1208,4 +1212,31 @@ test("one website: / leads everybody to the panel, and the portfolio tab is serv
   assert.equal((await f.call("/", {cookie: who.cookie})).headers.get("Location"), BASE + "/hermandad", "the owner lands on the same panel");
   assert.equal((await f.call("/cartera.js", {cookie: who.cookie})).status, 200);
   assert.equal((await f.call("/index.html", {cookie: who.cookie})).status, 200, "the older page stays for Auctioneer and restoring backups");
+});
+
+test("«Cuándo vender» answers from the scans of every person, cached for two hours and dropped with a purge", async t => {
+  const f = fixture(t), owner = await f.owner(), ana = await f.member(owner, "Ana"), T = f.T;
+  const points = [];
+  for (let d = T - 13; d <= T; d++) points.push([at(d, 9), 900, 200, 50], [at(d, 16), 1100, 50, 10]);
+  assert.equal((await f.sync(ana.key, upload([item(2589, {days: flat(1000, T - 20, T), points})]))).status, 200);
+  const get = (market = MARKET) => f.call(`/api/guild/timing?market=${encodeURIComponent(market)}`, {cookie: owner.cookie});
+  const first = await get();
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get("X-Guild-Cache"), "miss");
+  const body = await first.json();
+  assert.deepEqual([body.market, body.rules, body.T, body.timeZone, body.blocks], [MARKET, "cuando-vender-1", T, "Europe/Madrid", 6]);
+  const cloth = body.items.find(i => i.id === 2589);
+  assert.equal(cloth.n, 28);
+  const morning = cloth.cells.filter(c => c[0] % 6 === 2), afternoon = cloth.cells.filter(c => c[0] % 6 === 4);
+  assert.ok(morning.length === 7 && morning.every(c => c[3] < 0), "mornings below the level");
+  assert.ok(afternoon.length === 7 && afternoon.every(c => c[3] > 0), "afternoons above it");
+  assert.equal(new Set(cloth.cells.map(c => c[0] % 6)).size, 2);
+  assert.ok(cloth.wd.length > 0, "the day values give a weekday profile");
+  assert.equal((await get()).headers.get("X-Guild-Cache"), "hit");
+  f.advance(2 * 3600 * 1000 + 1000);
+  assert.equal((await get()).headers.get("X-Guild-Cache"), "miss");
+  assert.equal((await get("Otro Reino-Horde")).status, 404);
+  // Revoking a member and deleting their prices drops the cached answer too.
+  assert.equal((await f.post("/api/guild/members/revoke", {memberId: ana.id, purge: true}, owner)).status, 200);
+  assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_timing_cache").get().n, 0);
 });
