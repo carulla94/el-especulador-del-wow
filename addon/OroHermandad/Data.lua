@@ -300,14 +300,17 @@ Data.WATCH = {
 }
 Data.CATEGORY_ORDER = {"metal", "piedra", "gema", "hierba", "piel", "tela", "pocion", "elixir", "frasco", "comida",
                        "venda", "encantar", "elemental", "otro"}
--- Lo que tu addon vigila y tu subidor envía, pero no se comparte con la hermandad por el addon (Relay.lua): lo que
--- entró en la 0.5.0. Así los mensajes entre compañeros son los mismos que en la 0.4.0 (9 partes por escaneo) y se
--- entienden versiones distintas.
-Data.LOCAL_ONLY = {13445, 21546, 6373,
+-- Lo que entró en la 0.5.0 (la pesca). En la 0.5.0 no se compartía con la hermandad; desde la 0.5.1 sí, para que el
+-- pescado que escanea cualquiera llegue al panel. Un escaneo entero va en unas 12 partes en vez de 9 (el tope son 16), y
+-- la 0.4.0 y la 0.5.0 lo entienden igual: se quedan con lo que conocen y se saltan el resto (Relay.Parse).
+Data.FISHING_IDS = {13445, 21546, 6373,
                    6291, 6303, 6289, 6317, 6361, 6308, 21071, 6522, 6358, 6359, 6362, 8365, 21153, 4603, 13754, 13758,
                    13756, 13755, 13759, 13760, 13889, 13893, 13888, 13422, 13757,
                    4592, 5095, 4593, 21072, 6657, 4594, 8364, 21217, 6887, 13927, 13930, 13929, 13932, 13933, 13934, 13935,
                    6370, 6371, 13423}
+-- Lo que tu addon vigila y tu subidor envía, pero no se comparte con la hermandad por el addon (Relay.lua): nada desde
+-- la 0.5.1 (en la 0.5.0 era Data.FISHING_IDS).
+Data.LOCAL_ONLY = {}
 Data.CATEGORY_LABELS = {
   metal = "Metal", piedra = "Piedra", gema = "Gema", hierba = "Hierba", piel = "Piel", tela = "Tela",
   pocion = "Poción", elixir = "Elixir", frasco = "Frasco", comida = "Comida", venda = "Venda",

@@ -588,7 +588,7 @@ test("Una OroHermandadHist de la 0.3.1 (esquema 1) pasa al 2 sin perder nada", f
   local H = freshHistory(unit)
   local loaded = H.Load(copy(file.OroHermandadHist), {db = copy(file.OroHermandadDB), market = function() return MARKET end})
   current = nil
-  eq(loaded.schema, 2); eq(loaded.addon, "0.5.0")
+  eq(loaded.schema, 2); eq(loaded.addon, "0.5.1")
   local n = 0
   for key, market in pairs(before.markets) do
     local now = loaded.markets[key]
@@ -617,7 +617,7 @@ test("Una OroHermandadHist del esquema 2 se carga y se guarda sin cambiar nada (
   -- El archivo es de la 0.4.0: al cargarlo solo cambia la versión que lo escribe.
   eq(file.OroHermandadHist.addon, "0.4.0")
   local expected = copy(file.OroHermandadHist)
-  expected.addon = "0.5.0"
+  expected.addon = "0.5.1"
   eq(dump(loaded), dump(expected), "idéntica al cargar")
   H.BeforeSave()
   eq(dump(loaded), dump(expected), "idéntica al guardar")
@@ -677,13 +677,13 @@ local function obsFrom(items, seen)
   return {seen = seen, s = tostring(seen), items = out}
 end
 
-test("Topes: lo tuyo (1,25 MB) se mide sin lo de los compañeros, que tiene sus 2 MB y sus pasos", function()
+test("Topes: lo tuyo (1,25 MB) se mide sin lo de los compañeros, que tiene sus 3 MB y sus pasos", function()
   current = unit
   local H = freshHistory(unit)
-  -- Los compañeros solo comparten la lista de la 0.4.0 (114 objetos); lo tuyo es la lista fija entera (161).
+  -- Desde la 0.5.1 los compañeros comparten la lista fija entera (161 objetos), como lo tuyo.
   local fixed = H.SharedIDs()
   local today = Spec.DayIndex(NOW)
-  -- Lo tuyo cabe (161 objetos x 120 días, ~860 KB) y lo de 6 compañeros también (~560 KB), pero juntos pasan de
+  -- Lo tuyo cabe (161 objetos x 120 días, ~860 KB) y lo de 6 compañeros también (~800 KB), pero juntos pasan de
   -- 1,25 MB: lo tuyo no se recorta.
   local own = bigItems(H.FixedIDs(), 120, 4, 14 * 4, NOW)
   local mateItems = bigItems(fixed, 15, 4, 12, NOW)
@@ -750,7 +750,7 @@ test("Topes: lo tuyo (1,25 MB) se mide sin lo de los compañeros, que tiene sus 
     for _, item in pairs(entry.items) do eq(#Spec.DecodeDays(item.d), 15, "sus 15 días") end
   end
   eq(n25, 25, "los 25")
-  -- Al salir (BeforeSave), con lo que llegó en la sesión: los 40 compañeros que admite un mercado, activos (114
+  -- Al salir (BeforeSave), con lo que llegó en la sesión: los 40 compañeros que admite un mercado, activos (161
   -- objetos, 15 días, 3 escaneos al día), siguen todos con el día de hoy y los 2 anteriores, que el subidor envía.
   H.Load({schema = 2, markets = {}}, {db = {}, market = function() return MARKET end})
   local live = H.Hist()
@@ -876,7 +876,7 @@ test("Puesta al día: el PC con el subidor pide al entrar y recibe por susurro l
   slash(jusep, "sondeo")
   text = table.concat(Stub.printed, "\n")
   assert(has(text, "Precios compartidos: 1 compañero en este mercado, último escaneo recibido hace "), text)
-  assert(has(text, "subidor: automático (aviso del PC: sí) · compartir: sí · ") and has(text, " KB de 2048 KB"), text)
+  assert(has(text, "subidor: automático (aviso del PC: sí) · compartir: sí · ") and has(text, " KB de 3072 KB"), text)
   assert(not has(text, HA) and not has(text, "Ána"), "sin nombres ni códigos en el sondeo")
   net.jusep = jusep
 end)
@@ -1490,7 +1490,7 @@ end)
 -- Otra hermandad del mismo reino: lo de aquí no llega a los clientes de las pruebas anteriores.
 local OTHER = "Los de Siempre"
 local FIXED_IDS = unit.History.FixedIDs()
--- Un escaneo de la lista fija (161 objetos) con precios de 6 cifras: se comparten 114, en 9 partes por escaneo.
+-- Un escaneo de la lista fija (161 objetos) con precios de 6 cifras: se comparten los 161, en 12 partes por escaneo.
 local function wholeScan(seed)
   local items = {}
   for i, id in ipairs(FIXED_IDS) do items[id] = {60000 + ((i * 7919 + seed * 104729) % 900000), 1000 + (i * 37) % 4000, 100 + i % 50} end
@@ -1538,7 +1538,7 @@ test("Puesta al día con 12 compañeros a la vez: llegan los 24 escaneos (48 ser
     parts = parts + #sentBy(m, "^P3|", "WHISPER")
   end
   eq(got, 24, "los 24 escaneos")
-  assert(parts >= 24 * 7 and parts <= 24 * 12, "un susurro por parte: " .. parts)
+  assert(parts >= 24 * 10 and parts <= 24 * 14, "un susurro por parte: " .. parts)
   current = up
   assert(up.Relay.Stats().lastReason ~= "demasiadas series", "sin series descartadas por llenas")
   current = nil
@@ -1546,7 +1546,7 @@ test("Puesta al día con 12 compañeros a la vez: llegan los 24 escaneos (48 ser
   for _, m in ipairs(mates) do logout(m) end
 end)
 
-test("Respuesta llena: el resto llega solo, sin huecos y sin /oro sync (4 escaneos de 9 partes en dos días)", function()
+test("Respuesta llena: el resto llega solo, sin huecos y sin /oro sync (4 escaneos de 12 partes en dos días)", function()
   local names = {"Pidiente", "Nadia"}
   local nadia = member("Nadia", names)
   login(nadia, 30)
@@ -1568,7 +1568,7 @@ test("Respuesta llena: el resto llega solo, sin huecos y sin /oro sync (4 escane
         list[#list + 1] = {R.D36(a, 0, 2147483647), R.D36(b, 0, 2147483647), R.D36(c2, 0, 2147483647), R.D36(d, 0, 2147483647)}
       end
       return list
-    end)()), 9, "9 partes por escaneo")
+    end)()), 12, "12 partes por escaneo")
   end
   run(3600)
   local up = member("Pidiente", names, {marker = true})
@@ -1586,7 +1586,7 @@ test("Respuesta llena: el resto llega solo, sin huecos y sin /oro sync (4 escane
   run(3600)
   local asks = #sentBy(up, "^Q3|", "GUILD")
   assert(asks >= 2 and asks <= 3, "peticiones: " .. asks)
-  eq(#sentBy(nadia, "^P3|", "WHISPER"), 4 * 9, "cada escaneo, una vez")
+  eq(#sentBy(nadia, "^P3|", "WHISPER"), 4 * 12, "cada escaneo, una vez")
   run(3600)
   eq(#sentBy(up, "^Q3|", "GUILD"), asks, "y no pide más")
   -- Por susurro (un compañero que vuelve a entrar): la petición solo a él también sigue hasta tenerlo todo.

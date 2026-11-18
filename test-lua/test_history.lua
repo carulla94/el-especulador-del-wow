@@ -87,7 +87,7 @@ Stub.fire("PLAYER_LOGIN")
 Stub.fire("PLAYER_ENTERING_WORLD", true, false)
 Stub.runTimers(30)
 
-test("TOC: versión 0.5.0, OroHermandadHist guardado y Spec/History/Relay en su sitio", function()
+test("TOC: versión 0.5.1, OroHermandadHist guardado y Spec/History/Relay en su sitio", function()
   local files, sv, versionLine = {}, nil, nil
   for line in io.lines(DIR .. "OroHermandad.toc") do
     if line:match("%.lua$") then files[#files + 1] = line end
@@ -96,7 +96,7 @@ test("TOC: versión 0.5.0, OroHermandadHist guardado y Spec/History/Relay en su 
   end
   local pos = {}
   for i, f in ipairs(files) do pos[f] = i end
-  eq(versionLine, "0.5.0", "versión"); eq(ns.Core.VERSION, "0.5.0", "Core.VERSION")
+  eq(versionLine, "0.5.1", "versión"); eq(ns.Core.VERSION, "0.5.1", "Core.VERSION")
   eq(sv, "OroHermandadDB, OroHermandadHist", "SavedVariables de la cuenta")
   eq(pos["Spec.lua"], pos["Items.lua"] + 1, "Spec después de Items")
   eq(pos["History.lua"], pos["Prices.lua"] + 1, "History después de Prices")
@@ -106,7 +106,7 @@ end)
 
 test("Al cargar: poda, salta lo corrupto y deja solo mercados y objetos válidos", function()
   local h = OroHermandadHist
-  eq(h.schema, 2); eq(h.addon, "0.5.0")
+  eq(h.schema, 2); eq(h.addon, "0.5.1")
   local keys = {}
   for k in pairs(h.markets) do keys[#keys + 1] = tostring(k) end
   eq(table.concat(keys, ","), KEY, "solo el mercado válido")
@@ -150,19 +150,18 @@ test("Lista vigilada: 161 fijos con categorías del contrato, la cesta dentro, 1
     end
   end
   eq(n, 161, "objetos fijos")
-  -- Lo de la 0.5.0 (pesca) se vigila pero no se comparte: lo compartido es la lista de la 0.4.0, en su orden.
-  local localOnly = {}
-  for _, id in ipairs(Data.LOCAL_ONLY) do
-    assert(seenIDs[id], "solo local pero vigilado: " .. id); assert(not localOnly[id], "repetido " .. id)
-    localOnly[id] = true; assert(not History.IsShared(id), "no se comparte " .. id)
+  -- Lo de la 0.5.0 (pesca) se vigila y, desde la 0.5.1, también se comparte: lo compartido es la lista fija entera,
+  -- en su orden.
+  local fishing = {}
+  for _, id in ipairs(Data.FISHING_IDS) do
+    assert(seenIDs[id], "la pesca está vigilada: " .. id); assert(not fishing[id], "repetido " .. id)
+    fishing[id] = true; assert(History.IsShared(id), "se comparte " .. id)
   end
-  eq(#Data.LOCAL_ONLY, 47, "lo de la pesca")
+  eq(#Data.FISHING_IDS, 47, "lo de la pesca")
+  eq(#Data.LOCAL_ONLY, 0, "nada se queda sin compartir")
   local shared = History.SharedIDs()
-  eq(#shared, 114, "lo que se comparte, como en la 0.4.0")
-  local pos = 0
-  for _, id in ipairs(History.FixedIDs()) do
-    if not localOnly[id] then pos = pos + 1; eq(shared[pos], id, "mismo orden que la lista fija") end
-  end
+  eq(#shared, 161, "lo que se comparte: la lista fija entera")
+  for i, id in ipairs(History.FixedIDs()) do eq(shared[i], id, "mismo orden que la lista fija") end
   for _, id in ipairs(Data.BASKET) do assert(seenIDs[id], "falta de la cesta " .. id) end
   -- Lo que da la recolección y lo que usa la fundición se puede valorar (lo que vende un mercader no hace falta).
   for prof, nodes in pairs(Data.GATHER) do
@@ -529,7 +528,7 @@ test("/oro sondeo: todo lo que hay que comprobar en el juego, sin nombres de per
   assert(_G.OroHermandadTextFrame.edit.__highlighted, "seleccionado para copiar")
   local chat = table.concat(Stub.printed, "\n")
   for _, want in ipairs({
-    "Oro de Hermandad 0.5.0 · sondeo ", "cliente 1.60.1.70707 (interfaz 16001)",
+    "Oro de Hermandad 0.5.1 · sondeo ", "cliente 1.60.1.70707 (interfaz 16001)",
     "Auctionator 11.0.9-forever · __dbversion 8", "escaneos oídos sí", "SCAN_DAY_0 de Auctionator: 1577833200 (igual",
     "Escaneo completo (", "replicateInfo: 1 texto, 2 número, 3 número", "[3] cantidad ", "[17] itemID ",
     "Escaneo de resumen (", "itemKey {battlePetSpeciesID=número, itemID=número",
@@ -688,7 +687,7 @@ end)
 test("PLAYER_LOGOUT deja el historial listo para guardar", function()
   OroHermandadHist.addon = "otra"
   Stub.fire("PLAYER_LOGOUT")
-  eq(OroHermandadHist.addon, "0.5.0")
+  eq(OroHermandadHist.addon, "0.5.1")
   assert(Spec.EstimateSize(OroHermandadHist) <= Spec.MAX_BYTES)
 end)
 

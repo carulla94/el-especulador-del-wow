@@ -9,7 +9,7 @@
 -- profesiones ni nada de OroHermandadDB u OroHermandadCharDB.
 -- Esquema 2 (0.4.0): cada mercado lleva además `self` (los códigos de tus personajes) y `obs`, los precios de la lista
 -- fija que han compartido tus compañeros de hermandad al terminar sus escaneos completos (Relay.lua), con 15 días de
--- días, 72 h de puntos y su propio tope de 2 MB. Cada compañero va con un código de 8 cifras (un hash del nombre
+-- días, 72 h de puntos y su propio tope de 3 MB. Cada compañero va con un código de 8 cifras (un hash del nombre
 -- del personaje y de la hermandad), nunca con su nombre. Ese código es seudónimo, no anónimo: quien conozca la lista
 -- de la hermandad podría calcularlo.
 local _, ns = ...
@@ -37,7 +37,7 @@ local isInt = Spec.IsInt
 local hist                     -- OroHermandadHist (la tabla viva que el juego guarda al salir)
 local db = {}                  -- OroHermandadDB: estado privado (extras vigilados, día de la última importación)
 local marketKeyFn              -- función de Core que da "Reino-Facción"
-local version = "0.5.0"
+local version = "0.5.1"
 local loadInfo = {}            -- cómo se cargó OroHermandadHist (para /oro sondeo)
 local shapes = {}              -- tipo de escaneo -> forma de su primera fila (para /oro sondeo)
 local queue, running = {}, nil
@@ -156,7 +156,8 @@ for _, cat in ipairs(Data.CATEGORY_ORDER or Spec.CATEGORIES) do
     if not FIXED[id] and Spec.IsCategory(cat) then FIXED[id] = cat; FIXED_ORDER[#FIXED_ORDER + 1] = id end
   end
 end
--- Lo que se comparte con la hermandad (Relay.lua): la lista fija menos Data.LOCAL_ONLY, en el mismo orden.
+-- Lo que se comparte con la hermandad (Relay.lua): la lista fija menos Data.LOCAL_ONLY (vacía desde la 0.5.1, así que
+-- toda la lista fija), en el mismo orden.
 local SHARED, SHARED_ORDER, LOCAL_ONLY = {}, {}, {}
 for _, id in ipairs(Data.LOCAL_ONLY or {}) do LOCAL_ONLY[id] = true end
 for _, id in ipairs(FIXED_ORDER) do
@@ -324,7 +325,7 @@ History.OBS_SCAN_SECONDS = 4 * 86400     -- escaneos aplicados que se recuerdan
 History.OBS_SCANS = 64
 History.OBS_STALE = 15 * 86400           -- un compañero sin escaneos en 15 días se olvida
 History.OBS_PER_MARKET = 40
-History.OBS_MAX_BYTES = 2048 * 1024      -- tope propio (40 compañeros con sus 15 días), aparte de los 1,25 MB de lo tuyo
+History.OBS_MAX_BYTES = 3072 * 1024      -- tope propio (40 compañeros con sus 15 días de 161 objetos; 2 MB hasta la 0.5.0, con 114), aparte de los 1,25 MB de lo tuyo
 History.SELF_MAX = 10
 
 local function isHash(h) return type(h) == "string" and #h == 8 and not h:find("[^0-9a-f]") end
@@ -470,7 +471,7 @@ local function obsSize(h)
 end
 History.ObsSize = obsSize
 
--- Si lo de los compañeros pasa de 2 MB: (1) sus puntos de más de 24 h, (2) sus días de más de 7 días, (3) de más de
+-- Si lo de los compañeros pasa de 3 MB: (1) sus puntos de más de 24 h, (2) sus días de más de 7 días, (3) de más de
 -- 3 días, (4) todos sus puntos y, solo si aún no cabe, (5) se van compañeros, el de escaneo más viejo primero (de
 -- todos los mercados). Así lo último que se pierde es lo que el subidor aún tiene que enviar (los días de hoy y de
 -- los 2 anteriores de cada compañero). Devuelve el paso (0 = cabía) y el tamaño.
@@ -590,7 +591,7 @@ end
 -- En ADDON_LOADED. saved: lo que el juego cargó en OroHermandadHist (nil si nada). opts: db (OroHermandadDB ya
 -- preparado), market (función "Reino-Facción"), version, dbLoaded (OroHermandadDB venía del archivo).
 -- Limpia, poda (120 días, 14 días de puntos; lo de los compañeros, 15 días y 72 h) y deja lo tuyo en 1,25 MB o menos
--- (medido sin lo de los compañeros, que tiene su propio tope de 2 MB). Devuelve la tabla que debe quedar en
+-- (medido sin lo de los compañeros, que tiene su propio tope de 3 MB). Devuelve la tabla que debe quedar en
 -- OroHermandadHist.
 function History.Load(saved, opts)
   opts = opts or {}
@@ -633,7 +634,7 @@ end
 function History.Hist() return hist end
 function History.LoadInfo() return loadInfo end
 
--- En PLAYER_LOGOUT, antes de que el juego escriba el archivo: los topes de 1,25 MB (lo tuyo) y 2 MB (lo de los
+-- En PLAYER_LOGOUT, antes de que el juego escriba el archivo: los topes de 1,25 MB (lo tuyo) y 3 MB (lo de los
 -- compañeros, ya podado) también para lo de esta sesión. Devuelve paso y tamaño de cada uno.
 function History.BeforeSave()
   if not hist then return nil end

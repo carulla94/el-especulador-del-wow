@@ -11,7 +11,9 @@
 -- Invisible: aquí nada escribe en el chat, suena, abre ventanas ni toca Auctionator o la subasta. Los fallos van a
 -- Relay.lastError (solo los enseña /oro sondeo). Se envía por la cola de Guild.lua (después de lo de profesiones y
 -- nunca en combate, instancias ni con los mensajes de addon restringidos) y lo pesado va por tandas de C_Timer.
--- Los 0.2.x/0.3.x ignoran P3 y Q3 (para ellos son mensajes de un tipo desconocido).
+-- Los 0.2.x/0.3.x ignoran P3 y Q3 (para ellos son mensajes de un tipo desconocido). Desde la 0.5.1 un P3 lleva la
+-- lista fija entera (161 objetos, con la pesca, en unas 12 partes); la 0.4.0 y la 0.5.0 se saltan los objetos que no
+-- comparten (History.IsShared) y se quedan con el resto.
 local _, ns = ...
 local Spec, History, Guild = ns.Spec, ns.History, ns.Guild
 local Relay = {}

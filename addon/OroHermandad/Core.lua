@@ -5,7 +5,7 @@ local Guild, UI, Tooltip, Extras, History, Spec = ns.Guild, ns.UI, ns.Tooltip, n
 local Core = {}
 ns.Core = Core
 
-Core.VERSION = "0.5.0"
+Core.VERSION = "0.5.1"
 
 local DEFAULTS = {mode = "lazy", autoOpen = true, sound = true, tooltip = true}
 -- Un escaneo de resumen cuenta como completo si trae al menos esta parte de los resultados del último que contó
@@ -946,7 +946,7 @@ end
 handlers.COMMODITY_SEARCH_RESULTS_UPDATED = commodityResults
 handlers.COMMODITY_SEARCH_RESULTS_ADDED = commodityResults
 
--- Justo antes de que el juego escriba los SavedVariables: el historial no pasa de 1,25 MB (lo tuyo) y 2 MB (lo de
+-- Justo antes de que el juego escriba los SavedVariables: el historial no pasa de 1,25 MB (lo tuyo) y 3 MB (lo de
 -- los compañeros).
 function handlers.PLAYER_LOGOUT() History.BeforeSave() end
 

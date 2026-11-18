@@ -829,11 +829,12 @@ test("the heatmap draws 42 cells, fills only what has enough scans and rings the
 const fishAt = (y, m, d) => Math.floor((Date.UTC(y, m - 1, d, 12) / 1000 - E.DAY0) / 86400);
 const priced = (id, price, fields = {}) => stock(id, {cat: "comida", Rs: price, price: today(price), spark: [], ...fields});
 
-test("the fishing tables only use watched items or merchant goods, and Data.LOCAL_ONLY is what 0.5.0 added", () => {
+test("the fishing tables only use watched items or merchant goods, and Data.FISHING_IDS is what 0.5.0 added", () => {
   const lua = read("addon/OroHermandad/Data.lua");
-  const start = lua.indexOf("Data.LOCAL_ONLY = {") + "Data.LOCAL_ONLY = {".length;
+  const start = lua.indexOf("Data.FISHING_IDS = {") + "Data.FISHING_IDS = {".length;
   const localOnly = lua.slice(start, lua.indexOf("}", start)).match(/\d+/g).map(Number);
   assert.equal(localOnly.length, 47);
+  assert.match(lua, /^Data\.LOCAL_ONLY = \{\}\r?$/m, "since 0.5.1 the addon shares the fish too");
   const watched = new Set(Object.values(WATCHLIST).flat());
   assert.equal(watched.size, 161);
   for (const id of localOnly) assert.ok(watched.has(id), `${id} is watched`);
