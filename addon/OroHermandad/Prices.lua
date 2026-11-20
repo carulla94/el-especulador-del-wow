@@ -1,6 +1,8 @@
--- Oro de Hermandad: precios a través de la API pública de Auctionator (Auctionator.API.v1).
--- Cada llamada se detecta antes (type == "function") y va dentro de pcall: si Auctionator falta, aún no ha
--- cargado su base (antes de PLAYER_LOGIN) o cambia, el addon sigue funcionando sin precios.
+-- Oro de Hermandad: precios de la subasta. Desde la 0.6.0 hay dos fuentes: lo que vio el escáner propio (Scanner.lua,
+-- su caché de precios del mercado actual) y la API pública de Auctionator (Auctionator.API.v1), que es opcional. De
+-- cada objeto se usa el precio más reciente de los dos (a igualdad de días, el propio).
+-- Cada llamada a Auctionator se detecta antes (type == "function") y va dentro de pcall: si Auctionator falta, aún no
+-- ha cargado su base (antes de PLAYER_LOGIN) o cambia, el addon sigue funcionando con lo que haya escaneado él.
 local ADDON, ns = ...
 local Prices = {}
 ns.Prices = Prices
@@ -99,20 +101,51 @@ function Prices.Init(saved, perChar)
   if type(perChar) == "table" then merchant = perChar end
 end
 
+-- El escáner propio (Scanner.lua) se busca al llamar: Prices carga antes que él, y tras actualizar con solo un /reload
+-- puede no estar.
+local function scanner()
+  local s = ns.Scanner
+  if type(s) == "table" and type(s.OwnPrice) == "function" then return s end
+  return nil
+end
+
+-- Precio propio de un objeto en el mercado actual: cobre y días desde que se vio (0 = hoy), o nil.
+local function ownQuote(id)
+  local s = scanner()
+  if not s then return nil end
+  local ok, price, age = pcall(s.OwnPrice, id)
+  if ok and type(price) == "number" and price > 0 and type(age) == "number" and age >= 0 then return price, floor(age) end
+  return nil
+end
+
+local function ownAvailable()
+  local s = scanner()
+  if not s or type(s.HasPrices) ~= "function" then return false end
+  local ok, any = pcall(s.HasPrices)
+  return ok and any == true
+end
+
 function Prices.Available()
-  return has("GetAuctionPriceByItemID")
+  return has("GetAuctionPriceByItemID") or ownAvailable()
 end
 
 function Prices.Capabilities()
+  local own = ownAvailable()
+  local s = scanner()
+  local ownAuto = false
+  if s and type(s.Mode) == "function" then
+    local ok, mode = pcall(s.Mode)
+    ownAuto = ok and mode == "auto"
+  end
   return {
-    prices = has("GetAuctionPriceByItemID"),
+    prices = Prices.Available(),
     byLink = has("GetAuctionPriceByItemLink"),
-    age = has("GetAuctionAgeByItemID"),
+    age = has("GetAuctionAgeByItemID") or own,
     vendor = has("GetVendorPriceByItemID"),
     watch = has("RegisterForDBUpdate"),
     shopping = Prices.CanShop(),
     advancedSearch = has("MultiSearchAdvanced"),
-    autoscan = Prices.AutoscanEnabled(),
+    autoscan = ownAuto or Prices.AutoscanEnabled(),
   }
 end
 
@@ -126,7 +159,7 @@ local function auctionPrice(id)
 end
 
 -- Último precio mínimo que Auctionator vio en la subasta, en cobre (por unidad).
-function Prices.Price(itemID)
+function Prices.AuctionatorPrice(itemID)
   local id = toID(itemID)
   if not id then return nil end
   return cached("p", id, auctionPrice)
@@ -153,20 +186,47 @@ end
 -- Días desde que Auctionator vio el objeto (0 = hoy, por día de calendario).
 -- Si hay precio pero no edad, el dato es más viejo que el historial de Auctionator:
 -- devuelve HISTORY_DAYS + 1 y true ("al menos").
-function Prices.Age(itemID)
+function Prices.AuctionatorAge(itemID)
   local id = toID(itemID)
   if not id then return nil end
   local age = cached("a", id, auctionAge)
   if age then return age, false end
-  if Prices.Price(id) then return Prices.HISTORY_DAYS + 1, true end
+  if Prices.AuctionatorPrice(id) then return Prices.HISTORY_DAYS + 1, true end
   return nil
 end
 
-function Prices.Quote(itemID)
-  local price = Prices.Price(itemID)
-  if not price then return nil end
-  local age, atLeast = Prices.Age(itemID)
+-- El más reciente de los dos: precio, días y "al menos" (solo Auctionator). A igualdad de días gana el propio.
+local function best(id)
+  local own, ownAge = ownQuote(id)
+  local price = Prices.AuctionatorPrice(id)
+  if not price then
+    if own then return own, ownAge, false end
+    return nil
+  end
+  local age, atLeast = Prices.AuctionatorAge(id)
+  if own and (age == nil or ownAge <= age) then return own, ownAge, false end
   return price, age, atLeast
+end
+
+-- Precio mínimo de la subasta por unidad, en cobre: el más reciente de lo escaneado por el addon y de Auctionator.
+function Prices.Price(itemID)
+  local id = toID(itemID)
+  if not id then return nil end
+  return (best(id))
+end
+
+function Prices.Age(itemID)
+  local id = toID(itemID)
+  if not id then return nil end
+  local price, age, atLeast = best(id)
+  if not price then return nil end
+  return age, atLeast
+end
+
+function Prices.Quote(itemID)
+  local id = toID(itemID)
+  if not id then return nil end
+  return best(id)
 end
 
 ------------------------------------------------------------------------------------------------
@@ -344,18 +404,25 @@ function Prices.LastScanTime()
   return nil
 end
 
--- Opción interna de Auctionator (no es API pública): escanear al abrir la subasta. nil si no se puede leer.
-function Prices.AutoscanEnabled()
+-- Opciones internas de Auctionator (no son API pública). nil si no se pueden leer.
+local function auctionatorOption(name)
   local ok, value = pcall(function()
     local config = _G.Auctionator and _G.Auctionator.Config
     if type(config) ~= "table" or type(config.Options) ~= "table" or type(config.Get) ~= "function" then return nil end
-    local key = config.Options.AUTOSCAN
+    local key = config.Options[name]
     if key == nil then return nil end
     return config.Get(key)
   end)
   if ok and type(value) == "boolean" then return value end
   return nil
 end
+
+-- Escanear al abrir la subasta.
+function Prices.AutoscanEnabled() return auctionatorOption("AUTOSCAN") end
+
+-- Ese escaneo es el completo (replicate) y no el de resumen. Con las dos opciones, Oro de Hermandad no pide el suyo
+-- solo: el de Auctionator no tiene tiempo de espera y se quedaría sin respuesta; se lee su respuesta.
+function Prices.AutoscanReplicate() return auctionatorOption("REPLICATE_SCAN") end
 
 ------------------------------------------------------------------------------------------------
 -- Comprar lo que falta

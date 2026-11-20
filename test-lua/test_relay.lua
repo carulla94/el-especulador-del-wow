@@ -90,7 +90,8 @@ local function run(seconds)
       local started = os.clock()
       best.fn()
       if tickLog and best.owner == tickLog.owner then
-        tickLog.max = math.max(tickLog.max, (os.clock() - started) * 1000)
+        if (tickLog.skip or 0) > 0 then tickLog.skip = tickLog.skip - 1
+        else tickLog.max = math.max(tickLog.max, (os.clock() - started) * 1000) end
         tickLog.n = tickLog.n + 1
       end
       current = prev
@@ -188,10 +189,13 @@ end
 
 -- Los archivos del addon según su TOC, sin los de skip (tras actualizar con solo un /reload, el juego carga la lista
 -- de archivos de la versión anterior: sin Relay.lua).
-local function loadWithout(dir, skip)
+-- replace: archivo -> otra ruta (la Relay.lua de la 0.5.1 con el resto de la 0.6.0, por ejemplo).
+local function loadWithout(dir, skip, replace)
   local ns = {}
   for line in io.lines(dir .. "/OroHermandad.toc") do
-    if line:match("%.lua$") and not skip[line] then assert(loadfile(dir .. "/" .. line))("OroHermandad", ns) end
+    if line:match("%.lua$") and not skip[line] then
+      assert(loadfile((replace and replace[line]) or (dir .. "/" .. line)))("OroHermandad", ns)
+    end
   end
   return ns
 end
@@ -218,7 +222,8 @@ local function newClient(o)
   current = c
   _G.OroHermandadDB, _G.OroHermandadCharDB, _G.OroHermandadHist = db, o.cdb, o.hist
   local before = #Stub.frames
-  c.ns = o.skip and loadWithout(DIR, o.skip) or Stub.loadAddon(DIR)
+  c.ns = (o.skip or o.relayFile) and loadWithout(DIR, o.skip or {}, o.relayFile and {["Relay.lua"] = o.relayFile})
+         or Stub.loadAddon(DIR)
   for i = before + 1, #Stub.frames do c.frames[#c.frames + 1] = Stub.frames[i] end
   current = c
   fire(c, "ADDON_LOADED", "OroHermandad")
@@ -416,7 +421,9 @@ test("Con 40 compañeros en memoria, un escaneo nuevo y rehacer la caché van po
   c.History.Market(MARKET, true).obs = obs
   c.Relay.GuildItems("Otro-Horde"); c.Relay.GuildItems(MARKET) -- caché nueva: los 40 compañeros, por tandas
   current = nil
-  tickLog = {owner = c, max = 0, n = 0, clean = true}
+  -- La primera tanda tras recoger la basura de montar los 40 compañeros paga que el sistema devuelva memoria al
+  -- proceso de pruebas (no es del addon, y depende de lo grande que sea este archivo): no se cuenta.
+  tickLog = {owner = c, max = 0, n = 0, clean = true, skip = 1}
   run(120)
   local rebuild = tickLog
   -- Un compañero nuevo comparte un escaneo de 114 objetos: solo se decodifica lo suyo.
@@ -588,7 +595,7 @@ test("Una OroHermandadHist de la 0.3.1 (esquema 1) pasa al 2 sin perder nada", f
   local H = freshHistory(unit)
   local loaded = H.Load(copy(file.OroHermandadHist), {db = copy(file.OroHermandadDB), market = function() return MARKET end})
   current = nil
-  eq(loaded.schema, 2); eq(loaded.addon, "0.5.1")
+  eq(loaded.schema, 2); eq(loaded.addon, "0.6.0")
   local n = 0
   for key, market in pairs(before.markets) do
     local now = loaded.markets[key]
@@ -617,7 +624,7 @@ test("Una OroHermandadHist del esquema 2 se carga y se guarda sin cambiar nada (
   -- El archivo es de la 0.4.0: al cargarlo solo cambia la versión que lo escribe.
   eq(file.OroHermandadHist.addon, "0.4.0")
   local expected = copy(file.OroHermandadHist)
-  expected.addon = "0.5.1"
+  expected.addon = "0.6.0"
   eq(dump(loaded), dump(expected), "idéntica al cargar")
   H.BeforeSave()
   eq(dump(loaded), dump(expected), "idéntica al guardar")
@@ -654,7 +661,7 @@ test("Carga: códigos raros, compañeros viejos, objetos fuera de la lista fija 
 end)
 
 -- Historial grande como el de test_history.lua: ids x días con puntos.
-local function bigItems(ids, days, pointsPerDay, keepPoints, now)
+local function bigItems(ids, days, pointsPerDay, keepPoints, now, samples)
   local today = Spec.DayIndex(now)
   local items = {}
   for i, id in ipairs(ids) do
@@ -664,7 +671,8 @@ local function bigItems(ids, days, pointsPerDay, keepPoints, now)
       recs[#recs + 1] = {d = d, lo = p, hi = p + (d * 13) % 9000, last = p + 400, qty = 100 + (id + d) % 4000, scans = 1 + d % 5, src = "o"}
     end
     for k = 0, keepPoints - 1 do
-      pts[#pts + 1] = {t = now - k * math.floor(86400 / pointsPerDay), lo = 25000 + (id + k * 7) % 125000, qty = 100 + k % 3000, qty5 = 10 + k % 300}
+      pts[#pts + 1] = {t = now - k * math.floor(86400 / pointsPerDay), lo = 25000 + (id + k * 7) % 125000, qty = 100 + k % 3000, qty5 = 10 + k % 300,
+                       dt = samples and (905 + k % 6000) or nil, sold = samples and (k * 13) % 4000 or nil}
     end
     items[id] = {n = "Objeto de la lista número " .. i, c = Spec.CATEGORIES[1 + i % 14], v = 125 + i,
                  d = Spec.EncodeDays(recs), p = Spec.EncodePoints(pts)}
@@ -677,22 +685,23 @@ local function obsFrom(items, seen)
   return {seen = seen, s = tostring(seen), items = out}
 end
 
-test("Topes: lo tuyo (1,25 MB) se mide sin lo de los compañeros, que tiene sus 3 MB y sus pasos", function()
+test("Topes: lo tuyo (2 MB) se mide sin lo de los compañeros, que tiene sus 4 MB y sus 6 pasos", function()
   current = unit
   local H = freshHistory(unit)
   -- Desde la 0.5.1 los compañeros comparten la lista fija entera (161 objetos), como lo tuyo.
   local fixed = H.SharedIDs()
   local today = Spec.DayIndex(NOW)
-  -- Lo tuyo cabe (161 objetos x 120 días, ~860 KB) y lo de 6 compañeros también (~800 KB), pero juntos pasan de
-  -- 1,25 MB: lo tuyo no se recorta.
+  -- Lo tuyo cabe (161 objetos x 120 días, ~860 KB) y lo de 14 compañeros también (~1,9 MB), pero juntos pasan de
+  -- 2 MB: lo tuyo no se recorta.
+  eq(H.OBS_MAX_BYTES, 4096 * 1024, "0.6.0: 4 MB")
   local own = bigItems(H.FixedIDs(), 120, 4, 14 * 4, NOW)
   local mateItems = bigItems(fixed, 15, 4, 12, NOW)
   local mates = {}
-  for i = 1, 6 do mates[string.format("%08x", 9 + i)] = obsFrom(mateItems, NOW - 60 * i) end
+  for i = 1, 14 do mates[string.format("%08x", 9 + i)] = obsFrom(mateItems, NOW - 60 * i) end
   local hist = {schema = 2, markets = {[MARKET] = {updated = NOW, items = copy(own), dep = {}, obs = mates}}}
   local loaded = H.Load(hist, {db = {}, market = function() return MARKET end})
   local info = H.LoadInfo()
-  assert(Spec.EstimateSize(loaded) > Spec.MAX_BYTES, "juntos pasan de 1,25 MB: " .. Spec.EstimateSize(loaded))
+  assert(Spec.EstimateSize(loaded) > Spec.MAX_BYTES, "juntos pasan de 2 MB: " .. Spec.EstimateSize(loaded))
   eq(info.shrinkStep, 0, "lo tuyo no se recorta"); eq(info.obsStep, 0, "lo de los compañeros cabe")
   eq(dump(loaded.markets[MARKET].items), dump(own), "lo tuyo intacto")
   -- Los pasos, con un tope a medida (ShrinkObs lo admite): 6 compañeros de 15 días con 3 días de puntos.
@@ -704,19 +713,22 @@ test("Topes: lo tuyo (1,25 MB) se mide sin lo de los compañeros, que tiene sus 
   local function each(h, fn)
     for _, entry in pairs(h.markets[MARKET].obs or {}) do for _, item in pairs(entry.items) do fn(item) end end
   end
-  -- Tamaño tras cada paso, calculado aparte: (1) puntos de 24 h, (2) días de 7 días, (3) de 3 días, (4) sin puntos.
+  -- Tamaño tras cada paso, calculado aparte (0.6.0): (1) puntos de 48 h, (2) días de 7 días, (3) puntos de 24 h,
+  -- (4) días de 3 días, (5) sin puntos.
   local probe = build(6)
   local sizes = {H.ObsSize(probe)}
-  each(probe, function(item) item.p = Spec.EncodePoints(Spec.PrunePoints(Spec.DecodePoints(item.p), NOW, 86400)) end)
-  sizes[2] = H.ObsSize(probe)
-  each(probe, function(item) item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, 7)) end)
-  sizes[3] = H.ObsSize(probe)
-  each(probe, function(item) item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, 3)) end)
-  sizes[4] = H.ObsSize(probe)
-  each(probe, function(item) item.p = "" end)
-  sizes[5] = H.ObsSize(probe)
-  for k = 1, 4 do assert(sizes[k + 1] < sizes[k], "cada paso ahorra: " .. k) end
-  for step = 1, 4 do
+  local function points(seconds)
+    return function(item) item.p = Spec.EncodePoints(Spec.PrunePoints(Spec.DecodePoints(item.p), NOW, seconds)) end
+  end
+  local function days(keep)
+    return function(item) item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, keep)) end
+  end
+  for k, apply in ipairs({points(2 * 86400), days(7), points(86400), days(3), function(item) item.p = "" end}) do
+    each(probe, apply)
+    sizes[k + 1] = H.ObsSize(probe)
+  end
+  for k = 1, 5 do assert(sizes[k + 1] < sizes[k], "cada paso ahorra: " .. k) end
+  for step = 1, 5 do
     local h = build(6)
     local got, size = H.ShrinkObs(h, NOW, sizes[step + 1])
     eq(got, step, "paso " .. step); assert(size <= sizes[step + 1], "cabe: " .. size)
@@ -724,49 +736,62 @@ test("Topes: lo tuyo (1,25 MB) se mide sin lo de los compañeros, que tiene sus 
     for _ in pairs(h.markets[MARKET].obs) do n = n + 1 end
     eq(n, 6, "paso " .. step .. ": siguen todos los compañeros")
     each(h, function(item)
-      local days = Spec.DecodeDays(item.d)
-      eq(days[#days].d, today, "paso " .. step .. ": el día de hoy sigue")
-      assert(days[1].d > today - (step >= 3 and 3 or step >= 2 and 7 or 15), "paso " .. step .. ": días " .. days[1].d)
-      for _, p in ipairs(Spec.DecodePoints(item.p)) do assert(step < 4 and p.t > NOW - 86400, "paso " .. step .. ": puntos") end
+      local d = Spec.DecodeDays(item.d)
+      eq(d[#d].d, today, "paso " .. step .. ": el día de hoy sigue")
+      assert(d[1].d > today - (step >= 4 and 3 or step >= 2 and 7 or 15), "paso " .. step .. ": días " .. d[1].d)
+      local pts = Spec.DecodePoints(item.p)
+      if step >= 5 then eq(#pts, 0, "paso 5: sin puntos") end
+      for _, p in ipairs(pts) do
+        assert(p.t > NOW - (step >= 3 and 86400 or 2 * 86400), "paso " .. step .. ": puntos")
+      end
     end)
   end
-  -- Paso 5, solo si ni así cabe: se van compañeros, el de escaneo más viejo primero.
+  -- Paso 6, solo si ni así cabe: se van compañeros, el de escaneo más viejo primero.
   local h5 = build(12)
-  local step5, size5 = H.ShrinkObs(h5, NOW, sizes[5])
-  eq(step5, 5, "paso 5"); assert(size5 <= sizes[5], size5)
+  local step5, size5 = H.ShrinkObs(h5, NOW, sizes[6])
+  eq(step5, 6, "paso 6"); assert(size5 <= sizes[6], size5)
   local kept = {}
   for h in pairs(h5.markets[MARKET].obs) do kept[#kept + 1] = h end
   table.sort(kept)
   assert(#kept >= 5 and #kept < 12, "algunos fuera: " .. #kept)
   for i = 1, #kept do eq(kept[i], string.format("%08x", 0x100 + i), "se quedan los más nuevos") end
-  -- Con el tope de verdad: 25 compañeros con 15 días y 3 días de puntos solo pierden los puntos de más de 24 h.
-  local h25 = build(25)
+  -- Con el tope de verdad (SPEC §2.15, unos 20 compañeros): 22 compañeros a 8 escaneos al día con ventas (15 días y
+  -- 72 h de puntos) solo pierden los puntos de más de 48 h.
+  local h25 = {schema = 2, markets = {[MARKET] = {items = {}, dep = {}, obs = {}}}}
+  local eight = bigItems(fixed, 15, 8, 24, NOW, true)
+  for i = 1, 22 do h25.markets[MARKET].obs[string.format("%08x", 0x100 + i)] = obsFrom(eight, NOW - i * 60) end
+  local rawObs = H.ObsSize(h25)
   local out = H.Load(h25, {db = {}, market = function() return MARKET end})
   local i1 = H.LoadInfo()
-  eq(i1.obsStep, 1, "25 compañeros: paso 1"); assert(i1.obsSize <= H.OBS_MAX_BYTES, i1.obsSize)
+  assert(rawObs > H.OBS_MAX_BYTES, "pasan de 4 MB: " .. rawObs)
+  eq(i1.obsStep, 1, "22 compañeros a 8 al día: paso 1"); assert(i1.obsSize <= H.OBS_MAX_BYTES, i1.obsSize)
   local n25 = 0
   for _, entry in pairs(out.markets[MARKET].obs) do
     n25 = n25 + 1
-    for _, item in pairs(entry.items) do eq(#Spec.DecodeDays(item.d), 15, "sus 15 días") end
+    for _, item in pairs(entry.items) do
+      eq(#Spec.DecodeDays(item.d), 15, "sus 15 días")
+      for _, p in ipairs(Spec.DecodePoints(item.p)) do assert(p.t > NOW - 2 * 86400, "puntos de 48 h") end
+    end
   end
-  eq(n25, 25, "los 25")
+  eq(n25, 22, "los 22")
   -- Al salir (BeforeSave), con lo que llegó en la sesión: los 40 compañeros que admite un mercado, activos (161
-  -- objetos, 15 días, 3 escaneos al día), siguen todos con el día de hoy y los 2 anteriores, que el subidor envía.
+  -- objetos, 15 días, 8 escaneos al día), siguen todos con el día de hoy y los 2 anteriores, que el subidor envía.
   H.Load({schema = 2, markets = {}}, {db = {}, market = function() return MARKET end})
   local live = H.Hist()
   live.markets[MARKET] = {items = {}, dep = {}, obs = {}}
-  for i = 1, H.OBS_PER_MARKET do live.markets[MARKET].obs[string.format("%08x", 0x200 + i)] = obsFrom(bigItems(fixed, 15, 3, 9, NOW), NOW - i * 60) end
+  for i = 1, H.OBS_PER_MARKET do live.markets[MARKET].obs[string.format("%08x", 0x200 + i)] = obsFrom(bigItems(fixed, 15, 8, 24, NOW), NOW - i * 60) end
   local before = H.ObsSize(live)
   local expected = copy(live.markets[MARKET].obs)
   local started = os.clock()
   local _, _, stepOut, sizeOut = H.BeforeSave()
   local ms = (os.clock() - started) * 1000
-  assert(stepOut <= 2 and sizeOut <= H.OBS_MAX_BYTES, "al salir " .. tostring(stepOut) .. " " .. tostring(sizeOut))
+  assert(stepOut >= 1 and stepOut <= 3 and sizeOut <= H.OBS_MAX_BYTES, "al salir " .. tostring(stepOut) .. " " .. tostring(sizeOut))
   -- Tras la carga los textos se recortan cortándolos (sin decodificar): da lo mismo que el camino largo.
   for _, entry in pairs(expected) do
     for _, item in pairs(entry.items) do
-      if stepOut >= 1 then item.p = Spec.EncodePoints(Spec.PrunePoints(Spec.DecodePoints(item.p), NOW, 86400)) end
+      if stepOut >= 1 then item.p = Spec.EncodePoints(Spec.PrunePoints(Spec.DecodePoints(item.p), NOW, 2 * 86400)) end
       if stepOut >= 2 then item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, 7)) end
+      if stepOut >= 3 then item.p = Spec.EncodePoints(Spec.PrunePoints(Spec.DecodePoints(item.p), NOW, 86400)) end
     end
   end
   eq(dump(live.markets[MARKET].obs), dump(expected), "recortar cortando = decodificar y volver a codificar")
@@ -876,7 +901,7 @@ test("Puesta al día: el PC con el subidor pide al entrar y recibe por susurro l
   slash(jusep, "sondeo")
   text = table.concat(Stub.printed, "\n")
   assert(has(text, "Precios compartidos: 1 compañero en este mercado, último escaneo recibido hace "), text)
-  assert(has(text, "subidor: automático (aviso del PC: sí) · compartir: sí · ") and has(text, " KB de 3072 KB"), text)
+  assert(has(text, "subidor: automático (aviso del PC: sí) · compartir: sí · ") and has(text, " KB de 4096 KB"), text)
   assert(not has(text, HA) and not has(text, "Ána"), "sin nombres ni códigos en el sondeo")
   net.jusep = jusep
 end)
@@ -1166,7 +1191,7 @@ test("Basura, mensajes propios y de otro mercado: sin errores ni efectos", funct
 end)
 
 ---------------------------------------------------------------------------
--- 7. Quien comparte: 15 min, buzón, respuestas (retraso, 10 min, 4 escaneos y 24 mensajes), compartir off
+-- 7. Quien comparte: 15 min, buzón, respuestas (retraso, 10 min, 4 escaneos y 28 mensajes), compartir off
 ---------------------------------------------------------------------------
 test("Como mucho un anuncio cada 15 min por personaje; el más nuevo sale al cumplirse", function()
   ana.sent = {}
@@ -1190,7 +1215,7 @@ test("Como mucho un anuncio cada 15 min por personaje; el más nuevo sale al cum
   assert(t1 and t2, "tiempos")
 end)
 
-test("Respuestas: una por persona cada 10 min, con retraso al azar, del más viejo, 4 escaneos y 24 mensajes", function()
+test("Respuestas: una por persona cada 10 min, con retraso al azar, del más viejo, 4 escaneos y 28 mensajes", function()
   -- Un compañero nuevo, con 6 escaneos de 114 objetos en su buzón (9 partes cada uno).
   local big = newClient({name = "Luis", random = function() return 2 end})
   login(big, 30)
@@ -1220,8 +1245,8 @@ test("Respuestas: una por persona cada 10 min, con retraso al azar, del más vie
   end
   local parts = series[order[1]].total
   assert(parts >= 7 and parts <= 12, "114 objetos en unas 9 partes: " .. parts)
-  eq(#order, math.min(4, math.floor(24 / parts)), "escaneos enteros que caben en 24 mensajes")
-  assert(#out <= 24 and #out + parts > 24, "24 mensajes como mucho: " .. #out)
+  eq(#order, math.min(4, math.floor(28 / parts)), "escaneos enteros que caben en 28 mensajes")
+  assert(#out <= 28 and #out + parts > 28, "28 mensajes como mucho: " .. #out)
   for _, seq in ipairs(order) do eq(series[seq].n, series[seq].total, "solo escaneos enteros") end
   assert(series[order[1]].t < series[order[#order]].t, "del más viejo al más nuevo")
   for i, seq in ipairs(order) do
@@ -1575,7 +1600,7 @@ test("Respuesta llena: el resto llega solo, sin huecos y sin /oro sync (4 escane
   login(up, 25)
   quiet("respuesta llena", function() run(300) end)
   local h = hashOf(up, "Nadia")
-  eq(scansAt(up, h), 2, "la primera respuesta: los 2 más viejos (24 mensajes como mucho)")
+  eq(scansAt(up, h), 2, "la primera respuesta: los 2 más viejos (28 mensajes como mucho)")
   local first = Spec.DecodeDays(obsOf(up, h).items[FIXED_IDS[1]].d)
   eq(#first, 1, "un día"); eq(first[1].d, day1, "el más viejo")
   quiet("lo que faltaba", function() run(900) end)
@@ -1701,6 +1726,270 @@ test("Actualizado con solo un /reload (sin Relay.lua): todo lo demás funciona, 
   assert(c.ns.Core.Context(), "el contexto del motor se arma")
   current = nil
   logout(c)
+end)
+
+---------------------------------------------------------------------------
+-- 12. 0.6.0: ventas estimadas en el P3 (contrato C2), compatibles con la 0.4.x/0.5.x
+---------------------------------------------------------------------------
+local V06 = "test-lua/fixtures/v06/"
+local function nn(x) if x == json.null then return nil end return x end
+local P3S = json.decode(read(V06 .. "p3-samples.json"))
+-- La Relay.lua de la 0.5.1 tal cual (git show f645d15), con el resto del addon de la sesión.
+local function legacyRelay()
+  local L = {Spec = unit.ns.Spec, History = unit.ns.History, Guild = unit.ns.Guild}
+  assert(loadfile(LEGACY .. "Relay-0.5.1.lua"))("OroHermandad", L)
+  return L.Relay
+end
+
+test("C2 p3-samples: PackP3 da los mensajes exactos y Parse lo esperado; la 0.5.1 los acepta y se queda con los precios", function()
+  eq(Stub.sha256File(V06 .. "p3-samples.json"), Stub.V06_SHA256["p3-samples.json"], "copia exacta")
+  eq(Stub.sha256File(LEGACY .. "Relay-0.5.1.lua"), Stub.LEGACY_RELAY_SHA256, "la Relay.lua de la 0.5.1")
+  eq(P3S.marketTag, TAG); eq(P3S.maxParts, 16)
+  local old = legacyRelay()
+  for _, c in ipairs(P3S.cases) do
+    local items = {}
+    for i, it in ipairs(c.items) do items[i] = {it[1], it[2], it[3], it[4], nn(it[5])} end
+    local msgs = R.PackP3(c.seq, TAG, c.t, items, nn(c.dt))
+    eq(#msgs, #c.messages, c.name .. ": partes"); eq(#msgs, c.parts)
+    for i, m in ipairs(msgs) do eq(m, c.messages[i], c.name .. " parte " .. i); assert(#m <= 250, #m) end
+    assert(#msgs <= 16)
+    -- 0.6.0: dt y la venta de cada objeto.
+    local got, got051 = {}, {}
+    for _, m in ipairs(c.messages) do
+      local msg = R.Parse(m, NOW, "GUILD", TAG)
+      assert(msg, c.name .. ": aceptado")
+      eq(msg.dt, nn(c.parsed060.dt), c.name .. ": dt")
+      for _, it in ipairs(msg.items) do got[#got + 1] = it end
+      local legacy = old.Parse(m, NOW, "GUILD", TAG)
+      assert(legacy, c.name .. ": la 0.5.1 lo acepta")
+      for _, it in ipairs(legacy.items) do got051[#got051 + 1] = it end
+    end
+    eq(#got, #c.parsed060.items, c.name .. ": objetos")
+    for i, want in ipairs(c.parsed060.items) do
+      local it = got[i]
+      eq(it[1], want.id); eq(it[2], want.lo); eq(it[3], want.qty); eq(it[4], want.qty5); eq(it[5], nn(want.sold), c.name .. " venta de " .. want.id)
+    end
+    eq(#got051, #c.parsed051.items, c.name .. ": objetos en la 0.5.1")
+    for i, want in ipairs(c.parsed051.items) do
+      eq(dump({got051[i][1], got051[i][2], got051[i][3], got051[i][4]}), dump(want), c.name .. " (0.5.1)")
+    end
+    -- Sin ventas, el P3 de la 0.5.1 byte a byte.
+    if c.dt == json.null then
+      local plain = {}
+      for i, it in ipairs(c.items) do plain[i] = {it[1], it[2], it[3], it[4]} end
+      local before = old.PackP3(c.seq, TAG, c.t, plain)
+      for i, m in ipairs(before) do eq(msgs[i], m, c.name .. ": como la 0.5.1") end
+    end
+  end
+  eq(#P3S.cases[3].messages, 14, "el peor caso: 14 partes")
+  for _, e in ipairs(P3S.edge060) do
+    local msg, why = R.Parse(e.message, NOW, "GUILD", TAG)
+    if e.refused then
+      eq(msg, nil, e.why); eq(why, e.refused, e.why)
+      eq(old.Parse(e.message, NOW, "GUILD", TAG), nil, e.why .. " (0.5.1)")
+    else
+      assert(msg, e.why)
+      eq(msg.dt, nn(e.dt), e.why)
+      for i, want in ipairs(e.items) do
+        eq(msg.items[i][1], want.id); eq(msg.items[i][2], want.lo); eq(msg.items[i][5], nn(want.sold), e.why)
+      end
+      assert(old.Parse(e.message, NOW, "GUILD", TAG), e.why .. ": la 0.5.1 lo acepta")
+    end
+  end
+  -- dt fuera de rango en PackP3: sale sin ventas (el P3 de siempre).
+  eq(R.PackP3(1, TAG, NOW, {{2772, 1, 1, 1, 5}}, 300)[1], R.PackP3(1, TAG, NOW, {{2772, 1, 1, 1}})[1])
+end)
+
+test("C2: las partes de un escaneo con dt distintos se quedan con los precios y sin ventas", function()
+  local c = member("Mezcla", {"Mezcla", "Dos"})
+  login(c, 30)
+  local items = {}
+  for i, id in ipairs(FIXED_IDS) do items[i] = {id, 1000 + i * 37, 500 + i * 11, 100 + i, 1000 + i} end
+  local a = R.PackP3(5, TAG, unix() - 60, items, 1800)
+  local b = R.PackP3(5, TAG, unix() - 60, items, 3600)
+  eq(#a, #b)
+  inject(c, a[1], "GUILD", "Dos-GritodeGuerra")
+  for i = 2, #b do inject(c, b[i], "GUILD", "Dos-GritodeGuerra") end
+  run(30)
+  local entry = obsOf(c, hashOf(c, "Dos"))
+  assert(entry, "se guarda")
+  for _, id in ipairs(FIXED_IDS) do
+    local pts = Spec.DecodePoints(entry.items[id].p)
+    eq(pts[#pts].dt, nil, "sin ventas"); assert(pts[#pts].lo > 1000)
+  end
+  logout(c)
+end)
+
+test("C2 en directo: A comparte con ventas; B (0.6.0) las guarda y avisa a quien escucha; C (0.5.1) se queda con los precios", function()
+  local names = {"Vende", "Bea", "Carla"}
+  local a = member("Vende", names); login(a, 30)
+  local b = member("Bea", names); login(b, 30)
+  local c = member("Carla", names, {relayFile = LEGACY .. "Relay-0.5.1.lua"}); login(c, 30)
+  local heard = {}
+  b.History.OnPoint(function(event, ...) heard[#heard + 1] = {event, ...} end)
+  local agg, sold = {}, {}
+  for i, id in ipairs(FIXED_IDS) do
+    agg[id] = {lo = 1000 + i * 37, qty = 500 + i * 11, qty5 = 100 + i}
+    if i % 3 ~= 0 then sold[id] = 1000 + i end
+  end
+  local t = unix() - 30
+  current = a
+  assert(a.History.RecordAggregate("full", agg, true, {t = t, dt = 7200, sold = sold}))
+  current = nil
+  quiet("en directo con ventas", function() run(60) end)
+  local live = sentBy(a, "^P3|", "GUILD")
+  assert(#live >= 12 and #live <= 16, "partes: " .. #live)
+  for _, e in ipairs(live) do
+    assert(#e.msg <= 250 and e.msg:sub(-4) == "|5k0", "cada parte con dt: " .. e.msg:sub(-12))
+  end
+  local hA = hashOf(b, "Vende")
+  local entry = obsOf(b, hA)
+  assert(entry, "B lo guarda")
+  for _, id in ipairs(FIXED_IDS) do
+    local pts = Spec.DecodePoints(entry.items[id].p)
+    local p = pts[#pts]
+    eq(p.t, t); eq(p.lo, agg[id].lo); eq(p.dt, sold[id] and 7200 or nil, "dt de " .. id); eq(p.sold, sold[id], "venta de " .. id)
+  end
+  local points, done = 0, nil
+  for _, h in ipairs(heard) do
+    if h[1] == "point" and h[3] == hA then
+      points = points + 1
+      eq(h[2], MARKET); eq(h[5], t); eq(h[8], sold[h[4]] and 7200 or nil); eq(h[9], sold[h[4]])
+    elseif h[1] == "done" then done = h end
+  end
+  eq(points, #FIXED_IDS, "un aviso por punto, con el código (nunca el nombre)")
+  assert(done and done[2] == MARKET and done[3] == hA and done[4] == t, "y el final")
+  eq(heard[#heard][1], "done")
+  local entryC = obsOf(c, hashOf(c, "Vende"))
+  assert(entryC, "la 0.5.1 lo guarda")
+  for _, id in ipairs(FIXED_IDS) do
+    local p = Spec.DecodePoints(entryC.items[id].p)
+    eq(p[#p].lo, agg[id].lo, "precio en la 0.5.1"); eq(p[#p].dt, nil, "sin ventas en la 0.5.1")
+  end
+  -- El buzón guarda dt y sobrevive a la carga (sanitizeCDB); uno con dt roto vuelve a ser el P3 de siempre.
+  eq(a.CharDB.relay.out[#a.CharDB.relay.out].dt, 7200)
+  local saved = logout(a)
+  local broken = copy(saved.cdb.relay.out[#saved.cdb.relay.out])
+  broken.t, broken.dt = broken.t - 100, 99
+  table.insert(saved.cdb.relay.out, broken)
+  local a2 = member("Vende", names, {db = saved.db, cdb = saved.cdb, hist = saved.hist})
+  local out = a2.CharDB.relay.out
+  eq(out[#out].dt, 7200, "dt guardado")
+  eq(out[#out - 1].dt, nil, "dt roto fuera")
+  assert(not out[#out - 1].items:find("[^,:]*:[^,:]*:[^,:]*:[^,:]*:", 1), "y sus tokens con 4 subcampos")
+  logout(a2); logout(b); logout(c)
+end)
+
+test("Respuestas de 0.6.0: dos escaneos de 14 partes (28 mensajes); el tercero en la siguiente; la 0.5.1 recibe y pide el resto", function()
+  local names = {"Lleno", "Sube6", "Sube5"}
+  local lleno = member("Lleno", names)
+  login(lleno, 30)
+  for k = 1, 3 do
+    local agg, sold = {}, {}
+    for i, id in ipairs(FIXED_IDS) do
+      agg[id] = {lo = 1000 + i * 37 + k, qty = 500 + i * 11, qty5 = 100 + i}
+      sold[id] = 1000 + i
+    end
+    current = lleno
+    assert(lleno.History.RecordAggregate("full", agg, true, {t = unix() - 10, dt = 7200, sold = sold}))
+    current = nil
+    run(1000)
+  end
+  eq(#lleno.CharDB.relay.out, 3, "3 en el buzón")
+  run(3600)
+  for _, version in ipairs({"0.6.0", "0.5.1"}) do
+    local up = member(version == "0.6.0" and "Sube6" or "Sube5", names,
+      {marker = true, relayFile = version == "0.5.1" and (LEGACY .. "Relay-0.5.1.lua") or nil})
+    lleno.sent = {}
+    login(up, 25)
+    quiet("respuesta " .. version, function() run(300) end)
+    local h = hashOf(up, "Lleno")
+    eq(scansAt(up, h), 2, version .. ": la primera respuesta trae 2 escaneos")
+    eq(#sentBy(lleno, "^P3|", "WHISPER"), 28, version .. ": 28 mensajes")
+    if version == "0.6.0" then
+      local entry = obsOf(up, h)
+      local p = Spec.DecodePoints(entry.items[FIXED_IDS[1]].p)
+      eq(p[#p].dt, 7200, "con sus ventas")
+    end
+    quiet("lo que faltaba " .. version, function() run(900) end)
+    eq(scansAt(up, h), 3, version .. ": el tercero llega solo (la petición de lo que faltaba)")
+    logout(up)
+    run(700)
+  end
+  logout(lleno)
+end)
+
+-- Ejecuta un solo temporizador de la red simulada (el siguiente).
+local function runOne()
+  local best, index
+  for i, t in ipairs(timers) do
+    if not best or t.at < best.at or (t.at == best.at and t.n < best.n) then best, index = t, i end
+  end
+  if not best then return false end
+  table.remove(timers, index)
+  if best.at > Stub.gameTime then Stub.gameTime = best.at end
+  local prev = current
+  current = best.owner
+  best.fn()
+  current = prev
+  return true
+end
+
+test("Al salir: Relay.Flush termina el escaneo de un compañero a medias; los que esperaban no quedan como aplicados", function()
+  local names = {"Sale", "Uno", "Dos2"}
+  local c = member("Sale", names)
+  login(c, 30)
+  run(60)
+  eq(c.Relay.Idle(), true, "sin nada pendiente")
+  local items = {}
+  for i, id in ipairs(FIXED_IDS) do items[i] = {id, 2000 + i, 50, 10, i} end
+  current = c
+  for _, m in ipairs(R.PackP3(1, TAG, unix() - 60, items, 1800)) do inject(c, m, "GUILD", "Uno-GritodeGuerra") end
+  for _, m in ipairs(R.PackP3(2, TAG, unix() - 50, items, 1800)) do inject(c, m, "GUILD", "Dos2-GritodeGuerra") end
+  current = nil
+  -- Un solo turno de trabajo: empieza el primero (6 unidades).
+  local internals = c.Relay.Internals()
+  for _ = 1, 50 do
+    if c.Relay.Internals().applying and c.Relay.Internals().applying.index > 1 then break end
+    if not runOne() then break end
+  end
+  internals = c.Relay.Internals()
+  assert(internals.applying and internals.applying.index > 1 and internals.applying.index <= #FIXED_IDS, "a medias")
+  eq(#internals.inbox, 1, "el segundo espera")
+  eq(c.Relay.Idle(), false)
+  current = c
+  local h1, h2 = c.Relay.Hash("Uno-GritodeGuerra"), c.Relay.Hash("Dos2-GritodeGuerra")
+  local heard = 0
+  c.History.OnPoint(function(event, market, observer) if observer == h1 and event == "done" then heard = heard + 1 end end)
+  assert(c.Relay.Flush())
+  current = nil
+  eq(c.Relay.Internals().applying, nil, "terminado")
+  eq(heard, 1, "con su aviso de final")
+  local entry = obsOf(c, h1)
+  for _, id in ipairs(FIXED_IDS) do assert(entry.items[id] and entry.items[id].p ~= "", "objeto " .. id) end
+  eq(obsOf(c, h2), nil, "el que esperaba no está aplicado ni marcado en obs.s")
+  logout(c)
+end)
+
+test("Al salir justo después de grabar un escaneo: History.Flush lo escribe y Relay lo deja en el buzón en el acto", function()
+  local names = {"Recarga2", "Otro2"}
+  local c = member("Recarga2", names)
+  login(c, 30)
+  run(1000)
+  local agg = {}
+  for i, id in ipairs(FIXED_IDS) do agg[id] = {lo = 3000 + i, qty = 20, qty5 = 5} end
+  local t = unix()
+  current = c
+  assert(c.History.RecordAggregate("full", agg, true, {t = t, dt = 1800, sold = {[FIXED_IDS[1]] = 4}}))
+  c.History.Flush()
+  current = nil
+  local saved = logout(c)
+  local out = saved.cdb.relay.out
+  eq(out[#out].t, t, "en el buzón"); eq(out[#out].dt, 1800)
+  for i, id in ipairs(FIXED_IDS) do
+    local pts = Spec.DecodePoints(saved.hist.markets[MARKET] and saved.hist.markets[MARKET].items[id].p)
+    eq(pts[#pts].lo, 3000 + i, "punto de " .. id)
+  end
 end)
 
 test("Ningún error interno ni nada de precios enviado con los mensajes restringidos en toda la sesión", function()

@@ -22,6 +22,7 @@ Scan.lua
 Money.lua
 Guild.lua
 Relay.lua
+Scanner.lua
 UI.lua
 Tooltip.lua
 Extras.lua

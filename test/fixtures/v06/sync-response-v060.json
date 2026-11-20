@@ -1,0 +1,27 @@
+{
+ "about": "POST /api/guild/sync answers of the 0.6.0 panel. New fields: estado.mercados (per market of the upload: suben = members who uploaded in 14 days, aportan = persons who fed prices in 14 days, from GuildStore.freshness contributors/observers), subidor.ultima (newest uploader version the panel offers, the LATEST_UPLOADER constant), and markets[].sold (point samples stored by this upload). They are present on every 200 answer, duplicate included. 0.5.x uploaders ignore them; the 0.6.0 uploader must work without them (old panel). The marker takes the market entry with the most aportan (ties: the first by market name). Revision 2: quedan/dia = uploadsLeft and day of an accepted, non-duplicate answer that has both (old panels send them too); null = keep what the marker had (a duplicate answer has no uploadsLeft).",
+ "accepted": {
+  "accepted": true, "duplicate": false, "day": 2530, "rowsChanged": 412,
+  "markets": [{"market": "GritodeGuerra-Alliance", "items": 4, "days": 6, "points": 9, "deposits": 0, "sold": 5, "skippedItems": [], "skipped": null,
+    "observers": 3, "skippedObservers": [], "selfConflicts": []}],
+  "uploadsToday": 3, "uploadsLeft": 21, "message": "Envío aceptado: 412 cambios.",
+  "estado": {"mercados": [{"market": "GritodeGuerra-Alliance", "suben": 2, "aportan": 7}, {"market": "GritodeGuerra-Horde", "suben": 1, "aportan": 1}]},
+  "subidor": {"ultima": "0.6.0"}
+ },
+ "duplicate": {
+  "accepted": true, "duplicate": true, "rowsChanged": 0, "day": 2530, "message": "Este envío ya se había recibido: sin cambios.",
+  "estado": {"mercados": [{"market": "GritodeGuerra-Alliance", "suben": 2, "aportan": 7}]},
+  "subidor": {"ultima": "0.6.1"}
+ },
+ "oldPanel": {
+  "accepted": true, "duplicate": false, "day": 2530, "rowsChanged": 12,
+  "markets": [{"market": "GritodeGuerra-Alliance", "items": 2, "days": 2, "points": 2, "deposits": 0, "skippedItems": [], "skipped": null,
+    "observers": 1, "skippedObservers": [], "selfConflicts": []}],
+  "uploadsToday": 1, "uploadsLeft": 23, "message": "Envío aceptado: 12 cambios."
+ },
+ "markerFrom": {
+  "accepted": {"suben": 2, "aportan": 7, "nueva": null, "quedan": 21, "dia": 2530},
+  "duplicate": {"suben": 2, "aportan": 7, "nueva": "0.6.1", "quedan": null, "dia": null},
+  "oldPanel": {"suben": null, "aportan": null, "nueva": null, "quedan": 23, "dia": 2530}
+ }
+}

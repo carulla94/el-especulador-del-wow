@@ -1,0 +1,748 @@
+{
+ "about": "Spec.InferSold(base, current, dt, bandMin, own) -> sold, partial (contract C6, revision 2). base = the same character's previous full scan of one item: price levels ascending [[unitPrice, [[band, count], ...]], ...], each auction as [band 0..3 after the offset, units], in the order the scan read them (at most the 40 cheapest levels and 200 auctions, whole levels only); current = this scan's auctions of the item per unit price ({\"price\": [[band, count], ...]}, JSON keys are prices as text, at least every price up to the highest base price); dt = seconds between the two scans (905..7200); bandMin = minimum seconds left per band (default [0, 1800, 7200, 43200], read at runtime from C_AuctionHouse.GetTimeLeftBandInfo); own = units the scanning account bought of this item in (base.t, t] (COMMODITY_PURCHASED / ITEM_PURCHASED log). Own listings are excluded from both scans before this runs. Rule: pool = units of current auctions cheaper than the cheapest base level. For each base level, cheapest first: (1) match each old auction, in order, to an unused current auction at that price with the same count and band <= the old band (prefer the highest band, then the first index): unchanged; (2) the old auctions still unmatched, by count descending (stable), take the unused current auction with the largest count below theirs and band <= theirs (ties: higher band, then first index): partial buy of old - new units (auctions are cancelled whole, so this is a purchase); (3) unused current auctions at that price add their units to pool; (4) if the level had no partial buy and no vanished auction, stop; (5) add the partial units; each vanished old auction whose band minimum >= dt (it could not have expired) counts its units minus repost = min(units, pool), and pool decreases by repost (vanished auctions with an unsafe band neither count nor use the pool); (6) stop after a level where an old auction survived (matched in 1 or 2). sold = max(0, partial + counted - own). It is an estimate, not a minimum: a cheapest auction withdrawn without a repost counts as sold; sales hidden by reposts or new units at the same or a lower price, and sales of auctions posted between the two scans, are not seen.",
+ "version": 2,
+ "bandMin": [
+  0,
+  1800,
+  7200,
+  43200
+ ],
+ "cases": [
+  {
+   "note": "nothing changed",
+   "base": [
+    [
+     100,
+     [
+      [
+       3,
+       20
+      ],
+      [
+       3,
+       5
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "100": [
+     [
+      3,
+      20
+     ],
+     [
+      3,
+      5
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 0,
+   "partial": 0
+  },
+  {
+   "note": "partial buy at the cheapest level: sure units, stop there",
+   "base": [
+    [
+     100,
+     [
+      [
+       3,
+       20
+      ],
+      [
+       3,
+       5
+      ]
+     ]
+    ],
+    [
+     105,
+     [
+      [
+       3,
+       30
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "100": [
+     [
+      3,
+      20
+     ],
+     [
+      3,
+      2
+     ]
+    ],
+    "105": [
+     [
+      3,
+      30
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 3,
+   "partial": 3
+  },
+  {
+   "note": "cheapest level gone, next partly bought",
+   "base": [
+    [
+     100,
+     [
+      [
+       2,
+       20
+      ]
+     ]
+    ],
+    [
+     105,
+     [
+      [
+       2,
+       30
+      ]
+     ]
+    ],
+    [
+     110,
+     [
+      [
+       2,
+       50
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "105": [
+     [
+      2,
+      12
+     ]
+    ],
+    "110": [
+     [
+      2,
+      50
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 38,
+   "partial": 18
+  },
+  {
+   "note": "cheapest intact: a loss above it is not a sale (cancelled)",
+   "base": [
+    [
+     100,
+     [
+      [
+       2,
+       20
+      ]
+     ]
+    ],
+    [
+     105,
+     [
+      [
+       2,
+       30
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "100": [
+     [
+      2,
+      20
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 0,
+   "partial": 0
+  },
+  {
+   "note": "short band could have expired: not counted, the walk goes on",
+   "base": [
+    [
+     100,
+     [
+      [
+       0,
+       15
+      ]
+     ]
+    ],
+    [
+     105,
+     [
+      [
+       2,
+       30
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "105": [
+     [
+      2,
+      20
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 10,
+   "partial": 10
+  },
+  {
+   "note": "medium band is safe up to dt 1800",
+   "base": [
+    [
+     100,
+     [
+      [
+       1,
+       10
+      ]
+     ]
+    ]
+   ],
+   "current": {},
+   "dt": 1800,
+   "own": 0,
+   "sold": 10,
+   "partial": 0
+  },
+  {
+   "note": "medium band not safe at dt 2700",
+   "base": [
+    [
+     100,
+     [
+      [
+       1,
+       10
+      ]
+     ]
+    ]
+   ],
+   "current": {},
+   "dt": 2700,
+   "own": 0,
+   "sold": 0,
+   "partial": 0
+  },
+  {
+   "note": "medium band safe at dt 905 (baseline from a refresh-only scan)",
+   "base": [
+    [
+     100,
+     [
+      [
+       1,
+       10
+      ]
+     ]
+    ]
+   ],
+   "current": {},
+   "dt": 905,
+   "own": 0,
+   "sold": 10,
+   "partial": 0
+  },
+  {
+   "note": "long band safe up to 7200",
+   "base": [
+    [
+     100,
+     [
+      [
+       2,
+       10
+      ]
+     ]
+    ]
+   ],
+   "current": {},
+   "dt": 7200,
+   "own": 0,
+   "sold": 10,
+   "partial": 0
+  },
+  {
+   "note": "a new listing at the same price is not a sale",
+   "base": [
+    [
+     100,
+     [
+      [
+       2,
+       20
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "100": [
+     [
+      2,
+      20
+     ],
+     [
+      3,
+      5
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 0,
+   "partial": 0
+  },
+  {
+   "note": "vanished and the same units reappear at the same price: repost, not counted",
+   "base": [
+    [
+     100,
+     [
+      [
+       2,
+       20
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "100": [
+     [
+      3,
+      25
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 0,
+   "partial": 0
+  },
+  {
+   "note": "mixed bands on one level: only safe vanished auctions count",
+   "base": [
+    [
+     100,
+     [
+      [
+       0,
+       5
+      ],
+      [
+       1,
+       5
+      ],
+      [
+       2,
+       5
+      ],
+      [
+       3,
+       5
+      ]
+     ]
+    ]
+   ],
+   "current": {},
+   "dt": 2700,
+   "own": 0,
+   "sold": 10,
+   "partial": 0
+  },
+  {
+   "note": "every level gone",
+   "base": [
+    [
+     100,
+     [
+      [
+       2,
+       10
+      ]
+     ]
+    ],
+    [
+     101,
+     [
+      [
+       2,
+       10
+      ]
+     ]
+    ],
+    [
+     102,
+     [
+      [
+       3,
+       10
+      ]
+     ]
+    ]
+   ],
+   "current": {},
+   "dt": 3600,
+   "own": 0,
+   "sold": 30,
+   "partial": 0
+  },
+  {
+   "note": "empty baseline",
+   "base": [],
+   "current": {
+    "100": [
+     [
+      3,
+      5
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 0,
+   "partial": 0
+  },
+  {
+   "note": "undercut war: X cancels 20 at 100 and reposts at 98 under Y's 10 at 99: no sale",
+   "base": [
+    [
+     100,
+     [
+      [
+       3,
+       20
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "98": [
+     [
+      3,
+      20
+     ]
+    ],
+    "99": [
+     [
+      3,
+      10
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 0,
+   "partial": 0
+  },
+  {
+   "note": "partly bought, the rest reposted cheaper: only the bought part counts",
+   "base": [
+    [
+     100,
+     [
+      [
+       3,
+       200
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "97": [
+     [
+      3,
+      50
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 150,
+   "partial": 0
+  },
+  {
+   "note": "a partial buy counts even with new cheaper units",
+   "base": [
+    [
+     100,
+     [
+      [
+       3,
+       40
+      ],
+      [
+       3,
+       20
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "99": [
+     [
+      3,
+      30
+     ]
+    ],
+    "100": [
+     [
+      3,
+      40
+     ],
+     [
+      3,
+      5
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 15,
+   "partial": 15
+  },
+  {
+   "note": "own purchases are subtracted",
+   "base": [
+    [
+     100,
+     [
+      [
+       2,
+       20
+      ]
+     ]
+    ],
+    [
+     105,
+     [
+      [
+       2,
+       30
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "105": [
+     [
+      2,
+      25
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 12,
+   "sold": 13,
+   "partial": 5
+  },
+  {
+   "note": "own purchases larger than the estimate: 0",
+   "base": [
+    [
+     100,
+     [
+      [
+       2,
+       5
+      ]
+     ]
+    ]
+   ],
+   "current": {},
+   "dt": 1800,
+   "own": 40,
+   "sold": 0,
+   "partial": 0
+  },
+  {
+   "note": "the band may drop between scans: same auction",
+   "base": [
+    [
+     100,
+     [
+      [
+       3,
+       20
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "100": [
+     [
+      2,
+      20
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 0,
+   "partial": 0
+  },
+  {
+   "note": "the band cannot rise: a new 24 h auction, the old one vanished and its units reappeared (repost)",
+   "base": [
+    [
+     100,
+     [
+      [
+       2,
+       20
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "100": [
+     [
+      3,
+      20
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 0,
+   "partial": 0
+  },
+  {
+   "note": "two partial buys: each old auction takes the largest smaller survivor",
+   "base": [
+    [
+     100,
+     [
+      [
+       3,
+       50
+      ],
+      [
+       3,
+       30
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "100": [
+     [
+      3,
+      45
+     ],
+     [
+      3,
+      10
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 25,
+   "partial": 25
+  },
+  {
+   "note": "new cheaper units are used up by the first vanished auctions",
+   "base": [
+    [
+     100,
+     [
+      [
+       2,
+       10
+      ]
+     ]
+    ],
+    [
+     101,
+     [
+      [
+       2,
+       10
+      ]
+     ]
+    ],
+    [
+     102,
+     [
+      [
+       2,
+       10
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "95": [
+     [
+      3,
+      15
+     ]
+    ]
+   },
+   "dt": 1800,
+   "own": 0,
+   "sold": 15,
+   "partial": 0
+  },
+  {
+   "note": "unsafe vanished auctions do not use the repost pool",
+   "base": [
+    [
+     100,
+     [
+      [
+       0,
+       10
+      ]
+     ]
+    ],
+    [
+     101,
+     [
+      [
+       2,
+       10
+      ]
+     ]
+    ]
+   ],
+   "current": {
+    "99": [
+     [
+      3,
+      10
+     ]
+    ]
+   },
+   "dt": 3600,
+   "own": 0,
+   "sold": 0,
+   "partial": 0
+  }
+ ]
+}

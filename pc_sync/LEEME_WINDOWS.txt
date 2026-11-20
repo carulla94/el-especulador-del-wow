@@ -1,0 +1,55 @@
+Oro de Hermandad · Subidor (versión 0.6.0)
+==========================================
+
+Es la ventana que sube al panel de la hermandad los precios que guarda el addon Oro de Hermandad.
+No hay que instalar nada: Python va dentro de esta carpeta (runtime), es el oficial de python.org y
+está firmado. Basta con que 1 o 2 personas de la hermandad tengan el subidor abierto: el addon de los
+demás les pasa sus escaneos sin que se vea nada en el juego.
+
+
+EMPEZAR
+-------
+1. Clic derecho en el zip → Propiedades → marca «Desbloquear» → Aceptar.
+   (Si no, Windows puede bloquear «Abrir subidor.cmd» porque viene de internet.)
+2. Extrae la carpeta donde quieras (por ejemplo en Documentos). No la pongas dentro de la carpeta de WoW.
+3. Abre «Abrir subidor.cmd»; la primera vez te ofrece un acceso directo en el escritorio.
+
+La primera vez la ventana pide tres datos: la dirección del panel, la carpeta de World of Warcraft
+(la que contiene _forever_) y tu clave personal (empieza por gld_; te la da quien administra la
+hermandad). La clave se guarda cifrada con la protección de datos de Windows: solo tu usuario de
+Windows, en este PC, puede usarla.
+
+Deja la ventana abierta mientras juegas, o marca «Abrir el subidor al iniciar Windows» (se abre
+minimizada en la barra de tareas; nunca funciona oculta).
+
+
+QUÉ HACE Y QUÉ NO
+-----------------
+- WoW solo escribe el archivo al usar /reload o al salir del juego. Después de escanear la subasta,
+  pulsa «Guardar y subir» en el addon (o usa /reload) y el subidor lo envía en segundos.
+- Lee _forever_\WTF\Account\<CUENTA>\SavedVariables\OroHermandad.lua y envía solo los precios
+  (OroHermandadHist) y la estimación de ventas de cada escaneo. Nunca envía nombres de personajes:
+  cada uno va con un código de 8 cifras.
+- Solo escribe la carpeta Interface\AddOns\OroHermandad_Subidor (un aviso para el addon con el
+  estado del subidor) y, si lo pides, un acceso directo en el escritorio y el inicio con Windows.
+- Riesgo de baneo: muy bajo. El programa solo lee el archivo que WoW ya ha guardado y escribe una
+  carpeta pequeña de aviso; no toca el juego, ni su memoria, ni pulsa teclas. Es el mismo tipo de
+  programa que la app de TSM o WeakAuras Companion. Blizzard no certifica ningún programa, así que
+  nadie puede prometer «está permitido».
+
+
+ACTUALIZAR
+----------
+Cierra el subidor, desbloquea el zip nuevo y extrae su carpeta encima de la anterior (Reemplazar).
+Tu clave y tu configuración se conservan.
+
+Quien tiene el subidor actualiza primero el addon y el subidor (si no, el panel no recibe las
+ventas); después, el resto de la hermandad actualiza el addon.
+
+
+SI ALGO FALLA
+-------------
+- «Ver registro» abre %LOCALAPPDATA%\OroHermandad\registro.txt, con todo lo que ha hecho.
+- Si ya usabas el subidor antiguo que arrancaba oculto con Windows, la ventana te ofrece quitarlo.
+- «Más…» → «Borrar mis datos de este PC» borra la dirección, la carpeta, la clave cifrada y el
+  inicio con Windows. Para quitar el subidor del todo, haz eso y borra esta carpeta.

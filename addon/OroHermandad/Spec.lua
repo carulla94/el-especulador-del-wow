@@ -17,7 +17,12 @@ Spec.KEEP_DAYS = 120          -- días guardados por objeto
 Spec.KEEP_POINT_SECONDS = 14 * 86400
 Spec.MAX_POINTS = 120         -- puntos por objeto
 Spec.POINT_MERGE_SECONDS = 1800
-Spec.MAX_BYTES = 1280 * 1024  -- techo de OroHermandadHist en el archivo de SavedVariables (0.5.0: 161 objetos)
+Spec.MAX_BYTES = 2048 * 1024  -- techo de lo tuyo en OroHermandadHist (0.6.0: 8 escaneos al día con ventas; 1,25 MB hasta la 0.5.1)
+-- Ventas estimadas entre dos escaneos (0.6.0, contrato points-v2): un punto puede llevar dt (segundos entre los dos
+-- escaneos) y sold (unidades vendidas en ese intervalo).
+Spec.SAMPLE_DT_MIN = 600
+Spec.SAMPLE_DT_MAX = 7200
+Spec.SOLD_MAX = 1000000
 
 Spec.PRICE_MAX = 1000000000
 Spec.QTY_MAX = 1000000
@@ -93,11 +98,68 @@ end
 function Spec.WeekdayOf(d) return (d + 2) % 7 end
 
 ---------------------------------------------------------------------------
+-- Hora de España (contrato C5, el mismo que localSlot de src/timing.mjs: fixtures madrid-slots.json)
+---------------------------------------------------------------------------
+-- Horario de invierno UTC+1; de verano UTC+2 desde el último domingo de marzo a la 01:00 UTC (incluida) hasta el
+-- último domingo de octubre a la 01:00 UTC (sin incluir). Sin os.date ni la zona del PC: igual en todos los jugadores.
+local function daysFromCivil(y, m, d) -- días desde el 1-1-1970 (algoritmo de Howard Hinnant)
+  if m <= 2 then y = y - 1 end
+  local era = floor(y / 400)
+  local yoe = y - era * 400
+  local mp = (m + 9) % 12
+  local doy = floor((153 * mp + 2) / 5) + d - 1
+  local doe = yoe * 365 + floor(yoe / 4) - floor(yoe / 100) + doy
+  return era * 146097 + doe - 719468
+end
+
+local function yearOfDays(z)
+  z = z + 719468
+  local era = floor(z / 146097)
+  local doe = z - era * 146097
+  local yoe = floor((doe - floor(doe / 1460) + floor(doe / 36524) - floor(doe / 146096)) / 365)
+  local y = yoe + era * 400
+  local doy = doe - (365 * yoe + floor(yoe / 4) - floor(yoe / 100))
+  local mp = floor((5 * doy + 2) / 153)
+  if mp >= 10 then y = y + 1 end -- enero y febrero cuentan en el año siguiente del calendario civil
+  return y
+end
+
+local function lastSunday(y, m)
+  local last = (m == 12 and daysFromCivil(y + 1, 1, 1) or daysFromCivil(y, m + 1, 1)) - 1
+  return last - (last + 4) % 7 -- el 1-1-1970 fue jueves (4 con domingo 0)
+end
+
+local dstCache = {}
+local function summerOf(y)
+  local cached = dstCache[y]
+  if not cached then
+    cached = {lastSunday(y, 3) * 86400 + 3600, lastSunday(y, 10) * 86400 + 3600}
+    dstCache[y] = cached
+  end
+  return cached[1], cached[2]
+end
+
+-- Hora unix -> wd (lunes 0 ... domingo 6), hora (0..23), franja de 4 horas (0 = 00-04 h ... 5 = 20-24 h) y celda
+-- wd*6 + franja, en hora de España. nil si t no es un entero.
+function Spec.MadridSlot(t)
+  if not isInt(t, 0, Spec.TIME_MAX) then return nil end
+  local from, to = summerOf(yearOfDays(floor(t / 86400)))
+  local localT = t + ((t >= from and t < to) and 7200 or 3600)
+  local days = floor(localT / 86400)
+  local hour = floor((localT % 86400) / 3600)
+  local wd = (days + 3) % 7
+  local block = floor(hour / 4)
+  return wd, hour, block, wd * 6 + block
+end
+
+---------------------------------------------------------------------------
 -- Formato de OroHermandadHist (contrato 2)
 --   días:   "d,lo,hi,last,qty,scans,src;..." (src o = propio, a = importado de Auctionator; qty 0 = desconocida)
 --   puntos: "t,lo,qty,qty5;..." (t en segundos unix; qty5 = unidades hasta un 5 % sobre el mínimo, 0 si no se sabe)
+--           o, desde la 0.6.0, "t,lo,qty,qty5,dt,sold": la venta estimada entre dos escaneos (dt de 600 a 7200 s, sold
+--           de 0 a 1000000 unidades). Si dt o sold no valen, el punto se queda sin venta (nunca se pierde el precio).
 -- Los lectores se saltan los registros mal formados y no fallan nunca. Solo cifras decimales; los campos de más
--- al final de un registro se ignoran (por si una versión futura añade alguno).
+-- al final de un registro se ignoran (por si una versión futura añade alguno; la 0.5.x se salta así dt y sold).
 ---------------------------------------------------------------------------
 local function parseInt(text, lo, hi)
   if type(text) ~= "string" or text == "" or #text > 12 or text:find("[^0-9]") then return nil end
@@ -177,18 +239,30 @@ local function validPoint(p)
     and isInt(p.qty5, 0, Spec.QTY_MAX)
 end
 
+-- ¿Es (dt, sold) una venta válida? Las dos cifras o ninguna.
+local function validSample(dt, sold)
+  return isInt(dt, Spec.SAMPLE_DT_MIN, Spec.SAMPLE_DT_MAX) and isInt(sold, 0, Spec.SOLD_MAX)
+end
+Spec.ValidSample = validSample
+
 -- Dos puntos a menos de 30 min se juntan en el primero: lo = mín, qty = máx, y qty5 del punto más barato
--- (a igual precio, la mayor). Así juntar es conmutativo y la lista normalizada no cambia al normalizarla otra vez.
+-- (a igual precio, la mayor). La venta que queda es la de dt mayor (a igual dt, la de sold mayor); un punto sin venta
+-- nunca quita la del otro. Así juntar es conmutativo y la lista normalizada no cambia al normalizarla otra vez.
 local function mergePoint(a, b)
   local qty5 = a.qty5
   if b.lo < a.lo then qty5 = b.qty5 elseif b.lo == a.lo then qty5 = max(a.qty5, b.qty5) end
   a.lo, a.qty, a.qty5 = min(a.lo, b.lo), max(a.qty, b.qty), qty5
+  if b.dt and (not a.dt or b.dt > a.dt or (b.dt == a.dt and b.sold > a.sold)) then a.dt, a.sold = b.dt, b.sold end
 end
 
 function Spec.NormalizePoints(points)
   local list = {}
   for _, p in ipairs(type(points) == "table" and points or {}) do
-    if validPoint(p) then list[#list + 1] = {t = p.t, lo = p.lo, qty = p.qty, qty5 = p.qty5} end
+    if validPoint(p) then
+      local copy = {t = p.t, lo = p.lo, qty = p.qty, qty5 = p.qty5}
+      if validSample(p.dt, p.sold) then copy.dt, copy.sold = p.dt, p.sold end
+      list[#list + 1] = copy
+    end
   end
   table.sort(list, function(a, b) return a.t < b.t end)
   local merged = {}
@@ -208,6 +282,10 @@ function Spec.DecodePoints(text)
     local f = fields(entry)
     local p = {t = parseInt(f[1], 1, Spec.TIME_MAX), lo = parseInt(f[2], 1, Spec.PRICE_MAX),
                qty = parseInt(f[3], 0, Spec.QTY_MAX), qty5 = parseInt(f[4], 0, Spec.QTY_MAX)}
+    if f[5] then
+      local dt, sold = parseInt(f[5], Spec.SAMPLE_DT_MIN, Spec.SAMPLE_DT_MAX), parseInt(f[6], 0, Spec.SOLD_MAX)
+      if dt and sold then p.dt, p.sold = dt, sold end
+    end
     if validPoint(p) then list[#list + 1] = p end
   end
   return Spec.NormalizePoints(list)
@@ -215,7 +293,13 @@ end
 
 function Spec.EncodePoints(points)
   local parts = {}
-  for i, p in ipairs(Spec.NormalizePoints(points)) do parts[i] = table.concat({p.t, p.lo, p.qty, p.qty5}, ",") end
+  for i, p in ipairs(Spec.NormalizePoints(points)) do
+    if p.dt then
+      parts[i] = table.concat({p.t, p.lo, p.qty, p.qty5, p.dt, p.sold}, ",")
+    else
+      parts[i] = table.concat({p.t, p.lo, p.qty, p.qty5}, ",")
+    end
+  end
   return table.concat(parts, ";")
 end
 
@@ -262,10 +346,12 @@ function Spec.RecordScan(records, d, p, qty)
   return Spec.NormalizeDays(kept), true
 end
 
-function Spec.AddPoint(points, t, lo, qty, qty5)
+-- dt y sold (opcionales): la venta estimada entre el escaneo anterior y este; solo si las dos son válidas.
+function Spec.AddPoint(points, t, lo, qty, qty5, dt, sold)
   local list = Spec.NormalizePoints(points)
-  list[#list + 1] = {t = t, lo = lo, qty = isInt(qty, 0, Spec.QTY_MAX) and qty or 0,
-                     qty5 = isInt(qty5, 0, Spec.QTY_MAX) and qty5 or 0}
+  local p = {t = t, lo = lo, qty = isInt(qty, 0, Spec.QTY_MAX) and qty or 0, qty5 = isInt(qty5, 0, Spec.QTY_MAX) and qty5 or 0}
+  if validSample(dt, sold) then p.dt, p.sold = dt, sold end
+  list[#list + 1] = p
   return Spec.NormalizePoints(list)
 end
 
@@ -586,6 +672,95 @@ function Spec.Deltas(days, T)
 end
 
 ---------------------------------------------------------------------------
+-- Ventas estimadas entre dos escaneos completos del mismo personaje (contrato C6, versión 2: sold-inference.json)
+---------------------------------------------------------------------------
+-- Es una estimación, no un mínimo: una subasta más barata retirada sin volver a ponerla cuenta como vendida; lo que se
+-- repone al mismo precio o más barato, y lo publicado entre los dos escaneos, no se ve.
+Spec.BAND_MIN = {0, 1800, 7200, 43200} -- segundos mínimos que le quedan a una subasta en cada tramo (0..3, en [b + 1])
+
+-- Empareja las subastas viejas de un precio con las de ahora a ese precio. olds y news: {{tramo, unidades}, ...}.
+-- Devuelve las unidades de compras parciales, las subastas viejas que desaparecieron, las unidades nuevas sin pareja
+-- y si quedó alguna vieja.
+local function matchLevel(olds, news)
+  local used, matched = {}, {}
+  -- 1. Sin cambios: misma cantidad y un tramo que no subió (el más alto de esos; a igualdad, el primero).
+  for oi = 1, #olds do
+    local ob, oc = olds[oi][1], olds[oi][2]
+    local best
+    for ni = 1, #news do
+      local nb, nc = news[ni][1], news[ni][2]
+      if not used[ni] and nc == oc and nb <= ob and (not best or nb > news[best][1]) then best = ni end
+    end
+    if best then used[best], matched[oi] = true, best end
+  end
+  -- 2. Compras parciales: las viejas que quedan, de más a menos unidades (en su orden a igualdad), se quedan con la
+  -- de ahora sin pareja de más unidades por debajo de las suyas y tramo que no subió (a igualdad, tramo más alto y
+  -- luego la primera). Una subasta se retira entera: si queda con menos, alguien compró la diferencia.
+  local order = {}
+  for oi = 1, #olds do if not matched[oi] then order[#order + 1] = oi end end
+  table.sort(order, function(x, y)
+    if olds[x][2] ~= olds[y][2] then return olds[x][2] > olds[y][2] end
+    return x < y
+  end)
+  local partial = 0
+  for _, oi in ipairs(order) do
+    local ob, oc = olds[oi][1], olds[oi][2]
+    local best
+    for ni = 1, #news do
+      local nb, nc = news[ni][1], news[ni][2]
+      if not used[ni] and nc < oc and nb <= ob then
+        if not best or nc > news[best][2] or (nc == news[best][2] and nb > news[best][1]) then best = ni end
+      end
+    end
+    if best then
+      used[best], matched[oi] = true, best
+      partial = partial + oc - news[best][2]
+    end
+  end
+  local vanished, fresh, survivors = {}, 0, false
+  for oi = 1, #olds do
+    if matched[oi] then survivors = true else vanished[#vanished + 1] = olds[oi] end
+  end
+  for ni = 1, #news do if not used[ni] then fresh = fresh + news[ni][2] end end
+  return partial, vanished, fresh, survivors
+end
+
+-- base: niveles del escaneo anterior de un objeto, de más barato a más caro: {{precio, {{tramo, unidades}, ...}}, ...}
+-- (tramo 0..3 ya normalizado, en el orden del escaneo). current: subastas de ahora por precio: {[precio] = {{tramo,
+-- unidades}, ...}} (al menos todos los precios hasta el más alto de base). dt: segundos entre los dos escaneos.
+-- bandMin: segundos mínimos por tramo ({[1] = tramo 0, ...}; por defecto Spec.BAND_MIN). own: unidades que compraste tú
+-- de ese objeto entre los dos escaneos. Devuelve las unidades vendidas (estimación) y las de compras parciales.
+function Spec.InferSold(base, current, dt, bandMin, own)
+  if type(base) ~= "table" or #base == 0 or type(current) ~= "table" or type(dt) ~= "number" then return 0, 0 end
+  bandMin = type(bandMin) == "table" and bandMin or Spec.BAND_MIN
+  own = type(own) == "number" and own or 0
+  local first = base[1][1]
+  local pool = 0
+  for price, auctions in pairs(current) do
+    if type(price) == "number" and price < first then
+      for _, a in ipairs(auctions) do pool = pool + a[2] end
+    end
+  end
+  local partialTotal, counted = 0, 0
+  for _, level in ipairs(base) do
+    local partial, vanished, fresh, survivors = matchLevel(level[2], current[level[1]] or {})
+    pool = pool + fresh
+    if partial == 0 and #vanished == 0 then break end -- nada se fue a este precio: los compradores no pasaron de aquí
+    partialTotal = partialTotal + partial
+    for _, a in ipairs(vanished) do
+      local safe = bandMin[a[1] + 1]
+      if type(safe) == "number" and safe >= dt then   -- no pudo caducar entre los dos escaneos
+        local repost = min(a[2], pool)                 -- unidades que reaparecieron a este precio o más barato
+        pool = pool - repost
+        counted = counted + a[2] - repost
+      end
+    end
+    if survivors then break end                        -- aquí quedan unidades viejas: los compradores pararon aquí
+  end
+  return max(0, partialTotal + counted - own), partialTotal
+end
+
+---------------------------------------------------------------------------
 -- Textos (los mismos que el panel web; los de confianza y veredicto están en el contrato)
 ---------------------------------------------------------------------------
 function Spec.Money(copper)
@@ -746,20 +921,22 @@ function Spec.PruneHist(hist, now)
   return removed
 end
 
--- Si OroHermandadHist pasa de maxBytes: primero los puntos de más de 7 días, luego todos los puntos, y después se
--- acortan los días a 90, 60 y 30. Devuelve el paso al que hubo que llegar (0 = cabía) y el tamaño final.
+-- Si OroHermandadHist pasa de maxBytes (0.6.0): (1) días de más de 90 días, (2) de más de 60, (3) puntos de más de
+-- 10 días, (4) de más de 7, (5) todos los puntos y (6) días de más de 30. Los días viejos solo son historia larga (las
+-- ventanas del juego usan 14-28 días y el panel guarda la suya); los puntos son lo único que va por horas.
+-- Devuelve el paso al que hubo que llegar (0 = cabía) y el tamaño final.
 function Spec.Shrink(hist, maxBytes, now)
   maxBytes = maxBytes or Spec.MAX_BYTES
   local size = Spec.EstimateSize(hist)
   local today = Spec.DayIndex(now)
   if size <= maxBytes or type(hist) ~= "table" or type(hist.markets) ~= "table" or not today then return 0, size end
-  local steps = {
-    function(item) item.p = Spec.EncodePoints(Spec.PrunePoints(Spec.DecodePoints(item.p), now, 7 * 86400)) end,
-    function(item) item.p = "" end,
-    function(item) item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, 90)) end,
-    function(item) item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, 60)) end,
-    function(item) item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, 30)) end,
-  }
+  local function days(keep)
+    return function(item) item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, keep)) end
+  end
+  local function points(seconds)
+    return function(item) item.p = Spec.EncodePoints(Spec.PrunePoints(Spec.DecodePoints(item.p), now, seconds)) end
+  end
+  local steps = {days(90), days(60), points(10 * 86400), points(7 * 86400), function(item) item.p = "" end, days(30)}
   for step, apply in ipairs(steps) do
     for _, market in pairs(hist.markets) do
       if type(market) == "table" and type(market.items) == "table" then

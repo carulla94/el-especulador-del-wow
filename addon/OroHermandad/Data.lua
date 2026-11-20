@@ -319,6 +319,17 @@ Data.CATEGORY_LABELS = {
 Data.WATCH_EXTRA_MAX = 40 -- objetos que cada jugador puede añadir con /oro vigilar
 
 ---------------------------------------------------------------------------
+-- Casa de subastas (Scanner.lua): la de tu facción o la neutral de los goblins
+---------------------------------------------------------------------------
+-- Zonas con subasta neutral (goblin): Tanaris (Gadgetzan), Vega de Tuercespina (las dos mitades, Bahía del Botín) y
+-- Cuna del Invierno (Vista Eterna), con los uiMapID de Classic y los modernos. Ninguna tiene subastador de facción, así
+-- que un ID de más no hace daño; la comprobación 6 del juego lo confirma (/oro sondeo enseña el mapa y la zona).
+Data.NEUTRAL_AH_ZONES = {1446, 1434, 1452, 71, 50, 210, 83}
+-- Telas y menas de la lista fija con precio de mercader: su depósito en la subasta de tu facción es la referencia para
+-- reconocer la neutral (allí es mucho mayor).
+Data.HOUSE_PROBE_IDS = {2589, 2592, 2770, 2771, 2772}
+
+---------------------------------------------------------------------------
 -- Material exclusivo de WoW Forever (IDs vistos en guías de la beta; sin confirmar)
 ---------------------------------------------------------------------------
 -- Solo se usan si el cliente confirma que el objeto existe (C_Item.DoesItemExistByID).

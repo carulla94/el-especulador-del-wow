@@ -178,11 +178,13 @@ test("a database written by f007cb8 keeps every row when this code opens it, and
   assert.equal(before.guild_meta.find(r => r.key === "schema").value, "1");
   assert.equal(before.guild_summary_cache.length, 2);
 
-  // 2. This code opens it: two NULL columns and the schema marker, nothing else; a second opening changes nothing.
+  // 2. This code opens it: NULL columns (uploaded_by of 0.4; dt and sold of the points, 0.6.0) and the schema marker,
+  // nothing else; a second opening changes nothing.
   new GuildStore(base.ctx);
   const after = dump(base.db, {skip: []});
   for (const [name, rows] of Object.entries(before)) {
-    if (name === "guild_obs_day" || name === "guild_obs_point") assert.deepEqual(after[name], rows.map(r => ({...r, uploaded_by: null})), name);
+    if (name === "guild_obs_day") assert.deepEqual(after[name], rows.map(r => ({...r, uploaded_by: null})), name);
+    else if (name === "guild_obs_point") assert.deepEqual(after[name], rows.map(r => ({...r, uploaded_by: null, dt: null, sold: null})), name);
     else if (name === "guild_meta") assert.deepEqual(after[name], rows.map(r => r.key === "schema" ? {...r, value: "2"} : r), name);
     else assert.deepEqual(after[name], rows, name);
   }
@@ -257,14 +259,20 @@ test("schema 1 is still accepted: the same rows and the same answer as the 0.3 c
   t.after(() => { oldRoom.db.close(); newRoom.db.close(); relayRoom.db.close(); });
   for (const x of [oldRoom, newRoom, relayRoom]) seed(x.db, 1);
   const a = await oldRoom.sync(1, U0), b = await newRoom.sync(1, U0), c = await relayRoom.sync(1, U1H);
-  assert.deepEqual(b, a, "a schema-1 upload gets the 0.3 answer, without the relay fields");
+  // The fields added since (0.6.0, contract C4: estado, subidor and markets[].sold) are the only difference.
+  const older = ({body: {estado, subidor, ...rest}, ...answer}) => {
+    assert.deepEqual(subidor, {ultima: "0.6.0"});
+    assert.ok(Array.isArray(estado.mercados));
+    return {...answer, body: {...rest, markets: rest.markets.map(({sold, ...m}) => { assert.equal(sold, 0); return m; })}};
+  };
+  assert.deepEqual(older(b), a, "a schema-1 upload gets the 0.3 answer, without the relay fields");
   assert.equal(c.status, 200);
-  assert.deepEqual(c.body.markets.map(({observers, skippedObservers, selfConflicts, ...rest}) => rest), a.body.markets);
+  assert.deepEqual(older(c).body.markets.map(({observers, skippedObservers, selfConflicts, ...rest}) => rest), a.body.markets);
   assert.equal(c.body.rowsChanged, a.body.rowsChanged);
   const tables = ["guild_obs_day", "guild_obs_point", "guild_deposits", "guild_day_agg", "guild_items", "guild_item_vendor", "guild_member_markets"];
   const oldData = dump(oldRoom.db, {only: tables});
   oldData.guild_obs_day = oldData.guild_obs_day.map(r => ({...r, uploaded_by: 1}));
-  oldData.guild_obs_point = oldData.guild_obs_point.map(r => ({...r, uploaded_by: 1}));
+  oldData.guild_obs_point = oldData.guild_obs_point.map(r => ({...r, uploaded_by: 1, dt: null, sold: null}));
   assert.deepEqual(dump(newRoom.db, {only: tables}), oldData, "same rows; this code also records who uploaded them");
   assert.deepEqual(dump(relayRoom.db, {only: tables}), oldData, "the 0.4 uploader on a schema-1 history sends the same observations");
   assert.deepEqual(dump(relayRoom.db, {only: ["guild_observers", "guild_observer_markets"]}), {guild_observers: [], guild_observer_markets: []});
@@ -781,4 +789,165 @@ test("through the worker: schema-2 uploads, the panel strip and a purge never to
   const names = db => db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(x => x.name);
   assert.ok(names(G.db).every(name => name.startsWith("guild_")));
   assert.ok(names(P.db).every(name => name.startsWith("especulador_")));
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// 0.6.0: sell-through samples on the points (contracts C1, C3) and the sync answer for the uploader window (C4).
+const v06 = name => fs.readFileSync(new URL("./fixtures/v06/" + name, import.meta.url));
+const U6 = JSON.parse(v06("upload-v060.json")), SYNC6 = JSON.parse(v06("sync-response-v060.json")), POINTS2 = JSON.parse(v06("points-v2.json"));
+/** The upload without any sold key: what a 0.5.x uploader would send for the same history. */
+const withoutSold = upload => {
+  const out = copy(upload);
+  for (const m of out.markets) for (const o of m.observers ?? []) for (const s of o.items) delete s.sold;
+  for (const m of out.markets) for (const s of m.items) delete s.sold;
+  return out;
+};
+const pointRows = db => db.prepare("SELECT market,member_id,item_id,t,lo,qty,qty5,dt,sold FROM guild_obs_point ORDER BY market,member_id,item_id,t").all().map(r => ({...r}));
+const slotOf = (db, hash) => db.prepare("SELECT slot FROM guild_observers WHERE hash=?").get(hash).slot;
+
+test("the 0.6.0 fixtures of the server are byte copies of the shared ones", () => {
+  const sha = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+  const expected = {
+    "upload-v060.json": "0ae2cffb6273e06e3477652244eda0dc30c35eca82eb65888a3f42fdcbf78e8c",
+    "sync-response-v060.json": "5a21be63a5c66c2f7e776da1a4cc292056e1ac7372a922ff7d74d8fa69cf73b9",
+    "points-v2.json": "0014ae349a489d0353aaf65e8763e1df104897dbaef61067e7fd83b2ee6ac937"};
+  for (const [name, hash] of Object.entries(expected)) assert.equal(sha(v06(name)), hash, name);
+});
+
+test("upload-v060.json is accepted: each sample on its point and slot, markets[].sold, and the answer shape of sync-response-v060.json", async t => {
+  const r = room().at(C.now);
+  t.after(() => r.db.close());
+  seed(r.db, 1);
+  const res = await r.sync(1, U6);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  // Same keys as the fixture's accepted answer, at the top and in each market entry.
+  assert.deepEqual(Object.keys(res.body).sort(), Object.keys(SYNC6.accepted).sort());
+  for (const m of res.body.markets) assert.deepEqual(Object.keys(m).sort(), Object.keys(SYNC6.accepted.markets[0]).sort());
+  assert.deepEqual(res.body.subidor, {ultima: "0.6.0"});
+  assert.deepEqual(res.body.estado, {mercados: [{market: MARKET, suben: 1, aportan: 4}, {market: HORDE, suben: 1, aportan: 1}]},
+    "per market of the upload: members who upload and persons who feed it (the uploader and three mates)");
+  assert.deepEqual([res.body.uploadsToday, res.body.uploadsLeft, res.body.day], [1, LIMITS.uploadsPerDay - 1, C.T]);
+  // Every sample of the body is on its point, in the slot of its observer; every other point has none.
+  const slots = {[U6.markets[0].observers[0].obs]: 1};
+  for (const o of U6.markets[0].observers.slice(1)) slots[o.obs] = slotOf(r.db, o.obs);
+  const expected = new Map();
+  for (const o of U6.markets[0].observers) for (const s of o.items) for (const [t0, dt, sold] of s.sold ?? []) expected.set(`${slots[o.obs]}|${s.id}|${t0}`, [dt, sold]);
+  assert.equal(expected.size, 5);
+  const rows = pointRows(r.db);
+  for (const row of rows) assert.deepEqual([row.dt, row.sold], expected.get(`${row.member_id}|${row.item_id}|${row.t}`) ?? [null, null], `${row.member_id} ${row.item_id} ${row.t}`);
+  assert.equal(rows.filter(row => row.dt !== null).length, 5);
+  assert.deepEqual(res.body.markets.map(m => [m.market, m.sold]), [[MARKET, 5], [HORDE, 0]]);
+  // The same body again: a duplicate, with estado for the markets of the upload too (and no uploadsLeft).
+  const again = await r.sync(1, U6);
+  assert.deepEqual(Object.keys(again.body).sort(), Object.keys(SYNC6.duplicate).sort());
+  assert.deepEqual(again.body.estado, res.body.estado);
+  assert.equal(again.body.duplicate, true);
+  // «Cuándo vender» now reads the samples. Copper ore: the uploader's 2700 s and the mate's 3000 s share 1800 s, more
+  // than half of the shorter one, so they measured the same purchases: the longer one (the mate's 12 units) counts.
+  const timing = await r.get("/api/guild/timing?market=" + encodeURIComponent(MARKET));
+  assert.equal(timing.body.rules, "cuando-vender-2");
+  const copper = timing.body.items.find(i => i.id === 2770);
+  assert.deepEqual(copper.cells.filter(c => c[8] > 0).map(c => c.slice(6)), [[12, 3000, 1, 1, 12, 3000]]);
+  const potion = timing.body.items.find(i => i.id === 13446);
+  assert.deepEqual(potion.cells.filter(c => c[8] > 0).map(c => c.slice(6)), [[2, 3000, 1, 1, 2, 3000]]);
+});
+
+test("old readers: without the sold keys the same days and points are stored, with the same rows written and the same budget", async t => {
+  const options = {today: C.T, nowSec: C.now};
+  const strip = upload => upload.markets.map(m => ({...m, observers: m.observers.map(o => ({...o,
+    items: o.items.map(s => ({...s, points: s.points.map(({dt, sold, ...p}) => p)}))}))}));
+  const withSold = validateUpload(U6, options), plain = validateUpload(withoutSold(U6), options);
+  assert.deepEqual(strip(withSold), strip(plain), "validateUpload: the samples only add dt and sold to their points");
+  assert.deepEqual(withSold.markets[0].observers[1].items[0].points.at(-1), {t: 1796477400, lo: 38, qty: 830, qty5: 170, dt: 3000, sold: 12});
+  assert.deepEqual(plain.markets[0].observers[1].items[0].points.at(-1), {t: 1796477400, lo: 38, qty: 830, qty5: 170});
+  const a = room().at(C.now), b = room().at(C.now);
+  t.after(() => { a.db.close(); b.db.close(); });
+  seed(a.db, 1); seed(b.db, 1);
+  const ra = await a.sync(1, U6), rb = await b.sync(1, withoutSold(U6));
+  assert.equal(ra.body.rowsChanged, rb.body.rowsChanged, "a sample on a new point is no extra row");
+  const written = db => db.prepare("SELECT written FROM guild_write_budget").get().written;
+  assert.equal(written(a.db), written(b.db), "nor an extra write for the daily budget");
+  assert.deepEqual(pointRows(a.db).map(({dt, sold, ...row}) => row), pointRows(b.db).map(({dt, sold, ...row}) => row));
+  assert.deepEqual(dump(a.db, {only: DATA.filter(name => name !== "guild_obs_point")}), dump(b.db, {only: DATA.filter(name => name !== "guild_obs_point")}));
+  // The 0.5.x answer fields are all there, unchanged.
+  for (const key of Object.keys(SYNC6.oldPanel)) assert.ok(key in rb.body, key);
+});
+
+test("a resent point keeps or improves its sample (points-v2.json sameTime), and only a changed sample is one more row", async t => {
+  const t0 = POINTS2.sameTime[0].stored[0], id = 2770, d = dayIndex(t0);
+  const one = ([t, lo, qty, qty5, dt, sold], addon = "0.6.0") => ({schema: 1, addon, markets: [{market: MARKET, cut: null, deposits: [],
+    items: [{id, name: "", cat: "metal", vendor: 0, days: [[d, lo, lo, lo, qty, 1, "o"]], points: [[t, lo, qty, qty5]], ...(dt === null ? {} : {sold: [[t, dt, sold]]})}]}]});
+  assert.equal(POINTS2.sameTime.length, 4);
+  for (const c of POINTS2.sameTime) {
+    const r = room().at(C.now);
+    seed(r.db, 1);
+    assert.equal((await r.sync(1, one(c.stored))).status, 200);
+    const res = await r.sync(1, one(c.incoming, "0.6.0-b"));
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const row = r.db.prepare("SELECT t,lo,qty,qty5,dt,sold FROM guild_obs_point").get();
+    assert.deepEqual(Object.values(row), c.merged, c.note);
+    const changed = !c.merged.every((x, i) => x === c.stored[i]);
+    assert.equal(res.body.markets[0].points, changed ? 1 : 0, c.note);
+    assert.equal(res.body.markets[0].sold, changed ? 1 : 0, c.note);
+    r.db.close();
+  }
+});
+
+test("validateUpload: sold is optional and every malformed sample is refused naming the series", () => {
+  const options = {today: C.T, nowSec: C.now};
+  const change = edit => { const body = copy(U6); edit(body.markets[0].observers[1].items[0]); return body; };
+  const message = /^Envío no válido \(mercado GritodeGuerra-Alliance, observador n\.º 2, objeto 2770(, venta n\.º \d+)?\): cada venta es \[t, dt, unidades\] de un punto de la serie\.$/;
+  const point = 1796477400;
+  const cases = [
+    change(s => { s.sold = {}; }), change(s => { s.sold = null; }), change(s => { s.sold = "x"; }),
+    change(s => { s.sold = [[point, 3000, 1], [point, 3000, 1], [point, 3000, 1], [point, 3000, 1]]; }),     // more than its points
+    change(s => { s.sold = [[point, 3000]]; }), change(s => { s.sold = [[point, 3000, 1, 0]]; }), change(s => { s.sold = [7]; }),
+    change(s => { s.sold = [[point + 1, 3000, 1]]; }),                                                        // not a point of the series
+    change(s => { s.sold = [[point, 599, 1]]; }), change(s => { s.sold = [[point, 7201, 1]]; }), change(s => { s.sold = [[point, 1800.5, 1]]; }),
+    change(s => { s.sold = [[point, 3000, -1]]; }), change(s => { s.sold = [[point, 3000, 1000001]]; }), change(s => { s.sold = [[point, 3000, "2"]]; }),
+    change(s => { s.sold = [[point, 3000, 1], [1796474400, 3000, 1]]; }),                                     // not ascending
+    change(s => { s.sold = [[1796474400, 3000, 1], [1796474400, 3000, 1]]; })                                 // repeated
+  ];
+  for (const body of cases) {
+    assert.throws(() => validateUpload(body, options), error => { assert.equal(error.status, 400); assert.match(error.message, message); return true; },
+      JSON.stringify(body.markets[0].observers[1].items[0].sold));
+  }
+  // Valid: absent, empty, and the extremes of dt and units.
+  for (const sold of [undefined, [], [[point, 600, 0]], [[point, 7200, 1000000]], [[1796474400, 900, 3], [point, 3000, 1]]]) {
+    assert.doesNotThrow(() => validateUpload(change(s => { if (sold === undefined) delete s.sold; else s.sold = sold; }), options), JSON.stringify(sold));
+  }
+  // Schema 1: on the item itself.
+  const flat = {schema: 1, addon: "0.6.0", markets: [{market: MARKET, cut: null, deposits: [], items: [{id: 2770, name: "", cat: "metal", vendor: 0,
+    days: [], points: [[point, 40, 1, 1]], sold: [[point, 1800, 4]]}]}]};
+  assert.deepEqual(validateUpload(flat, options).markets[0].items[0].points, [{t: point, lo: 40, qty: 1, qty5: 1, dt: 1800, sold: 4}]);
+  flat.markets[0].items[0].sold = [[point, 1800, 4], [point, 1800, 4]];
+  assert.throws(() => validateUpload(flat, options), error => /^Envío no válido \(mercado GritodeGuerra-Alliance, objeto 2770\): cada venta es \[t, dt, unidades\]/.test(error.message));
+});
+
+test("a database of the 0.5.x code gains the nullable dt and sold columns once, keeps every row, and old and new uploads work", async t => {
+  const r = room().at(C.now);
+  t.after(() => r.db.close());
+  seed(r.db, 2);
+  assert.equal((await r.sync(1, U1)).status, 200);
+  // Back to the 0.5.x shape: the same tables and rows, without the two columns.
+  r.db.exec("ALTER TABLE guild_obs_point DROP COLUMN dt");
+  r.db.exec("ALTER TABLE guild_obs_point DROP COLUMN sold");
+  const columns = () => r.db.prepare("PRAGMA table_info(guild_obs_point)").all().map(c => c.name);
+  assert.deepEqual(columns(), ["market", "member_id", "item_id", "t", "lo", "qty", "qty5", "uploaded_by"]);
+  const before = dump(r.db, {skip: []});
+  new GuildStore(r.ctx);
+  assert.deepEqual(columns(), ["market", "member_id", "item_id", "t", "lo", "qty", "qty5", "uploaded_by", "dt", "sold"]);
+  const after = dump(r.db, {skip: []});
+  for (const [name, rows] of Object.entries(before)) {
+    assert.deepEqual(after[name], name === "guild_obs_point" ? rows.map(row => ({...row, dt: null, sold: null})) : rows, name);
+  }
+  new GuildStore(r.ctx);
+  assert.deepEqual(dump(r.db, {skip: []}), after, "opening it again changes nothing");
+  // A 0.5.x uploader (no sold) and a 0.6.0 one (sold) both work on it; the samples land on the existing points.
+  const room2 = room(r).at(C.nowSecond);
+  assert.equal((await room2.sync(2, U2)).status, 200);
+  const res = await room2.sync(1, U6);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.ok(res.body.markets[0].sold > 0);
+  assert.equal(r.db.prepare("SELECT count(*) AS n FROM guild_obs_point WHERE dt IS NOT NULL").get().n, res.body.markets[0].sold);
 });

@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
 import {execFileSync} from "node:child_process";
+import crypto from "node:crypto";
 import {DatabaseSync} from "node:sqlite";
 import * as E from "../src/especular.mjs";
 import worker, {Portfolio} from "../src/worker.mjs";
@@ -497,8 +498,9 @@ test("the page is CSP-safe: one module script, no inline code, no external reque
   assert.doesNotMatch(html, /\son[a-z]+=/i, "no inline event handler");
   assert.doesNotMatch(html, /style="/);
   const external = [...html.matchAll(/(?:href|src)="(https?:[^"]+)"/g)].map(m => m[1]);
-  assert.deepEqual(external, [H.RELEASES_URL], "the only external URL is the addon release link (a link, not a request)");
+  assert.deepEqual(external, [H.RELEASES_URL, H.UPLOADER_URL], "the only external URLs are the two release links, the addon first (links, not requests)");
   assert.match(html, /href="https:\/\/github\.com\/carulla94\/el-especulador-del-wow\/releases\/latest\/download\/OroHermandad\.zip" rel="noopener noreferrer"/);
+  assert.match(html, /href="https:\/\/github\.com\/carulla94\/el-especulador-del-wow\/releases\/latest\/download\/Subidor_Windows\.zip" rel="noopener noreferrer"/);
   assert.match(html, /href="\/api\/guild\/download\/sincronizador" download/);
   assert.doesNotMatch(css, /@import|url\((?!["']?data:)/);
   const code = js.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
@@ -777,41 +779,41 @@ test("timingPattern weighs every item the same and keeps cells, times of day and
   assert.deepEqual(pattern.weekdays.map(d => d.n), [0, 0, 0, 0, 0, 0, 0], "no day values in this timing");
 });
 
-test("timingAdvice names the best and worst moment, and says so when there is too little or no difference", () => {
-  const advice = H.timingAdvice(H.timingPattern(sellingWeeks()));
+test("timingSummary names the best and worst moment, and says so when there is too little or no difference", () => {
+  const advice = H.timingSummary(H.timingPattern(sellingWeeks()));
   assert.equal(advice.level, "claro");
   assert.equal(advice.title, "Cuándo se paga más");
   assert.deepEqual([advice.best.wd, advice.best.block, advice.worst.wd, advice.worst.block], [6, 5, 1, 2]);
   assert.equal(advice.lines[0], "Mejor momento para poner a la venta: el domingo de 20 a 24 h. Su precio más bajo suele estar un 12 % por encima de su nivel de esa semana (4 escaneos de 2 días).");
   assert.equal(advice.lines[1], "El peor: el martes de 8 a 12 h (-8 %).");
   // Nothing scanned.
-  const none = H.timingAdvice(H.timingPattern({items: []}));
+  const none = H.timingSummary(H.timingPattern({items: []}));
   assert.equal(none.level, "sin-datos");
-  assert.match(none.lines[0], /^Escanea la subasta con Auctionator a distintas horas/);
+  assert.equal(none.lines[0], "Escanea la subasta con Oro de Hermandad (botón «Escanear», addon 0.6.0 o posterior) a distintas horas y días: con cada escaneo que se sube, aquí aparece cuándo se paga más y cuándo se vende más.");
   // Flat prices: a pattern of nothing.
   const points = [];
   for (let d = 2530 - 13; d <= 2530; d++) for (const hour of [9, 13, 17, 21]) points.push({item_id: 1, person: 1, t: at(d, hour), lo: 1000, qty: 5});
-  const flat = H.timingAdvice(H.timingPattern(buildTiming({points, T: 2530})));
+  const flat = H.timingSummary(H.timingPattern(buildTiming({points, T: 2530})));
   assert.equal(flat.level, "plano");
   assert.equal(flat.best, null);
   assert.match(flat.lines.at(-1), /^Vende cuando te venga bien/);
   // Two days of scans: too few.
-  const few = H.timingAdvice(H.timingPattern(buildTiming({points: points.slice(-8), T: 2530})));
+  const few = H.timingSummary(H.timingPattern(buildTiming({points: points.slice(-8), T: 2530})));
   assert.equal(few.level, "pocos");
   assert.match(few.lines[0], /^Aún hay pocos escaneos/);
 });
 
-test("timingAdvice reads the weekday profile from the day values when there are no hours to compare", () => {
+test("timingSummary reads the weekday profile from the day values when there are no hours to compare", () => {
   const days = [];
   for (let d = 2530 - 40; d < 2530; d++) days.push({item_id: 5, day: d, v: E.weekdayOf(d) === 5 ? 1100 : 1000});
-  const advice = H.timingAdvice(H.timingPattern(buildTiming({days, T: 2530})));
+  const advice = H.timingSummary(H.timingPattern(buildTiming({days, T: 2530})));
   assert.equal(advice.level, "claro");
   assert.equal(advice.best, null, "no cell to point at");
   assert.equal(advice.lines.at(-1), "Por días, con el precio de cada día: mejor el sábado (+10 %), peor el lunes (0 %).");
 });
 
 test("the heatmap draws 42 cells, fills only what has enough scans and rings the best one", () => {
-  const pattern = H.timingPattern(sellingWeeks()), advice = H.timingAdvice(pattern);
+  const pattern = H.timingPattern(sellingWeeks()), advice = H.timingSummary(pattern);
   const {node, cells} = H.timingHeatmapSVG(pattern, {best: advice.best});
   assert.equal(cells.length, 42);
   const markup = svgText(node);
@@ -823,6 +825,154 @@ test("the heatmap draws 42 cells, fills only what has enough scans and rings the
   assert.ok(!/NaN|undefined/.test(markup));
   assert.match(markup, new RegExp(`fill="${H.CHART.price}"`));
   assert.match(markup, new RegExp(`fill="${H.CHART.down}"`));
+});
+
+// ---- Ventas (addon 0.6.0): the advice rule C11, the «Precio / Ventas» switch and its texts -------------------------
+const v06 = name => JSON.parse(fs.readFileSync(new URL("./fixtures/v06/" + name, import.meta.url), "utf8"));
+const ADVICE = v06("timing-advice.json"), TIMING2 = v06("timing-v2.json");
+
+test("the panel's 0.6.0 fixtures are byte copies of the shared ones", () => {
+  const sha = name => crypto.createHash("sha256").update(fs.readFileSync(new URL("./fixtures/v06/" + name, import.meta.url))).digest("hex");
+  assert.equal(sha("timing-advice.json"), "62b1870351a68d3552e6687ec98147ffab42590762471f49f1908e3d2f5191fc");
+  assert.equal(sha("timing-v2.json"), "4b312978359deeffde566386da38f3e8eae34d1e3f6c51519fb66c88b6a62023");
+});
+
+test("timingAdvice is contract C11: every case of timing-advice.json, as the addon's Timing.Advice", () => {
+  assert.deepEqual({...H.SALES_RULE}, ADVICE.sales);
+  assert.deepEqual({...H.PRICE_RULE}, ADVICE.price);
+  assert.equal(ADVICE.cases.length, 12);
+  for (const c of ADVICE.cases) {
+    const got = H.timingAdvice(c.blocks);
+    assert.deepEqual([got.salesOK, got.best, got.reason, got.hint], [c.salesOK, c.best, c.reason, c.hint], c.note);
+    got.rateIdx.forEach((x, i) => {
+      if (c.rateIdx[i] === null) assert.equal(x, null, `${c.note}: block ${i}`);
+      else assert.ok(Math.abs(x - c.rateIdx[i]) <= 1e-4, `${c.note}: block ${i} ${x} vs ${c.rateIdx[i]}`);
+    });
+  }
+  const evening = H.timingAdvice(ADVICE.cases[0].blocks), whale = H.timingAdvice(ADVICE.cases[1].blocks);
+  assert.equal(whale.best, evening.best, "one buyer of 400 units does not move the advice");
+  assert.equal(H.adviceText(evening), "Mejor franja: 20-24 h (más ventas). Pon o iguala el precio hacia las 19-20 h, con 2 h (u 8 h si no vas a volver).");
+  assert.equal(H.adviceText(H.timingAdvice(ADVICE.cases.at(-1).blocks)), "Mejor franja: 0-4 h (más ventas). Pon o iguala el precio hacia las 23-0 h, con 2 h (u 8 h si no vas a volver).");
+  assert.match(H.adviceText(H.timingAdvice(ADVICE.cases[8].blocks)), /^Mejor franja: 8-12 h \(mejor precio\)\./);
+  assert.match(H.adviceText(H.timingAdvice(ADVICE.cases[6].blocks)), /^Mejor franja: 8-12 h \(precio más alto\)\./);
+  assert.equal(H.adviceText(H.timingAdvice(ADVICE.cases[10].blocks)), null);
+  assert.deepEqual([H.formatRate(1.6), H.formatRate(0.84), H.formatRate(1), H.formatRate(null)], ["×1,6", "×0,8", "×1,0", "—"]);
+  assert.deepEqual([H.formatHours(0), H.formatHours(1800), H.formatHours(50400), H.formatHours(5000)], ["0 h", "0,5 h", "14 h", "1,5 h"]);
+});
+
+test("item blocks add up the weekday cells, and the whale and the doubled purchase of timing-v2.json do not move the advice", () => {
+  const sales = H.timingSales(TIMING2.expected, [2772]);
+  const blocks = H.itemBlocks(TIMING2.expected.items.find(i => i.id === 2772));
+  const cells = TIMING2.expected.items.find(i => i.id === 2772).cells;
+  for (let b = 0; b < 6; b++) {
+    const mine = cells.filter(c => c[0] % 6 === b);
+    assert.equal(blocks[b].n, mine.reduce((sum, c) => sum + c[8], 0));
+    assert.equal(blocks[b].days, mine.reduce((sum, c) => sum + c[9], 0), "different weekdays are different days");
+    assert.equal(blocks[b].u, mine.reduce((sum, c) => sum + c[6], 0));
+    assert.equal(blocks[b].mu, Math.max(0, ...mine.map(c => c[10])));
+  }
+  assert.deepEqual(blocks[2].u, 400, "the 400-unit whale of the morning…");
+  assert.equal(sales.advice.salesOK[2], false, "…is its block's largest sample, left out");
+  assert.deepEqual([sales.advice.best, sales.advice.reason, sales.advice.hint], [5, "ventas", [19, 20]]);
+  assert.deepEqual(sales.advice, H.timingAdvice(blocks));
+  // Without the whale and the mate's 390-unit copy of it, and without any of the mate's doubled samples: the same best.
+  const noWhale = buildTiming({...TIMING2.input, points: TIMING2.input.points.filter(p => p.person !== 3 && !(p.person === 1000000001 && p.sold === 390))});
+  const noDoubles = buildTiming({...TIMING2.input, points: TIMING2.input.points.filter(p => !(p.person === 1000000001 && Number.isInteger(p.dt)))});
+  for (const timing of [noWhale, noDoubles]) assert.equal(H.timingSales(timing, [2772]).advice.best, 5);
+  // A group needs two items with a sales pattern in a block; with one, the group's price pattern speaks.
+  const all = H.timingSales(TIMING2.expected, null);
+  assert.equal(all.any, true);
+  assert.ok(all.blocks.every(b => b.rateIdx === null));
+  assert.equal(all.advice.reason, "precio-alto");
+});
+
+test("a group's sales: the items' indexes weighted by their trimmed seconds, cells as the index of the usual rate", () => {
+  // Two items selling three times faster in the evening (20-24 h) than in the morning and the afternoon, on 3 days of
+  // the same weekday: one-hour samples whose middles fall at 8:30, 13:30, 16:30 and 21:30.
+  const points = [];
+  const T = 2530;
+  for (const [id, scale] of [[13759, 1], [13760, 4]]) {
+    for (let d = T - 20; d <= T; d += 7) for (const [hour, units] of [[9, 3], [14, 3], [17, 3], [22, 9]]) {
+      points.push({item_id: id, person: 1, t: at(d, hour), lo: 100, qty: 10, dt: 3600, sold: units * scale});
+    }
+  }
+  const timing = buildTiming({points, T});
+  const one = H.timingSales(timing, [13760]), both = H.timingSales(timing, [13759, 13760]);
+  assert.deepEqual([one.advice.best, one.advice.reason], [5, "ventas"]);
+  assert.deepEqual([both.advice.best, both.advice.reason, both.advice.hint], [5, "ventas", [19, 20]]);
+  assert.ok(Math.abs(both.blocks[5].rateIdx - one.advice.rateIdx[5]) < 1e-9, "same shape: the weighted mean is the same index");
+  assert.equal(both.blocks[5].items, 2);
+  const evening = both.cells.filter(c => c.block === 5 && c.usable);
+  assert.ok(evening.length > 0 && evening.every(c => c.value > 1.5 && c.items === 2));
+  assert.deepEqual(H.salesLines(both), [H.adviceText(both.advice)]);
+  // The heatmap in sales mode: only usable cells are filled, an eighth row has the blocks of any day (what the advice
+  // reads) and its best block gets the one ring.
+  const {node} = H.timingHeatmapSVG(H.timingPattern(timing, [13759, 13760]), {sales: both});
+  const markup = svgText(node);
+  assert.equal((markup.match(/<rect /g) ?? []).length, 48);
+  assert.equal((markup.match(/stroke-width="2"/g) ?? []).length, 1);
+  assert.match(markup, />todos<\/text>/);
+  assert.match(markup, /<title>Cualquier día de 20 a 24 h: se vende ×\d,\d de lo normal · \d+ mediciones · \d+(,5)? h medidas<\/title>/);
+  assert.match(markup, /se vende ×\d,\d de lo normal · \d+ mediciones de \d+ días · \d+(,5)? h medidas/);
+  assert.match(markup, /nadie ha medido ventas a esa hora/);
+  assert.match(markup, new RegExp(`fill="${H.CHART.good}"`));
+  assert.ok(!/NaN|undefined|Infinity/.test(markup));
+  assert.ok(fontSizes(markup).every(size => size >= 12));
+});
+
+test("without a sales pattern: «ningún envío trae ventas» when no cell has a second measured, «aún pocas ventas» otherwise", () => {
+  const plain = H.timingSales(sellingWeeks(), null);
+  assert.equal(plain.any, false);
+  assert.deepEqual(H.salesLines(plain).at(-1), H.NO_SALES_YET);
+  assert.equal(H.NO_SALES_YET, "Ningún envío trae ventas todavía: quien tiene el subidor tiene que actualizar el addon y el subidor a la 0.6.0.");
+  const few = H.timingSales(TIMING2.expected, [13446]);
+  assert.deepEqual(H.salesLines(few), [H.FEW_SALES]);
+  assert.equal(H.FEW_SALES, "Aún pocas ventas medidas: el addon las calcula entre dos escaneos completos de la misma persona separados de 30 min a 2 h.");
+  // An older cached answer (cuando-vender-1, six-column cells) reads as no sales, without errors.
+  const old = {items: [{id: 1, n: 3, cells: [[5, 3, 2, 300, 0, 0]], wd: []}]};
+  assert.deepEqual(H.timingSales(old, null).any, false);
+  assert.equal(H.timingSales(old, [1]).advice.reason, "pocos");
+  // The card: a sales pattern names the block and the posting hint.
+  const card = H.fishCards({rows: []}, {rows: []}, {rows: []}, {...H.timingSummary(null), sales: H.timingSales(TIMING2.expected, [2772])}).at(-1);
+  assert.deepEqual([card.key, card.good, card.name], ["sell", true, "De 20 a 24 h"]);
+  assert.equal(card.note, "Se vende más (×1,9): pon o iguala el precio hacia las 19-20 h.");
+});
+
+test("the panel says the addon scans by itself: no «Auctionator» in the join cards, timing and fish texts but «Auctionator es opcional»", () => {
+  const html = read("public/hermandad.html"), js = read("public/hermandad.js");
+  const join = html.slice(html.indexOf('id="screen-unirse"'), html.indexOf('class="card privacy"'));
+  assert.match(join, /Auctionator es opcional\./);
+  assert.doesNotMatch(join.replace(/Auctionator es opcional/g, ""), /Auctionator/);
+  assert.doesNotMatch(join, /Necesitas también Auctionator/);
+  assert.match(join, /Abre la subasta y pulsa «Escanear» en Oro de Hermandad \(0\.6\.0 o posterior\), o deja que lo haga solo cada vez que la abres\./);
+  assert.match(join, /como mucho un escaneo cada 30 minutos, nunca en combate ni en mazmorras/);
+  const sell = html.slice(html.indexOf('id="sell-section"'), html.indexOf('id="mine-section"'));
+  assert.doesNotMatch(sell, /Auctionator/);
+  assert.match(sell, /«Ventas» es una estimación de lo que desaparece entre dos escaneos de la misma persona: hacen falta 3 mediciones en 2 días distintos por franja y la compra más grande de cada franja no cuenta\. De noche suele haber pocos datos\./);
+  assert.match(sell, /<button id="sell-mode-precio"[^>]*aria-pressed="true">Precio<\/button>/);
+  assert.match(sell, /<button id="sell-mode-ventas"[^>]*aria-pressed="false">Ventas<\/button>/);
+  const timingCode = js.slice(js.indexOf("// ---- Cuándo vender"), js.indexOf("// ---- Pesca: qué pescar"));
+  const fishText = js.match(/\$\("#fish-missing"\)\.textContent = "([^"]+)"/)[1];
+  const renderSell = js.slice(js.indexOf("function renderSell()"), js.indexOf("function renderZones("));
+  for (const [where, text] of [["timing builders", timingCode], ["fish text", fishText], ["renderSell", renderSell], ["sales texts", [H.SCAN_MORE, H.NO_SALES_YET, H.FEW_SALES].join(" ")]]) {
+    assert.doesNotMatch(text, /Auctionator/, where);
+  }
+  assert.match(fishText, /se apunta el pescado en cada escaneo de la subasta/);
+});
+
+test("the Descargas card: Windows uploader from the latest release, «Desbloquear» first, then the console version", () => {
+  const html = read("public/hermandad.html");
+  const card = html.slice(html.indexOf("Sube los precios desde tu PC"), html.indexOf("Juega y escanea"));
+  const order = ["Subidor para Windows (recomendado, no necesita instalar nada)", H.UPLOADER_URL,
+    "Clic derecho en el zip → Propiedades → marca «Desbloquear» → Aceptar.", "Extrae la carpeta.",
+    "Abre «Abrir subidor.cmd» y pega tu clave (la primera vez te ofrece un acceso directo en el escritorio).",
+    "Para actualizar: cierra el subidor y extrae la carpeta nueva encima de la anterior; tu clave se conserva.",
+    "Versión de consola, para quien ya tiene Python (Sincronizador_PC.zip)", "/api/guild/download/sincronizador"];
+  let at = -1;
+  for (const text of order) { const next = card.indexOf(text); assert.ok(next > at, text); at = next; }
+  assert.match(card, /<ol class="download-steps">\s*<li>Clic derecho/);
+  assert.ok(html.indexOf(H.RELEASES_URL) < html.indexOf(H.UPLOADER_URL), "the addon link stays first");
+  assert.equal(H.UPLOADER_URL, "https://github.com/carulla94/el-especulador-del-wow/releases/latest/download/Subidor_Windows.zip");
 });
 
 // ---- Pesca
@@ -918,7 +1068,7 @@ test("fishZones, fishPools and fishUses rank what you can fish, and fishCards an
   assert.equal(lobster.best.kind, "cooking", "Lobster Stew pays more than the raw lobster");
   assert.equal(lobster.best.value, 2375 - 25, "the stew after the cut less the spring water");
   assert.equal(lobster.market.value, 855);
-  const cards = H.fishCards(zones, pools, uses, H.timingAdvice(null), {rate: 150});
+  const cards = H.fishCards(zones, pools, uses, H.timingSummary(null), {rate: 150});
   assert.deepEqual(cards.map(c => c.key), ["zone", "pool", "use", "sell"]);
   assert.equal(cards[0].name, "Azshara");
   assert.match(cards[0].note, /a 150 capturas por hora/);
@@ -929,7 +1079,7 @@ test("fishZones, fishPools and fishUses rank what you can fish, and fishCards an
   const bare = marketOf([], {T: fishAt(2026, 11, 18)});
   const bareUses = H.fishUses(bare);
   assert.ok(bareUses.rows.every(r => r.best.kind === "mercader"));
-  assert.equal(H.fishCards(H.fishZones(bare), H.fishPools(bare), bareUses, H.timingAdvice(null))[2].name, "Véndelo crudo");
+  assert.equal(H.fishCards(H.fishZones(bare), H.fishPools(bare), bareUses, H.timingSummary(null))[2].name, "Véndelo crudo");
 });
 
 test("fishGroups covers every fish, what is cooked or distilled from them and the whole market", () => {

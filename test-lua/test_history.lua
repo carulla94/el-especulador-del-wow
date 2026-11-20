@@ -87,7 +87,7 @@ Stub.fire("PLAYER_LOGIN")
 Stub.fire("PLAYER_ENTERING_WORLD", true, false)
 Stub.runTimers(30)
 
-test("TOC: versión 0.5.1, OroHermandadHist guardado y Spec/History/Relay en su sitio", function()
+test("TOC: versión de Core, «local version = \"0.6.0\"» en History.lua, OroHermandadHist guardado y los archivos en su sitio", function()
   local files, sv, versionLine = {}, nil, nil
   for line in io.lines(DIR .. "OroHermandad.toc") do
     if line:match("%.lua$") then files[#files + 1] = line end
@@ -96,7 +96,11 @@ test("TOC: versión 0.5.1, OroHermandadHist guardado y Spec/History/Relay en su 
   end
   local pos = {}
   for i, f in ipairs(files) do pos[f] = i end
-  eq(versionLine, "0.5.1", "versión"); eq(ns.Core.VERSION, "0.5.1", "Core.VERSION")
+  eq(versionLine, ns.Core.VERSION, "la versión del TOC es la de Core.VERSION")
+  -- Contrato C9: la línea literal que comprueba el flujo de publicación (la de Core y el TOC las sube la parte B).
+  local f = assert(io.open(DIR .. "History.lua", "rb")); local src = f:read("*a"); f:close()
+  assert(src:find('\nlocal version = "0.6.0"\n', 1, true), 'History.lua: local version = "0.6.0" en su propia línea')
+  eq(pos["Scanner.lua"], pos["Relay.lua"] + 1, "Scanner después de Relay")
   eq(sv, "OroHermandadDB, OroHermandadHist", "SavedVariables de la cuenta")
   eq(pos["Spec.lua"], pos["Items.lua"] + 1, "Spec después de Items")
   eq(pos["History.lua"], pos["Prices.lua"] + 1, "History después de Prices")
@@ -106,7 +110,8 @@ end)
 
 test("Al cargar: poda, salta lo corrupto y deja solo mercados y objetos válidos", function()
   local h = OroHermandadHist
-  eq(h.schema, 2); eq(h.addon, "0.5.1")
+  eq(h.schema, 2); eq(h.addon, ns.Core.VERSION, "la versión que pasa Core")
+  eq(freshHistory(ns).Load(nil, {db = {}, market = function() return KEY end}).addon, "0.6.0", "sin versión de Core: 0.6.0")
   local keys = {}
   for k in pairs(h.markets) do keys[#keys + 1] = tostring(k) end
   eq(table.concat(keys, ","), KEY, "solo el mercado válido")
@@ -239,16 +244,20 @@ test("Escritura rápida: el mismo texto que decodificar, normalizar y codificar 
     if d >= last.d then fastDays = fastDays + 1 end
     -- Puntos: texto canónico de 1 a 120 puntos y uno nuevo cerca del último (a veces antes, a veces en la misma media hora).
     local m, t0, pts = 1 + rand(120), 1790000000 + rand(100000), {}
-    for i = 1, m do pts[#pts + 1] = {t = t0 + i * (1800 + rand(5000)), lo = 1 + rand(9000), qty = rand(500), qty5 = rand(50)} end
+    for i = 1, m do
+      pts[#pts + 1] = {t = t0 + i * (1800 + rand(5000)), lo = 1 + rand(9000), qty = rand(500), qty5 = rand(50)}
+      if rand(3) == 0 then pts[#pts].dt, pts[#pts].sold = 600 + rand(6601), rand(3000) end -- 0.6.0: ventas en los puntos
+    end
     local ptext = Spec.EncodePoints(pts)
     local lastPoint = Spec.DecodePoints(ptext)
     lastPoint = lastPoint[#lastPoint]
     local t = lastPoint.t + pick({-4000, -1, 0, 1, 900, 1799, 1800, 1801, 7200})
     local lo, pq, q5 = pick({1 + rand(9000), lastPoint.lo, 0}), pick({rand(500), nil}), pick({rand(50), nil, 3.5})
+    local dt, sold = pick({nil, 905, 1800, 7200, 7201, 300}), pick({nil, 0, rand(900), 1000001})
     History.FAST_WRITES = false
-    local slowP = History.AddPointText(ptext, t, lo, pq, q5)
+    local slowP = History.AddPointText(ptext, t, lo, pq, q5, dt, sold)
     History.FAST_WRITES = true
-    eq(History.AddPointText(ptext, t, lo, pq, q5), slowP, "puntos, caso " .. case)
+    eq(History.AddPointText(ptext, t, lo, pq, q5, dt, sold), slowP, "puntos, caso " .. case)
     if t >= lastPoint.t then fastPoints = fastPoints + 1 end
   end
   assert(fastDays > 1000 and fastPoints > 1000, "la mayoría por el camino rápido: " .. fastDays .. " " .. fastPoints)
@@ -528,7 +537,7 @@ test("/oro sondeo: todo lo que hay que comprobar en el juego, sin nombres de per
   assert(_G.OroHermandadTextFrame.edit.__highlighted, "seleccionado para copiar")
   local chat = table.concat(Stub.printed, "\n")
   for _, want in ipairs({
-    "Oro de Hermandad 0.5.1 · sondeo ", "cliente 1.60.1.70707 (interfaz 16001)",
+    "Oro de Hermandad " .. ns.Core.VERSION .. " · sondeo ", "cliente 1.60.1.70707 (interfaz 16001)",
     "Auctionator 11.0.9-forever · __dbversion 8", "escaneos oídos sí", "SCAN_DAY_0 de Auctionator: 1577833200 (igual",
     "Escaneo completo (", "replicateInfo: 1 texto, 2 número, 3 número", "[3] cantidad ", "[17] itemID ",
     "Escaneo de resumen (", "itemKey {battlePetSpeciesID=número, itemID=número",
@@ -537,7 +546,7 @@ test("/oro sondeo: todo lo que hay que comprobar en el juego, sin nombres de per
     "Depósito de 1 unidad de Paño rúnico (14047)", "(13446)",
     "Duraciones: 1 = 12 horas · 2 = 24 horas · 3 = 48 horas", "SupportsCopperValues: sí",
     "Mercancía o pieza: Hierro mercancía", "Mercado: Forever-Alliance", "Lista vigilada: 161 de 161 fijos reconocidos, 1 extra",
-    "KB de 1280 KB como máximo", "¿OroHermandadHist sobrevivió al último /reload? sí:",
+    "KB de 2048 KB como máximo", "¿OroHermandadHist sobrevivió al último /reload? sí:",
   }) do
     assert(has(text, want), "falta en la ventana: " .. want .. "\n" .. text)
     assert(has(chat, want), "falta en el chat: " .. want)
@@ -629,65 +638,102 @@ test("¿Sobrevivió al /reload?: los cuatro casos y un esquema más nuevo que no
   eq(H.Import(true), "off")
 end)
 
-test("Tamaño: 161 objetos x 120 días caben en 1,25 MB; con 40 extras y 120 puntos, se recorta al cargar y al salir", function()
+-- Historial grande: ids x 120 días y keepPoints puntos (pointsPerDay al día, todos con venta si samples).
+local function bigHist(ids, pointsPerDay, keepPoints, samples, markets)
   local now = Stub.now
   local today = Spec.DayIndex(now)
-  local function build(ids, pointsPerDay, keepPoints)
+  local out = {schema = 2, addon = "0.6.0", markets = {}}
+  for mi = 1, markets or 1 do
     local items, dep = {}, {}
     for i, id in ipairs(ids) do
       local recs, pts = {}, {}
       for d = today - 119, today do
-        local p = 25000 + (id * 37 + d * 101) % 125000
+        local p = 25000 + (id * 37 + d * 101 + mi) % 125000
         recs[#recs + 1] = {d = d, lo = p, hi = p + (d * 13) % 9000, last = p + 400, qty = 100 + (id + d) % 4000,
                            scans = 1 + d % 5, src = d % 9 == 0 and "a" or "o"}
       end
       for k = 0, keepPoints - 1 do
         pts[#pts + 1] = {t = now - k * math.floor(86400 / pointsPerDay), lo = 25000 + (id + k * 7) % 125000,
-                         qty = 100 + k % 3000, qty5 = 10 + k % 300}
+                         qty = 100 + k % 3000, qty5 = 10 + k % 300, dt = samples and (905 + k % 6000) or nil,
+                         sold = samples and (k * 13) % 4000 or nil}
       end
       items[id] = {n = "Objeto de la lista número " .. i, c = Spec.CATEGORIES[1 + i % 14], v = 125 + i,
                    d = Spec.EncodeDays(recs), p = Spec.EncodePoints(pts)}
       dep[id] = "1:" .. (60 + i) .. ",2:" .. (240 + i) .. ",3:" .. (720 + i)
     end
-    return {schema = 1, addon = "0.3.0", markets = {[KEY] = {updated = now, cut = 500, items = items, dep = dep}}}
+    out.markets[mi == 1 and KEY or ("Otro" .. mi .. "-Horde")] = {updated = now, cut = 500, items = items, dep = dep}
   end
+  return out
+end
+
+local function oldestPoint(h)
+  local oldest = math.huge
+  for _, m in pairs(h.markets) do
+    for _, item in pairs(m.items) do
+      local pts = Spec.DecodePoints(item.p)
+      if pts[1] then oldest = math.min(oldest, pts[1].t) end
+    end
+  end
+  return oldest
+end
+
+test("Tamaño (0.6.0): 2 MB para lo tuyo; 8 escaneos al día con ventas caben y, si no, se van antes los días viejos que los puntos", function()
+  local now = Stub.now
   local fixed = History.FixedIDs()
-  local hist = build(fixed, 4, 14 * 4)
-  local raw = Spec.EstimateSize(hist)
-  eq(raw, #("OroHermandadHist = " .. wowSerialize(hist) .. "\n"), "el estimador mide el formato de WoW")
-  local H = freshHistory(ns)
-  local loaded = H.Load(hist, {db = {}, market = function() return KEY end})
-  local size = #("OroHermandadHist = " .. wowSerialize(loaded) .. "\n")
-  eq(H.LoadInfo().shrinkStep, 0, "cabe sin recortar")
-  assert(size <= Spec.MAX_BYTES, "161 x 120 días: " .. size)
-  local item = loaded.markets[KEY].items[fixed[1]]
-  eq(#Spec.DecodeDays(item.d), 120); eq(#Spec.DecodePoints(item.p), 56)
-  -- 201 objetos con 120 puntos cada uno: se quitan puntos, no días.
   local all = {}
   for _, id in ipairs(fixed) do all[#all + 1] = id end
   for id = 40001, 40040 do all[#all + 1] = id end
-  local heavy = build(all, 10, 120)
-  local heavyRaw = Spec.EstimateSize(heavy)
-  local loadedHeavy = H.Load(heavy, {db = {}, market = function() return KEY end})
-  local heavySize = #("OroHermandadHist = " .. wowSerialize(loadedHeavy) .. "\n")
-  local step = H.LoadInfo().shrinkStep
-  assert(heavyRaw > Spec.MAX_BYTES and step >= 1 and step <= 2 and heavySize <= Spec.MAX_BYTES, heavyRaw .. " " .. step .. " " .. heavySize)
-  eq(#Spec.DecodeDays(loadedHeavy.markets[KEY].items[40040].d), 120, "los días se quedan")
-  realPrint(string.format("  tamaño: 161 x 120 días %.0f KB · 201 objetos y 120 puntos %.0f KB -> paso %d, %.0f KB",
-    size / 1024, heavyRaw / 1024, step, heavySize / 1024))
+  local H = freshHistory(ns)
+  local function load(h) return H.Load(h, {db = {}, market = function() return KEY end}), H.LoadInfo() end
+  -- 161 objetos, 120 días, 14 días a 8 escaneos con venta (112 puntos): cabe sin recortar.
+  local one = bigHist(fixed, 8, 112, true)
+  eq(Spec.EstimateSize(one), #("OroHermandadHist = " .. wowSerialize(one) .. "\n"), "el estimador mide el formato de WoW")
+  local loaded, info = load(one)
+  eq(info.shrinkStep, 0, "161 objetos: cabe")
+  local size = #("OroHermandadHist = " .. wowSerialize(loaded) .. "\n")
+  assert(size <= Spec.MAX_BYTES, size)
+  local item = loaded.markets[KEY].items[fixed[1]]
+  eq(#Spec.DecodeDays(item.d), 120); eq(#Spec.DecodePoints(item.p), 112)
+  -- 201 objetos (40 extras), 120 puntos: también cabe en 2 MB.
+  local extras = bigHist(all, 10, 120, true)
+  local loaded2, info2 = load(extras)
+  eq(info2.shrinkStep, 0, "201 objetos: cabe")
+  -- Dos mercados de 161: se acortan los días (paso 1 o 2) y no se pierde ningún punto de 14 días.
+  local two = bigHist(fixed, 8, 112, true, 2)
+  local raw2 = Spec.EstimateSize(two)
+  local loaded3, info3 = load(two)
+  assert(raw2 > Spec.MAX_BYTES and info3.shrinkStep >= 1 and info3.shrinkStep <= 2, raw2 .. " paso " .. info3.shrinkStep)
+  assert(info3.size <= Spec.MAX_BYTES, info3.size)
+  for _, m in pairs(loaded3.markets) do
+    for _, it in pairs(m.items) do eq(#Spec.DecodePoints(it.p), 112, "los puntos de 14 días se quedan") end
+  end
+  -- Dos mercados de 201: paso 3 (puntos de más de 10 días fuera); los de 10 días se quedan.
+  local twoBig = bigHist(all, 8, 112, true, 2)
+  local raw4 = Spec.EstimateSize(twoBig)
+  local loaded4, info4 = load(twoBig)
+  eq(info4.shrinkStep, 3, "201 objetos en dos mercados: paso 3")
+  assert(info4.size <= Spec.MAX_BYTES, info4.size)
+  assert(oldestPoint(loaded4) > now - 10 * 86400, "nada de más de 10 días")
+  for _, m in pairs(loaded4.markets) do
+    for _, it in pairs(m.items) do
+      eq(#Spec.DecodePoints(it.p), 80, "los 80 puntos de 10 días se quedan")
+      eq(#Spec.DecodeDays(it.d), 60, "días de 60")
+    end
+  end
+  realPrint(string.format("  tamaño: 161 x 120 días y 112 puntos con venta %.0f KB · 201 objetos %.0f KB · 2 mercados de 161 %.0f KB -> paso %d · 2 de 201 %.0f KB -> paso 3, %.0f KB",
+    size / 1024, info2.size / 1024, raw2 / 1024, info3.shrinkStep, raw4 / 1024, info4.size / 1024))
   -- Al salir: si la sesión lo hizo crecer, se recorta antes de guardar.
-  local session = build(all, 10, 120)
   H.Load({schema = 1, markets = {}}, {db = {}, market = function() return KEY end})
   local live = H.Hist()
-  live.markets = session.markets
+  live.markets = bigHist(all, 8, 112, true, 2).markets
   local stepOut, sizeOut = H.BeforeSave()
-  assert(stepOut >= 1 and sizeOut <= Spec.MAX_BYTES, "al salir " .. tostring(stepOut) .. " " .. tostring(sizeOut))
+  assert(stepOut == 3 and sizeOut <= Spec.MAX_BYTES, "al salir " .. tostring(stepOut) .. " " .. tostring(sizeOut))
 end)
 
 test("PLAYER_LOGOUT deja el historial listo para guardar", function()
   OroHermandadHist.addon = "otra"
   Stub.fire("PLAYER_LOGOUT")
-  eq(OroHermandadHist.addon, "0.5.1")
+  eq(OroHermandadHist.addon, ns.Core.VERSION)
   assert(Spec.EstimateSize(OroHermandadHist) <= Spec.MAX_BYTES)
 end)
 
@@ -717,6 +763,112 @@ test("Privacidad: OroHermandadHist no lleva personajes, hermandad, profesiones n
     for _, item in pairs(m.items) do
       for key in pairs(item) do assert(({n = 1, c = 1, v = 1, d = 1, p = 1})[key], "clave de objeto " .. key) end
     end
+  end
+end)
+
+---------------------------------------------------------------------------
+-- 0.6.0: escaneos que ya leyó Scanner.lua, ventas en los puntos, avisos y salida
+---------------------------------------------------------------------------
+local heard = {}
+History.OnPoint(function(event, ...) heard[#heard + 1] = {event, ...} end)
+
+test("RecordAggregate: vela, punto con su venta, solo lo vigilado, avisos de cada punto y del final", function()
+  Stub.runTimers(30)
+  Stub.now = Stub.now + 4000
+  heard = {}
+  local recorded = {}
+  local relayHook = function(info, sync) recorded[#recorded + 1] = {info = info, sync = sync} end
+  History.OnScanRecorded(relayHook)
+  local t = Stub.now - 30
+  assert(History.RecordAggregate("full", {[2772] = {lo = 95, qty = 40, qty5 = 22}, [2770] = {lo = 31, qty = 10, qty5 = 10},
+    [99999] = {lo = 1, qty = 1, qty5 = 1}, [3858] = {lo = -1, qty = 1, qty5 = 1}}, true,
+    {t = t, dt = 2700, sold = {[2772] = 12, [2770] = 0, [3858] = 5}}))
+  eq(History.Pending(), 1)
+  Stub.runTimers(5)
+  eq(History.Pending(), 0)
+  local p = points(2772)
+  eq(p[#p].t, t); eq(p[#p].lo, 95); eq(p[#p].dt, 2700); eq(p[#p].sold, 12)
+  eq(points(2770)[#points(2770)].sold, 0, "0 vendidas también es una venta")
+  eq(market().items[99999], nil, "lo no vigilado fuera")
+  local r = dayOf(2772, Spec.DayIndex(t))
+  assert(r and r.lo <= 95, "vela del día")
+  -- Avisos: cada punto (observer self) y el final.
+  local points2772, done = nil, nil
+  for _, h in ipairs(heard) do
+    if h[1] == "point" and h[4] == 2772 then points2772 = h end
+    if h[1] == "done" then done = h end
+  end
+  assert(points2772, "aviso del punto")
+  eq(points2772[2], KEY); eq(points2772[3], "self"); eq(points2772[5], t); eq(points2772[6], 95); eq(points2772[7], 40)
+  eq(points2772[8], 2700); eq(points2772[9], 12)
+  assert(done and done[2] == KEY and done[3] == "self" and done[4] == t, "aviso del final")
+  eq(heard[#heard][1], "done", "el final, después de todos los puntos")
+  -- Relay recibe dt y la venta de cada objeto de la lista fija.
+  local info = recorded[1].info
+  eq(info.dt, 2700); eq(info.whole, true); eq(recorded[1].sync, nil)
+  local byId = {}
+  for _, it in ipairs(info.items) do byId[it[1]] = it end
+  eq(byId[2772][5], 12); eq(byId[2770][5], 0); eq(byId[99999], nil)
+  -- Sin dt, sin ventas aunque venga sold.
+  Stub.now = Stub.now + 2000
+  History.RecordAggregate("full", {[2772] = {lo = 96, qty = 41, qty5 = 20}}, false, {sold = {[2772] = 3}})
+  Stub.runTimers(5)
+  eq(points(2772)[#points(2770) > 0 and #points(2772) or 1].dt, nil, "sin dt no hay venta")
+  eq(recorded[2].info.dt, nil)
+  History.OnScanRecorded(ns.Relay.OnScan)
+end)
+
+test("Record con opts.t: un resumen retenido se graba con su hora; el de reserva solo lee Auctionator", function()
+  Stub.now = Stub.now + 4000
+  local t = Stub.now - 500
+  local data = Stub.scanRows("summary", nil, {{id = 2772, price = 88, qty = 30}})
+  History.Record("summary", data, true, {t = t})
+  Stub.runTimers(5)
+  local p = points(2772)
+  eq(p[#p].t, t, "con la hora del resumen"); eq(p[#p].lo, 88)
+  -- El precio de reserva (filas que no se entienden) sale de Auctionator, nunca de la caché propia (que sale de lo
+  -- ya grabado: se escribiría a sí misma).
+  local scanner = ns.Scanner
+  local own = scanner.OwnPrice
+  scanner.OwnPrice = function() return 7, 0 end
+  Stub.now = Stub.now + 86400
+  History.Record("full", {{rara = true}}, true)
+  Stub.runTimers(5)
+  scanner.OwnPrice = own
+  eq(History.lastResult.fallback, true)
+  eq(dayOf(2772, Spec.DayIndex(Stub.now)).lo, Stub.prices[2772], "el de Auctionator, no el propio")
+end)
+
+test("Salir o recargar justo después de un escaneo (History.Flush): se escribe todo y Relay lo recibe en el acto", function()
+  Stub.now = Stub.now + 4000
+  local got = {}
+  History.OnScanRecorded(function(info, sync) got[#got + 1] = {info = info, sync = sync} end)
+  local agg = {}
+  for _, id in ipairs(History.FixedIDs()) do agg[id] = {lo = 500 + id % 97, qty = 30, qty5 = 10} end
+  History.RecordAggregate("full", agg, true, {t = Stub.now})
+  History.RecordAggregate("lista", {[2772] = {lo = 77, qty = 5, qty5 = 5}}, false, {t = Stub.now + 1})
+  History.RecordAggregate("lista", {[2770] = {lo = 33, qty = 5, qty5 = 5}}, false, {t = Stub.now + 2})
+  eq(History.Pending(), 3)
+  local timers = #Stub.timers
+  eq(History.Flush(), 2, "dos trabajos como mucho")
+  eq(#got, 2, "los dos avisados")
+  eq(got[1].sync, true, "sync: Relay lo guarda en el acto")
+  eq(#got[1].info.items, #History.FixedIDs(), "todos los objetos")
+  for _, id in ipairs(History.FixedIDs()) do
+    local pts = points(id)
+    -- 2772 y 2770: el punto de la lista, 1 s después, se junta en el mismo (mínimo de los dos).
+    eq(pts[#pts].lo, id == 2772 and 77 or (500 + id % 97), "punto de " .. id)
+  end
+  eq(History.Pending(), 1, "el tercero sigue en cola")
+  Stub.runTimers(5)
+  eq(History.Pending(), 0)
+  assert(#Stub.timers <= timers + 1)
+  History.OnScanRecorded(ns.Relay.OnScan)
+end)
+
+test("Privacidad 0.6.0: los puntos con venta solo llevan cifras", function()
+  for _, m in pairs(OroHermandadHist.markets) do
+    for _, item in pairs(m.items) do assert(item.p:match("^[%d,;]*$"), item.p) end
   end
 end)
 

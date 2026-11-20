@@ -1,0 +1,46 @@
+# Cómo empaqueta BigWigsMods/packager el addon para CurseForge (y Wago). Lo usan .github/workflows/publicar-oro-hermandad.yml
+# y, sin subir nada, .github/workflows/oro-hermandad.yml en cada cambio del addon.
+# El repositorio lleva también la web, las pruebas y el subidor del PC: solo addon/OroHermandad es el addon. El
+# empaquetador copia todo lo que Git conoce a .release/OroHermandad y move-folders sube addon/OroHermandad a la raíz
+# del zip, así que todo lo demás tiene que estar en ignore. Si se añade una carpeta o un archivo en la raíz, añádelo
+# aquí: si no, la comprobación «el zip es el addon y nada más» falla (en la pull request y antes de publicar nada).
+# Sin tabuladores: solo espacios.
+package-as: OroHermandad
+enable-nolib-creation: no
+
+# Las notas de esta versión: el flujo de publicación copia aquí la sección «## X.Y.Z» de addon/OroHermandad/CAMBIOS.md.
+# Si falta el archivo, el empaquetador mete en el zip un CHANGELOG.md hecho con los commits (y la comprobación falla).
+manual-changelog:
+  filename: .notas-version.md
+  markup-type: markdown
+
+move-folders:
+  OroHermandad/addon/OroHermandad: OroHermandad
+
+# Se enseña en CurseForge como dependencia opcional (el addon funciona sin Auctionator, y lo lee si está).
+optional-dependencies:
+  - auctionator
+
+ignore:
+  - addon/EspeculadorBridge
+  - pages
+  - pc_sync
+  - public
+  - scripts
+  - src
+  - test
+  - test-browser
+  - test-lua
+  - test-vectors
+  - CONTRIBUTING.md
+  - INSTALAR_ORO_DE_HERMANDAD.md
+  - README.md
+  - package.json
+  - package-lock.json
+  - playwright.config.mjs
+  - wrangler.jsonc
+  # Una licencia en la raíz (si los dueños la eligen) no va dentro del addon: el zip tiene que seguir siendo igual
+  # que el de scripts/build-oro-hermandad.mjs.
+  - LICENSE
+  - LICENSE.md
+  - LICENSE.txt

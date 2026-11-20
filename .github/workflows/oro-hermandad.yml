@@ -7,6 +7,7 @@ on:
       - 'test-lua/**'
       - 'test-vectors/**'
       - 'scripts/build-oro-hermandad.mjs'
+      - '.pkgmeta'
       - '.github/workflows/oro-hermandad.yml'
   pull_request:
     paths:
@@ -14,6 +15,7 @@ on:
       - 'test-lua/**'
       - 'test-vectors/**'
       - 'scripts/build-oro-hermandad.mjs'
+      - '.pkgmeta'
       - '.github/workflows/oro-hermandad.yml'
   workflow_dispatch:
 
@@ -48,3 +50,23 @@ jobs:
           path: ${{ runner.temp }}/OroHermandad.zip
           archive: false
           if-no-files-found: error
+      # Lo mismo que hará la publicación en CurseForge, sin subir nada: si el empaquetador mete algo que no es el addon
+      # (una carpeta nueva en la raíz que falta en el ignore de .pkgmeta), se ve aquí y no el día de publicar.
+      - name: Notas de prueba para el empaquetador
+        # Sin .notas-version.md el empaquetador escribe un CHANGELOG.md suyo dentro del zip.
+        run: printf -- '- Comprobación del empaquetado.\n' > .notas-version.md
+      # Sin clave de GitHub ni de CurseForge: -d no sube nada.
+      - name: Empaquetar como en CurseForge, sin subir
+        uses: BigWigsMods/packager@01e8631a69c69d7654c788d152630d5fed9e3812 # v2.7.0
+        with:
+          args: -d -u -n "{package-name}-{project-version}:{project-version}"
+          pandoc: false
+      - name: Comprobar que el zip de CurseForge es el mismo
+        run: |
+          set -eu
+          shopt -s nullglob
+          zips=(.release/OroHermandad-*.zip)
+          [ "${#zips[@]}" -eq 1 ] || { echo "Esperaba un zip en .release y hay ${#zips[@]}" >&2; exit 1; }
+          unzip -q "$RUNNER_TEMP/OroHermandad.zip" -d "$RUNNER_TEMP/esperado"
+          unzip -q "${zips[0]}" -d "$RUNNER_TEMP/curseforge"
+          diff -r "$RUNNER_TEMP/esperado" "$RUNNER_TEMP/curseforge"
