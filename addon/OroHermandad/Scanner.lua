@@ -1,7 +1,8 @@
 -- Oro de Hermandad: escáner propio de la subasta (0.6.0). Auctionator ya no hace falta para tener precios.
 -- Lee la subasta entera (C_AuctionHouse.ReplicateItems, el «escaneo completo») con un presupuesto de 1,5 ms por
--- fotograma, reconoce si es la subasta de tu facción o la neutral de los goblins (que es otro mercado: allí no se guarda
--- nada), decide qué escaneos se graban en el historial (uno cada 30 min y 8 al día por mercado), estima lo que se vendió
+-- fotograma, reconoce si es la subasta de tu facción o la neutral de los goblins (que es otro mercado: de allí no se
+-- guardan precios ni ventas, solo el número de las subastas que creas para no confundir sus avisos de venta con los de
+-- aquí), decide qué escaneos se graban en el historial (uno cada 30 min y 8 al día por mercado), estima lo que se vendió
 -- entre dos escaneos del mismo personaje (Spec.InferSold), apunta tus ventas y tus compras (solo en este PC) y guarda
 -- una caché con el precio más bajo de todo lo visto. También «Escanear la lista»: una búsqueda por objeto vigilado,
 -- solo cuando lo pides (molesta en las pestañas Comprar y Vender, así que nunca va sola).
@@ -49,6 +50,8 @@ Scanner.PRICE_ENTRIES, Scanner.PRICE_BYTES, Scanner.PRICE_DAYS = 40000, 900000, 
 Scanner.SALES_DAYS, Scanner.SALES_MAX, Scanner.SALES_MARKETS = 28, 2000, 4
 Scanner.BUYS_SECONDS, Scanner.BUYS_MAX = 7200 + 600, 300
 Scanner.POST_SECONDS, Scanner.POST_REPEAT = 300, 5
+Scanner.POST_FLIGHT = 2         -- una publicación nueva descarta las pendientes de hace más de 2 s (no se crearon)
+Scanner.OTHER_MAX = 200         -- subastas creadas en la neutral (o en una que no se sabe) que se recuerdan como mucho
 Scanner.SWEEP_SPACING, Scanner.SWEEP_KEY_WAIT, Scanner.SWEEP_ANSWER, Scanner.SWEEP_POLL = 1.2, 2, 5, 0.5
 Scanner.ZONES_MAX, Scanner.DEPREF_MARKETS, Scanner.VISITED_MAX = 32, 4, 16
 
@@ -169,6 +172,7 @@ local held = {}                 -- mercado -> resumen de Auctionator retenido {t
 local chattedVisit, lastChat = false, nil
 local sweep = nil               -- «Escanear la lista» en marcha
 local pending = {}              -- publicaciones vistas y aún sin subasta creada
+local sessionAuctions = {}      -- auctionID -> true: subastas seguidas creadas en esta sesión (desde que se cargó)
 local depRefDay = {}            -- mercado -> día en que se tomaron las referencias de depósito en esta sesión
 local stats = {otherRequests = 0, otherUnanswered = 0, strayRejected = 0, timeouts = 0, requestsWhileReading = 0,
                priceDecodes = 0, queries = 0}
@@ -264,6 +268,7 @@ function Scanner.Init(accountDB, charDB, callbacks)
   db.scanPrices = sanitizePrices(db.scanPrices)
   db.sales = sanitizeSales(db.sales)
   cdb.auctions = cleanMap(cdb.auctions, function(k) return isInt(k, 1, 2 ^ 53) end, isAuction)
+  cdb.otherAuctions = cleanMap(cdb.otherAuctions, function(k) return isInt(k, 1, 2 ^ 53) end, isTime, Scanner.OTHER_MAX)
   cdb.scanBase = sanitizeBase(cdb.scanBase)
   cdb.scanner = type(cdb.scanner) == "table" and cdb.scanner or {}
   if cdb.scanner.ownSeen ~= "yes" and cdb.scanner.ownSeen ~= "no" then cdb.scanner.ownSeen = nil end
@@ -780,13 +785,8 @@ local function onPost(kind, location, duration, quantity, a, b)
     id = ok and readable(got) or nil
   end
   duration, quantity = readable(duration), readable(quantity)
-  local unit
-  if kind == "c" then
-    unit = readable(a)
-  else
-    local buyout = readable(b)
-    unit = (type(buyout) == "number" and type(quantity) == "number" and quantity > 0) and floor(buyout / quantity + 0.5) or 0
-  end
+  -- PostItem: el precio de compra ya es por pieza (con varias, la subasta crea una subasta de 1 por pieza a ese precio).
+  local unit = readable(kind == "c" and a or b)
   if not (isInt(id, 1, ID_MAX) and isInt(duration, 1, 3) and isInt(quantity, 1, Spec.QTY_MAX)) then return end
   unit = (type(unit) == "number" and unit == unit and unit >= 0) and floor(unit + 0.5) or 0
   prunePending(t)
@@ -796,8 +796,38 @@ local function onPost(kind, location, duration, quantity, a, b)
       return
     end
   end
+  -- Una publicación nueva. La subasta las atiende de una en una (el botón espera a que responda a la anterior), así
+  -- que una pendiente de hace más de 2 s ya no se va a crear (un aviso de confirmación que se canceló, una que la
+  -- subasta no aceptó sin decirlo): si se quedara, la siguiente subasta creada se apuntaría con su objeto.
+  local kept = {}
+  for _, p in ipairs(pending) do
+    if t - max(p.at, p.used or 0) <= Scanner.POST_FLIGHT then kept[#kept + 1] = p end
+  end
+  pending = kept
   pending[#pending + 1] = {id = id, unit = unit, qty = quantity, dur = duration, at = t, market = market(), kind = kind,
                            left = quantity}
+end
+
+-- AUCTION_HOUSE_SHOW_ERROR y AUCTION_HOUSE_POST_ERROR (Core) y el gancho de C_AuctionHouse.CancelSell: lo que se estaba
+-- publicando no se hizo (la subasta lo rechazó, no deja publicar ahora o se paró una venta de varias piezas). Se olvidan
+-- las publicaciones pendientes: la siguiente subasta creada no se apunta con el objeto de una que no existe.
+function Scanner.OnPostFailed()
+  pending = {}
+end
+
+-- Subastas creadas en la neutral (o en una que no se sabe): solo el número y la hora, el tiempo que puede durar una.
+local OTHER_SECONDS = (DURATION_HOURS[#DURATION_HOURS] + 1) * 3600
+local function pruneOther(t)
+  local ids = {}
+  for id, at in pairs(cdb.otherAuctions) do
+    if at < t - OTHER_SECONDS then cdb.otherAuctions[id] = nil else ids[#ids + 1] = id end
+  end
+  if #ids <= Scanner.OTHER_MAX then return end
+  table.sort(ids, function(x, y)
+    if cdb.otherAuctions[x] ~= cdb.otherAuctions[y] then return cdb.otherAuctions[x] < cdb.otherAuctions[y] end
+    return x < y
+  end)
+  for i = 1, #ids - Scanner.OTHER_MAX do cdb.otherAuctions[ids[i]] = nil end
 end
 
 -- AUCTION_HOUSE_AUCTION_CREATED: la publicación más vieja pendiente pasa a ser una subasta seguida. Un PostItem de
@@ -809,6 +839,13 @@ function Scanner.OnAuctionCreated(auctionID)
     lastUserAction = t
     auctionID = readable(auctionID)
     if not (t and isInt(auctionID, 1, 2 ^ 53)) then return end
+    if otherHouse() then
+      -- En la neutral (otro mercado) no se sigue nada: solo se recuerda el número, para que su aviso de venta no se
+      -- tome por una venta de tu facción.
+      cdb.otherAuctions[auctionID] = t
+      pruneOther(t)
+      return
+    end
     prunePending(t)
     local p = pending[1]
     if not p or not validMarket(p.market) then return end
@@ -822,6 +859,7 @@ function Scanner.OnAuctionCreated(auctionID)
       table.remove(pending, 1)
     end
     cdb.auctions[auctionID] = table.concat({p.id, p.unit, qty, p.dur, t, p.market, p.kind}, ",")
+    sessionAuctions[auctionID] = true
   end)
 end
 
@@ -850,23 +888,34 @@ end
 -- AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION (notification, text, auctionID). Una venta (AuctionSold) se apunta como
 -- "t,id,unit,qty,dur,age": qty 0 en mercancías (el aviso no dice cuántas unidades, y una subasta de mercancía avisa una
 -- vez por compra parcial: se cuentan veces, no unidades) y 1 en lo demás; lo que no se sabe, 0. El texto se usa solo
--- para reconocer el objeto y nunca se guarda.
+-- para reconocer el objeto y nunca se guarda. «Apuntar mis ventas» apagado (S.sales = false) solo quita el apunte de
+-- la venta: la subasta vendida deja de contar como tuya en el escaneo igual (si no, ese personaje dejaría de medir
+-- ventas).
 function Scanner.OnNotification(notification, text, auctionID)
   if not cdb or not S then return end
   protect("aviso", function()
     notification, auctionID = readable(notification), readable(auctionID)
+    if notification ~= SOLD and notification ~= EXPIRED then return end
+    -- Una subasta de la neutral (o de una que no se sabe): otro mercado, ni se apunta ni toca las tuyas de aquí.
+    if auctionID ~= nil and cdb.otherAuctions[auctionID] then
+      if notification == EXPIRED then cdb.otherAuctions[auctionID] = nil end
+      return
+    end
     if notification == EXPIRED then
       if auctionID ~= nil then cdb.auctions[auctionID] = nil end
       return
     end
-    if notification ~= SOLD or S.sales == false then return end
     local t = now()
     if not t then return end
     pruneAuctions(t)
-    local key, a = nil, nil
-    if auctionID ~= nil and cdb.auctions[auctionID] then key, a = auctionID, decodeAuction(cdb.auctions[auctionID]) end
     text = readable(text)
-    if not a and type(text) == "string" and text ~= "" then
+    local named = type(text) == "string" and text ~= ""
+    local key, a = nil, nil
+    if auctionID ~= nil then
+      -- Con número: la seguida con ese número o ninguna. Los números no se repiten, así que una que no está seguida
+      -- (de antes de instalar, de otro PC) nunca es otra tuya del mismo objeto.
+      if cdb.auctions[auctionID] then key, a = auctionID, decodeAuction(cdb.auctions[auctionID]) end
+    elseif named then
       for k, v in pairs(cdb.auctions) do
         local cand = decodeAuction(v)
         if cand and Items.Name(cand.id) == text and (not a or cand.at < a.at or (cand.at == a.at and k < key)) then
@@ -874,15 +923,18 @@ function Scanner.OnNotification(notification, text, auctionID)
         end
       end
     end
+    -- Una subasta de objeto se vende entera; la de mercancía sigue (avisa una vez por compra parcial), marcada como
+    -- vendida: puede que ya no esté en la subasta y no debe contar como tuya en el escaneo (ownSeen).
+    if a then
+      if a.kind ~= "c" then cdb.auctions[key] = nil elseif not a.sold then cdb.auctions[key] = cdb.auctions[key] .. ",s" end
+    end
+    if S.sales == false then return end
     local rec
     if a then
       rec = {t, a.id, a.unit, a.kind == "c" and 0 or 1, a.dur, max(0, t - a.at)}
-      -- Una subasta de objeto se vende entera; la de mercancía sigue (avisa una vez por compra parcial), marcada como
-      -- vendida: puede que ya no esté en la subasta y no debe contar como tuya en el escaneo (ownSeen).
-      if a.kind ~= "c" then cdb.auctions[key] = nil elseif not a.sold then cdb.auctions[key] = cdb.auctions[key] .. ",s" end
     else
       local id = 0
-      if type(text) == "string" and text ~= "" then
+      if named then
         for _, w in ipairs(History.WatchList()) do
           if Items.Name(w.id) == text then id = w.id; break end
         end
@@ -1001,6 +1053,9 @@ function Scanner.InstallHooks()
     if type(a[name]) == "function" then
       pcall(hooksecurefunc, a, name, function(...) protect("publicar", onPost, kind, ...) end)
     end
+  end
+  if type(a.CancelSell) == "function" then
+    pcall(hooksecurefunc, a, "CancelSell", function() protect("publicar", Scanner.OnPostFailed) end)
   end
   return Scanner.hooked
 end
@@ -1286,32 +1341,41 @@ local function bandMinimums()
   return out
 end
 
--- Subastas de este personaje que deberían salir en el escaneo: las seguidas de este mercado aún vigentes y sin aviso
--- de venta, y las que la subasta da como activas con precio de compra (GetOwnedAuctionInfo: las vendidas que esperan
--- en el correo no cuentan). Contar de menos solo hace la comprobación más blanda.
-local function activeOwned()
+-- Tus subastas según la pestaña Subastas (GetOwnedAuctionInfo, 200 como mucho): cuántas están activas con precio de
+-- compra (las vendidas que esperan en el correo no), cuántas hay y, si la lista está entera (HasFullOwnedAuctionResults
+-- y no más de 200), el estado de cada auctionID.
+local function ownedAuctions()
   local ok, n = ah("GetNumOwnedAuctions")
   n = ok and readable(n) or nil
-  if not isInt(n, 1, 100000) then return 0, n end
+  if not isInt(n, 1, 100000) then return 0, n, nil end
+  local okFull, full = ah("HasFullOwnedAuctionResults")
+  local statusOf = (okFull and readable(full) == true and n <= Scanner.OWNED_MAX) and {} or nil
   local active = 0
   for i = 1, min(n, Scanner.OWNED_MAX) do
     local okInfo, info = ah("GetOwnedAuctionInfo", i)
     if okInfo and type(info) == "table" then
-      local status, buyout = readable(info.status), readable(info.buyoutAmount)
+      local status, buyout, id = readable(info.status), readable(info.buyoutAmount), readable(info.auctionID)
       if status == ACTIVE and type(buyout) == "number" and buyout > 0 then active = active + 1 end
+      if statusOf and id ~= nil then statusOf[id] = status end
     end
   end
-  return active, n
+  return active, n, statusOf
 end
 
+-- Subastas de este personaje que deberían salir en el escaneo: las seguidas de este mercado aún vigentes, sin aviso de
+-- venta y creadas en esta sesión (el aviso de venta solo llega con el personaje conectado: lo vendido mientras no
+-- estabas seguiría contando), y las que la pestaña Subastas da como activas con precio de compra. Con esa lista entera,
+-- una seguida que sale vendida o que no sale ya no cuenta. Contar de menos solo hace la comprobación más blanda.
 local function expectedOwn(key, t)
-  local n = 0
-  for _, text in pairs(cdb.auctions) do
-    local a = decodeAuction(text)
-    if a and a.market == key and not a.sold and auctionEnd(a) >= t then n = n + 1 end
-  end
-  local active, owned = activeOwned()
+  local active, owned, statusOf = ownedAuctions()
   stats.ownedAuctions = type(owned) == "number" and (active .. " a la venta de " .. owned) or nil
+  local n = 0
+  for auctionID, text in pairs(cdb.auctions) do
+    local a = sessionAuctions[auctionID] and decodeAuction(text)
+    if a and a.market == key and not a.sold and auctionEnd(a) >= t and (not statusOf or statusOf[auctionID] == ACTIVE) then
+      n = n + 1
+    end
+  end
   return n + active
 end
 
@@ -1394,11 +1458,15 @@ local function finishBegin(job)
   job.baseItems, job.baseCounts, job.baseTotal = {}, {}, 0
   job.day = Spec.DayIndex(t)
   -- ¿Salen tus subastas en el escaneo? Si dos escaneos seguidos no ven ninguna cuando debería haberlas, en este
-  -- personaje no se miden ventas (hasta que un escaneo vea alguna).
+  -- personaje no se miden ventas (hasta que un escaneo vea alguna o ya no tengas ninguna que debiera salir: sin
+  -- subastas tuyas, el escaneo no puede tomarlas por las del mercado).
   if job.ownRows > 0 then cs.ownSeen, cs.ownMiss = "yes", nil
   elseif expectedOwn(key, t) > 0 then
     cs.ownMiss = (cs.ownMiss or 0) + 1
     if cs.ownMiss >= Scanner.OWN_MISSES then cs.ownSeen = "no" end
+  else
+    cs.ownMiss = nil
+    if cs.ownSeen == "no" then cs.ownSeen = nil end
   end
   -- Ventas solo si se va a grabar y hay referencia de este personaje de 15 min a 2 h antes, con los mismos tramos, y
   -- no anterior al último escaneo de la cuenta que ya midió ventas aquí (con un alter, las dos medidas se pisarían).
@@ -1576,7 +1644,10 @@ function Scanner.HoldSummary(summary)
   local key = summary.market or market()
   if not validMarket(key) then return false end
   if otherHouse() then return "drop" end -- subasta neutral o que no se sabe: ni se retiene ni se graba
-  summary.market, summary.t = key, isTime(summary.t) and summary.t or now()
+  -- Hora del servidor: una hora futura (la del reloj del PC adelantado) llevaría el filtro de grabado de toda la cuenta
+  -- al futuro, y el resumen acaba de terminar.
+  local t = now()
+  summary.market, summary.t = key, (isTime(summary.t) and not (t and summary.t > t)) and summary.t or t
   summary.at = clock()
   if held[key] then release(key) end
   held[key] = summary
@@ -1806,9 +1877,19 @@ local function nextItem(answered, lo, qty, qty5)
   notify()
 end
 
+-- Un solo paso programado a la vez: cada uno lleva su número y uno que se adelanta (stepNow, con un evento de la
+-- subasta) deja sin valor al que estaba esperando, que ya no corre ni se vuelve a programar.
 local function scheduleSweep(wait)
-  local token = sweep.token
-  after(wait, function() protect("lista", sweepStep, token) end)
+  sweep.step = sweep.step + 1
+  local token, step = sweep.token, sweep.step
+  after(wait, function()
+    if sweep and sweep.token == token and sweep.step == step then protect("lista", sweepStep, token) end
+  end)
+end
+
+local function stepNow()
+  sweep.step = sweep.step + 1
+  sweepStep(sweep.token)
 end
 
 sweepStep = function(token)
@@ -1895,7 +1976,7 @@ end
 function Scanner.OnItemKeyInfo(itemID)
   if not sweep or not sweep.cur or sweep.cur.phase ~= "key" or sweep.cur.id ~= readable(itemID) then return end
   sweep.cur.phase = "query"
-  protect("lista", sweepStep, sweep.token)
+  protect("lista", stepNow)
 end
 
 -- COMMODITY_SEARCH_RESULTS_UPDATED (itemID): la respuesta de la búsqueda (Core además guarda el libro, CaptureBook).
@@ -1903,7 +1984,7 @@ function Scanner.OnCommodityResults(itemID)
   if not sweep or not sweep.cur or sweep.cur.phase ~= "wait" or sweep.cur.id ~= readable(itemID) then return end
   protect("lista", function()
     nextItem(true, readCommodity(sweep.cur.id))
-    sweepStep(sweep.token)
+    stepNow()
   end)
 end
 
@@ -1914,7 +1995,7 @@ function Scanner.OnItemResults(itemKey)
   if id ~= sweep.cur.id then return end
   protect("lista", function()
     nextItem(true)
-    sweepStep(sweep.token)
+    stepNow()
   end)
 end
 
@@ -1955,7 +2036,7 @@ function Scanner.StartSweep()
   for _, w in ipairs(History.WatchList()) do items[#items + 1] = {id = w.id} end
   sweepSeq = sweepSeq + 1
   sweep = {items = items, index = 1, answered = 0, unanswered = 0, agg = {}, lo = {}, lastQuery = -math.huge,
-           t = now(), token = sweepSeq, paused = false}
+           t = now(), token = sweepSeq, step = 0, paused = false}
   result = nil
   notify()
   protect("lista", sweepStep, sweep.token)
@@ -2119,6 +2200,7 @@ function Scanner.BeforeSave()
     if t then
       pruneBuys(t)
       pruneAuctions(t)
+      pruneOther(t)
       for key in pairs(db.sales) do
         local kept = {}
         for _, r in ipairs(salesList(key)) do if r[1] > t - Scanner.SALES_DAYS * 86400 then kept[#kept + 1] = r end end

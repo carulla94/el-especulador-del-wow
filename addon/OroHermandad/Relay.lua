@@ -34,6 +34,7 @@ local LIVE_PER_SENDER = 600             -- y se acepta como mucho uno nuevo de c
 local REPLY_COOLDOWN = 600              -- una respuesta a la misma persona cada 10 min como mucho
 local REPLY_DELAY_MIN, REPLY_DELAY_MAX = 2, 90 -- al azar: con muchos compañeros, las respuestas llegan repartidas
 local REPLY_MAX_SCANS, REPLY_MAX_MSGS = 4, 28 -- 28: dos escaneos enteros de 14 partes (con ventas; 24 hasta la 0.5.1)
+local LEGACY_REPLY_MSGS = 24            -- el más pequeño de cualquier versión: con él se ve si una respuesta llegó llena
 local REPLY_QUEUE_LIMIT = 48            -- con tantos mensajes de precios en cola no se responde
 local OUTBOX_MAX, OUTBOX_SECONDS = 32, 72 * 3600
 local ASK_COOLDOWN = 600                -- el PC con el subidor pide como mucho cada 10 min (por cuenta)
@@ -400,6 +401,7 @@ end
 ---------------------------------------------------------------------------
 local db, cdb                 -- OroHermandadDB.relay (cuenta) y OroHermandadCharDB.relay (personaje)
 local markerSeen = false      -- el subidor del PC dejó su aviso (OroHermandad_Subidor)
+local loadedAt = nil          -- hora unix al cargar la interfaz (Relay.Init): el juego lee el aviso del subidor entonces
 local loggedIn = false        -- ya pasó Relay.Login (25 s después de entrar)
 local stats = {received = 0, dropped = 0, lastReason = nil}
 local open, openCount, bySender, dead = {}, 0, {}, {}
@@ -411,6 +413,7 @@ local windowCount, windowParts, windowSeq = {}, {}, 0
 local replies, repliedAt = {}, {}
 local askedAt, targetLog, pendingTargets, lastTarget, targetTimer = {}, {}, {}, -math.huge, false
 local broadcastTimer = false
+local queuedSent = nil        -- hora del escaneo que esta sesión ya puso en cola en directo (relay.sent, al salir entero)
 local askPending = false      -- hay que pedir a toda la hermandad (hasta que la petición sale de verdad)
 local askQueued, askPolling = false, false -- esa petición ya está en la cola / hay un temporizador mirando si se puede
 local followAsk, followTarget = false, {} -- peticiones de lo que faltaba, ya programadas (toda la hermandad / código)
@@ -759,7 +762,8 @@ local scheduleFollowUp
 
 -- Un escaneo completo de un compañero: a la bandeja de entrada (64 como mucho), si no se tenía ya y no pasa de los
 -- límites (uno en directo cada 10 min por compañero; 8 por ventana de puesta al día). Si su respuesta llega llena
--- (4 escaneos, o no cabría otro como el último en los 28 mensajes), lo que le quede se pide solo más tarde.
+-- (4 escaneos, o no cabría otro como el último en 24 mensajes), lo que le quede se pide solo más tarde. 24 y no 28:
+-- quien responde puede tener la 0.4.x/0.5.x, que para en 24 (con una de la 0.6.0, como mucho sobra una petición).
 local function deliver(scan)
   local market = History.Market(scan.market)
   local obs = market and type(market.obs) == "table" and market.obs[scan.hash] or nil
@@ -781,7 +785,7 @@ local function deliver(scan)
     windowCount[k] = (windowCount[k] or 0) + 1
     local parts = scan.parts or 1
     windowParts[k] = (windowParts[k] or 0) + parts
-    if windowCount[k] >= REPLY_MAX_SCANS or windowParts[k] + parts > REPLY_MAX_MSGS then
+    if windowCount[k] >= REPLY_MAX_SCANS or windowParts[k] + parts > LEGACY_REPLY_MSGS then
       scheduleFollowUp(win, scan.hash, scan.sender)
     end
   end
@@ -916,15 +920,19 @@ local function validTokens(text)
 end
 
 -- Anuncia a la hermandad el escaneo más nuevo del buzón que aún no salió en directo, como mucho uno cada 15 min por
--- personaje (si toca esperar, un solo temporizador lo hace a su hora).
+-- personaje (si toca esperar, un solo temporizador lo hace a su hora). Los 15 min (lastSent) cuentan desde que se pone
+-- en cola, pero solo cuenta como compartido (sent) cuando sale su última parte: lo que aún estaba en la cola se pierde
+-- con un /reload o al salir (también con «Guardar y subir» unos segundos después del escaneo) y así sale otra vez al
+-- volver a entrar. En la misma sesión no se pone dos veces en cola (queuedSent).
 local function maybeBroadcast()
   if not shareOn() or not cdb or not salt() then return end
   local key, mk = marketNow()
   local t = unixNow()
   if not (key and t) then return end
+  local done = max(cdb.sent or 0, queuedSent or 0)
   local newest
   for _, scan in ipairs(cdb.out) do
-    if scan.mk == mk and scan.t > (cdb.sent or 0) and scan.t >= t - LIVE_OLDEST + TTL.live and scan.t <= t + FUTURE
+    if scan.mk == mk and scan.t > done and scan.t >= t - LIVE_OLDEST + TTL.live and scan.t <= t + FUTURE
        and (not newest or scan.t > newest.t) then
       newest = scan
     end
@@ -939,12 +947,19 @@ local function maybeBroadcast()
     return
   end
   local msgs = pack("P3", nextSeq(), mk, newest.t, splitTokens(newest.items), P3_PARTS, newest.dt)
-  if Guild.EnqueueRelay(msgs, "GUILD", nil, TTL.live) then cdb.lastSent, cdb.sent = t, newest.t end
+  local last, scanT = msgs[#msgs], newest.t
+  local function onSent(entry)
+    -- Las partes salen en orden y, si una falla o caduca, Guild quita el resto: la última sale solo si salieron todas.
+    if entry.msg == last and cdb then cdb.sent = max(cdb.sent or 0, scanT) end
+  end
+  if Guild.EnqueueRelay(msgs, "GUILD", nil, TTL.live, onSent) then cdb.lastSent, queuedSent = t, scanT end
 end
 
 -- History acaba de grabar un escaneo. Solo uno entero, propio (no el precio de reserva de Auctionator) y nuevo va
 -- al buzón y se comparte; solo los objetos de la lista fija. Con info.dt, cada objeto lleva su venta estimada.
-local function onScan(info)
+-- leaving (al salir o recargar): solo al buzón. Ya no saldría nada (los temporizadores se acaban con la sesión) y
+-- Relay.Login lo anuncia al volver a entrar.
+local function onScan(info, leaving)
   if not db or not cdb or type(info) ~= "table" then return end
   if not (info.whole and not info.fallback and not info.duplicate and (info.written or 0) > 0) then return end
   if not History.ValidMarketKey(info.market) or not isInt(info.t, 1, TIME_MAX) then return end
@@ -961,13 +976,13 @@ local function onScan(info)
   if #items == 0 then return end
   cdb.out[#cdb.out + 1] = {t = info.t, mk = tagOf(info.market), items = table.concat(sortTokens(items, dt ~= nil), ","), dt = dt}
   cdb.out = pruneOutbox(cdb.out, unixNow())
-  maybeBroadcast()
+  if not leaving then maybeBroadcast() end
 end
 
 -- Se llama al terminar de grabar (dentro de una tanda de History): el trabajo va en la siguiente. sync (desde
 -- History.Flush, al salir o recargar): en el acto, para que el escaneo llegue al buzón antes de que se guarde.
 function Relay.OnScan(info, sync)
-  if sync then protect("escaneo", onScan, info); return end
+  if sync then protect("escaneo", onScan, info, true); return end
   after(0, function() protect("escaneo", onScan, info) end)
 end
 
@@ -1063,11 +1078,14 @@ Relay.MARKER_STALE = 7200
 -- Líneas del subidor del PC (solo en el PC que sube precios y con un aviso 0.6.0), de la más importante a la menos:
 -- {stale = «no parece abierto», warn = «avisa: …», base = «último envío aceptado…»}; la ventana enseña la primera que
 -- haya y /oro subidor, todas. nil si no toca.
-function Relay.UploaderLines(t)
+-- «No parece abierto»: el aviso tenía más de 2 h al cargar la interfaz. El juego solo lee su archivo al entrar o con
+-- /reload y el subidor abierto lo reescribe cada hora: comparado con la hora de ahora, en cualquier sesión larga
+-- parecería cerrado aunque esté subiendo.
+function Relay.UploaderLines()
   if not Relay.UploaderMode() then return nil end
   local _, info = Relay.MarkerInfo()
   if not info then return nil end
-  t = t or unixNow()
+  local readAt = loadedAt or unixNow()
   local out = {}
   local parts = {}
   local envio = info.envio
@@ -1082,7 +1100,7 @@ function Relay.UploaderLines(t)
   end
   out.base = "Subidor del PC" .. (info.version and (" (" .. info.version .. ")") or "") .. ": " .. table.concat(parts, " · ") .. "."
   if envio and envio.estado ~= "ok" then out.warn = "El subidor del PC avisa: " .. MARKER_WARNINGS[envio.estado] .. "." end
-  if info.escrito and t and t - info.escrito > Relay.MARKER_STALE then
+  if info.escrito and readAt and readAt - info.escrito > Relay.MARKER_STALE then
     out.stale = "El subidor del PC no parece abierto (último aviso a las " .. hhmm(info.escrito) .. "): ábrelo para que suba."
   end
   return out
@@ -1307,6 +1325,7 @@ end
 -- En ADDON_LOADED, después de History.Load: ajustes de la cuenta (OroHermandadDB.relay: subidor, share, lastAsk) y
 -- del personaje (OroHermandadCharDB.relay: seq, lastSent, sent y el buzón out de 72 h).
 function Relay.Init(accountDB, charDB)
+  loadedAt = loadedAt or unixNow()
   accountDB.relay = sanitizeDB(accountDB.relay)
   charDB.relay = sanitizeCDB(charDB.relay, unixNow())
   db, cdb = accountDB.relay, charDB.relay
@@ -1317,11 +1336,12 @@ end
 
 -- 25 s después de entrar (la hermandad ya está identificada y su anuncio H2/R2 ya salió): se mira el aviso del
 -- subidor, se apunta tu código y, en el PC que sube precios, se pide a la hermandad lo que se perdió. También sale un
--- escaneo de antes del /reload que aún no se compartió.
+-- escaneo de antes del /reload que aún no se compartió (o que se quedó a medio enviar).
 function Relay.Login()
   protect("entrada", function()
     if not db then return end
     loggedIn = true
+    loadedAt = loadedAt or unixNow() -- (si al cargar aún no se podía leer la hora)
     markerSeen = Relay.MarkerDetected()
     local key = History.CurrentMarket()
     if key and History.Hist() then recordSelf(key) end

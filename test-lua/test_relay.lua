@@ -1931,6 +1931,34 @@ test("Respuestas de 0.6.0: dos escaneos de 14 partes (28 mensajes); el tercero e
   logout(lleno)
 end)
 
+-- Al revés: quien responde tiene la 0.5.1 (24 mensajes por respuesta) y quien pide, la 0.6.0 (28). Con escaneos de 13
+-- partes la 0.5.1 manda uno (13 + 13 > 24); quien pide tiene que verla llena con 24, no con sus 28 (26 cabrían).
+test("Respuesta de la 0.5.1 (24 mensajes) al subidor 0.6.0: con escaneos de 13 partes, el resto llega solo", function()
+  local names = {"Viejo51", "Sube60"}
+  local old = member("Viejo51", names, {relayFile = LEGACY .. "Relay-0.5.1.lua", random = function() return 30 end})
+  login(old, 30)
+  for k = 1, 3 do
+    -- Cantidades de 4 cifras en base 36: la lista fija entera en 13 partes.
+    local items = {}
+    for i, id in ipairs(FIXED_IDS) do items[id] = {60000 + ((i * 7919 + k * 104729) % 900000), 1300 + (i * 37) % 4000, 1296 + i % 50} end
+    scan(old, items)
+    run(1000)
+  end
+  eq(#old.CharDB.relay.out, 3, "3 en el buzón de la 0.5.1")
+  run(3600)
+  local up = member("Sube60", names, {marker = true})
+  old.sent = {}
+  login(up, 25)
+  quiet("respuesta de la 0.5.1", function() run(300) end)
+  local h = hashOf(up, "Viejo51")
+  eq(#sentBy(old, "^P3|", "WHISPER"), 13, "un escaneo de 13 partes")
+  eq(scansAt(up, h), 1, "la primera respuesta trae uno")
+  quiet("lo que faltaba de la 0.5.1", function() run(2700) end)
+  eq(scansAt(up, h), 3, "los otros dos llegan solos (dos peticiones más)")
+  eq(#sentBy(old, "^P3|", "WHISPER"), 3 * 13, "cada escaneo, una vez")
+  logout(up); logout(old)
+end)
+
 -- Ejecuta un solo temporizador de la red simulada (el siguiente).
 local function runOne()
   local best, index
@@ -2002,6 +2030,75 @@ test("Al salir justo después de grabar un escaneo: History.Flush lo escribe y R
     local pts = Spec.DecodePoints(saved.hist.markets[MARKET] and saved.hist.markets[MARKET].items[id].p)
     eq(pts[#pts].lo, 3000 + i, "punto de " .. id)
   end
+end)
+
+-- El anuncio en directo cuenta como hecho (relay.sent) cuando sale su última parte, no al ponerlo en cola: lo que
+-- queda en la cola se pierde con un /reload («Guardar y subir» unos segundos después del escaneo) o al salir.
+test("En directo y /reload: un anuncio a medias, o uno grabado justo al salir, vuelve a salir tras recargar, una vez", function()
+  local names = {"Recarga3", "Oye3"}
+  local mate = member("Oye3", names)
+  login(mate, 30)
+  local function record(c, k)
+    local agg = {}
+    for i, id in ipairs(FIXED_IDS) do agg[id] = {lo = 4000 + i * 13 + k, qty = 30 + i, qty5 = 7} end
+    local t = unix()
+    current = c
+    assert(c.History.RecordAggregate("full", agg, true, {t = t}))
+    current = nil
+    return t
+  end
+  -- Partes en directo de c con la hora t: cuántas son en total (según la cabecera) y cuántas salieron.
+  local function live(c, t)
+    local total, n = 0, 0
+    for _, e in ipairs(sentBy(c, "^P3|", "GUILD")) do
+      local parts, at = e.msg:match("^P3|%w+|%d+|(%d+)|%x+|(%w+)|")
+      if at == R.B36(t) then total, n = tonumber(parts), n + 1 end
+    end
+    return total, n
+  end
+  local h = hashOf(mate, "Recarga3")
+  -- 1) /reload 4 s después del escaneo: solo han salido unas partes.
+  local c = member("Recarga3", names)
+  login(c, 30)
+  run(1000)
+  local t1 = record(c, 1)
+  run(4)
+  local total, n = live(c, t1)
+  assert(n > 0 and n < total, "a medias: " .. n .. " de " .. total)
+  assert(c.CharDB.relay.sent ~= t1, "aún no cuenta como compartido")
+  local saved = logout(c)
+  run(150)
+  eq(obsOf(mate, h), nil, "la serie a medias no se aplica")
+  c = member("Recarga3", names, {db = saved.db, cdb = saved.cdb, hist = saved.hist})
+  login(c, 30)
+  quiet("tras recargar", function() run(900) end) -- (los 15 min entre anuncios cuentan desde el primero)
+  total, n = live(c, t1)
+  assert(total > 0 and n == total, "sale entero otra vez: " .. n .. " de " .. total)
+  eq(scansAt(mate, h), 1, "y el compañero lo tiene")
+  eq(c.CharDB.relay.sent, t1, "ahora sí cuenta como compartido")
+  -- 2) Salir justo después de grabar: History.Flush lo deja en el buzón, pero ya no puede salir nada; al volver, sale.
+  run(1000)
+  local lastSent = c.CharDB.relay.lastSent
+  local t2 = record(c, 2)
+  saved = logout(c)
+  eq(select(2, live(c, t2)), 0, "nada salió al salir")
+  eq(saved.cdb.relay.out[#saved.cdb.relay.out].t, t2, "en el buzón")
+  eq(saved.cdb.relay.sent, t1, "sin contar como compartido")
+  eq(saved.cdb.relay.lastSent, lastSent, "ni gastar los 15 min")
+  c = member("Recarga3", names, {db = saved.db, cdb = saved.cdb, hist = saved.hist})
+  login(c, 30)
+  quiet("al volver a entrar", function() run(60) end)
+  total, n = live(c, t2)
+  assert(total > 0 and n == total, "sale al entrar: " .. n .. " de " .. total)
+  eq(scansAt(mate, h), 2, "el compañero tiene los dos")
+  eq(c.CharDB.relay.sent, t2)
+  -- 3) Otro /reload: ya no se repite.
+  saved = logout(c)
+  c = member("Recarga3", names, {db = saved.db, cdb = saved.cdb, hist = saved.hist})
+  login(c, 30)
+  run(1800)
+  eq(#sentBy(c, "^P3|"), 0, "una vez")
+  logout(c); logout(mate)
 end)
 
 test("Ningún error interno ni nada de precios enviado con los mensajes restringidos en toda la sesión", function()

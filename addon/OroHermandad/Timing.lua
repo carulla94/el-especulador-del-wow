@@ -1135,25 +1135,38 @@ local FOOTNOTE = {
     .. "entre dos escaneos de la misma persona. El depósito de 8 h es 4 veces el de 2 h; el de 24 h, 12 veces.)",
 }
 
--- Las 5 filas de la tabla. rows[i] = {price, rate, sec, w} por franja (textos ya hechos o números).
-local function tableLines(rows)
-  local lines = {}
-  local function row(label, cells)
-    local out = padRight(label, 11)
-    for i = 1, BLOCKS do out = out .. padLeft(cells[i], 8) end
-    lines[#lines + 1] = out
-  end
-  local franja, precio, ventas, medido, escaneos = {}, {}, {}, {}, {}
+-- Las 5 filas de la tabla, celda a celda: {{"Franja", "00-04", ...}, {"Precio", "+4 %", ...}, ...}. rows[i] =
+-- {priceOK, p, rateIdx, sec, w} de cada franja.
+local function tableCells(rows)
+  local franja, precio, ventas, medido, escaneos = {"Franja"}, {"Precio"}, {"Ventas"}, {"Medido"}, {"Escaneos"}
   for i = 1, BLOCKS do
     local r = rows[i]
-    franja[i] = columnLabel(i - 1)
-    precio[i] = (r.priceOK and r.p) and pct(r.p) or "—"
-    ventas[i] = r.rateIdx and rateText(r.rateIdx) or "—"
-    medido[i] = hoursText(r.sec or 0)
-    escaneos[i] = tostring(floor((r.w or 0) + 0.5))
+    franja[i + 1] = columnLabel(i - 1)
+    precio[i + 1] = (r.priceOK and r.p) and pct(r.p) or "—"
+    ventas[i + 1] = r.rateIdx and rateText(r.rateIdx) or "—"
+    medido[i + 1] = hoursText(r.sec or 0)
+    escaneos[i + 1] = tostring(floor((r.w or 0) + 0.5))
   end
-  row("Franja", franja); row("Precio", precio); row("Ventas", ventas); row("Medido", medido); row("Escaneos", escaneos)
+  return {franja, precio, ventas, medido, escaneos}
+end
+
+-- Las mismas filas como texto para copiar, con espacios (alineado en letra de ancho fijo). En el juego la ventana las
+-- dibuja además en celdas (UI.SetTextTable): su letra no es de ancho fijo y los espacios no bastan.
+local function tableLines(cells)
+  local lines = {}
+  for _, cellRow in ipairs(cells) do
+    local out = padRight(cellRow[1], 11)
+    for i = 2, BLOCKS + 1 do out = out .. padLeft(cellRow[i], 8) end
+    lines[#lines + 1] = out
+  end
   return lines
+end
+
+-- Deja a la ventana la tabla de este texto (Core solo le pasa título y texto): la dibuja si muestra este mismo texto.
+local function offerTable(text, caption, cells)
+  local ui = ns.UI
+  if type(ui) ~= "table" or type(ui.SetTextTable) ~= "function" then return end
+  protect("tabla de la ventana", ui.SetTextTable, text, cells and {caption = caption, rows = cells} or nil)
 end
 
 local function itemAdviceText(advice)
@@ -1175,9 +1188,10 @@ function Timing.FindItem(arg)
   local wanted = Data.Normalize(arg)
   local partial, partialCount = nil, 0
   for _, w in ipairs(History.WatchList()) do
+    -- Por posición, no con ipairs: si el cliente aún no tiene el nombre (nil), el de reserva se mira igual.
     local names = {Items.Name(w.id), Data.FALLBACK_NAMES[w.id]}
-    for _, name in ipairs(names) do
-      local n = Data.Normalize(name)
+    for k = 1, 2 do
+      local n = Data.Normalize(names[k])
       if n ~= "" then
         if n == wanted then return w.id end
         if n:find(wanted, 1, true) and partial ~= w.id then partial, partialCount = w.id, partialCount + 1 end
@@ -1194,6 +1208,7 @@ function Timing.View(arg)
   local key = History.CurrentMarket()
   local t = now() or 0
   local title = "Oro de Hermandad · cuándo vender"
+  offerTable(nil) -- solo la de este texto, si la hay
   if not db or not key then return title, "Aún no se sabe en qué mercado estás.", "aún no se sabe en qué mercado estás." end
   local lines = {}
   local pending = not passDone[key] and " (aún se están leyendo los escaneos guardados: vuelve a mirarlo en unos segundos)" or ""
@@ -1207,7 +1222,8 @@ function Timing.View(arg)
   end
   if id then
     local blocks = Timing.ItemBlocks(id, key, t)
-    lines[#lines + 1] = "Cuándo vender · " .. itemName(id) .. " · últimas semanas (hora de España)" .. pending
+    local heading = "Cuándo vender · " .. itemName(id) .. " · últimas semanas (hora de España)"
+    lines[#lines + 1] = heading .. pending
     if not blocks then
       lines[#lines + 1] = "Aún no hay datos de este objeto: escanea la subasta (o espera a los escaneos de la hermandad)."
       return title, table.concat(lines, "\n"), itemName(id) .. ": aún no hay datos."
@@ -1218,21 +1234,26 @@ function Timing.View(arg)
       rows[i] = {priceOK = blocks[i].priceOK, p = blocks[i].p, rateIdx = advice.rateIdx[i], sec = blocks[i].sec,
                  w = blocks[i].w}
     end
-    for _, line in ipairs(tableLines(rows)) do lines[#lines + 1] = line end
+    local cells = tableCells(rows)
+    for _, line in ipairs(tableLines(cells)) do lines[#lines + 1] = line end
     local best = bestLine(advice, blocks)
     lines[#lines + 1] = best
     local sales = salesLine(key, id)
     if sales then lines[#lines + 1] = sales end
     for _, line in ipairs(FOOTNOTE) do lines[#lines + 1] = line end
-    return title, table.concat(lines, "\n"), itemName(id) .. ": " .. best:gsub("^Mejor franja para vender: ", "")
+    local text = table.concat(lines, "\n")
+    offerTable(text, heading, cells)
+    return title, text, itemName(id) .. ": " .. best:gsub("^Mejor franja para vender: ", "")
   end
   local profile = Timing.Profile(key, t)
-  lines[#lines + 1] = "Cuándo vender · tu hermandad · últimas semanas (hora de España)" .. pending
+  local heading = "Cuándo vender · tu hermandad · últimas semanas (hora de España)"
+  lines[#lines + 1] = heading .. pending
   if profile.items == 0 then
     lines[#lines + 1] = "Aún no hay datos en este mercado: escanea la subasta (o espera a los escaneos de la hermandad)."
     return title, table.concat(lines, "\n"), "cuándo vender: aún no hay datos en este mercado."
   end
-  for _, line in ipairs(tableLines(profile.blocks)) do lines[#lines + 1] = line end
+  local cells = tableCells(profile.blocks)
+  for _, line in ipairs(tableLines(cells)) do lines[#lines + 1] = line end
   local best = bestLine(profile, profile.blocks)
   lines[#lines + 1] = best
   local sales = salesLine(key)
@@ -1258,7 +1279,9 @@ function Timing.View(arg)
       for _, e in ipairs(list) do lines[#lines + 1] = "  " .. e.name .. ": " .. e.text end
     end
   end
-  return title, table.concat(lines, "\n"), "cuándo vender: " .. best:gsub("^Mejor franja para vender: ", "")
+  local text = table.concat(lines, "\n")
+  offerTable(text, heading, cells)
+  return title, text, "cuándo vender: " .. best:gsub("^Mejor franja para vender: ", "")
 end
 
 -- Línea de la descripción de un objeto vigilado: «Cuándo vender: 20-24 h (más ventas)» o «aún pocos datos».

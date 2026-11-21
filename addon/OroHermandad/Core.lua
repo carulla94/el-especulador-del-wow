@@ -1089,7 +1089,13 @@ local function scanFinished(kind, rows, data, fromClient)
     local last = tonumber(db.scanRows[key]) or 0
     whole = rows >= math.max(SCAN_MIN_ROWS, SCAN_MIN_SHARE * last)
     db.scanRows[key] = whole and rows or math.max(rows, math.floor(last * SCAN_DECAY))
-    if not whole then safely("el historial de precios", History.Record, kind, data, false); refreshSoon(); return end
+    -- Cortado por una búsqueda: con el escáner propio solo refresca. Un punto suyo sin el filtro de grabado se juntaría
+    -- con el escaneo completo que llega después (menos de 30 min) y su venta medida quedaría con otra hora.
+    if not whole then
+      if not scannerLoaded() then safely("el historial de precios", History.Record, kind, data, false) end
+      refreshSoon()
+      return
+    end
   end
   if not fromClient then
     if not scannerLoaded() then
@@ -1097,12 +1103,12 @@ local function scanFinished(kind, rows, data, fromClient)
     elseif kind == "summary" and whole then
       -- Con el escáner propio: el resumen entero espera por si llega el escaneo completo de esta visita (que lo
       -- sustituye); si no llega, se graba con su hora al soltarlo (onSummaryRelease, también al salir o recargar).
-      local ok = scannerCall("HoldSummary", {t = time(), rows = rows, data = data, market = key})
+      -- Su hora es la del servidor, como la de todos los escaneos (time() es el reloj del PC).
+      local ok = scannerCall("HoldSummary", {t = History.Now() or time(), rows = rows, data = data, market = key})
       if not ok then safely("el historial de precios", History.Record, kind, data, whole) end
-    elseif kind ~= "full" then
-      safely("el historial de precios", History.Record, kind, data, whole)
     end
-    -- El escaneo completo de Auctionator no se graba aquí: el escáner lee la misma respuesta (gancho en ReplicateItems).
+    -- Con el escáner propio, nada más se graba aquí: el escaneo completo de Auctionator lo lee el escáner (gancho en
+    -- ReplicateItems) y un resumen sin número de filas no se sabe si es entero (solo refresca, como uno cortado).
   end
   db.dbUpdated[key] = now
   if whole then db.fullScan[key] = now end
@@ -1281,6 +1287,9 @@ function handlers.ITEM_KEY_ITEM_INFO_RECEIVED(itemID) scannerCall("OnItemKeyInfo
 function handlers.AUCTION_HOUSE_THROTTLED_SYSTEM_READY() scannerCall("OnThrottle", "AUCTION_HOUSE_THROTTLED_SYSTEM_READY") end
 function handlers.AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED() scannerCall("OnThrottle", "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED") end
 function handlers.AUCTION_HOUSE_AUCTION_CREATED(auctionID) scannerCall("OnAuctionCreated", auctionID) end
+-- La subasta rechazó lo que se estaba publicando (o no deja publicar ahora): el escáner lo olvida.
+function handlers.AUCTION_HOUSE_SHOW_ERROR() scannerCall("OnPostFailed") end
+function handlers.AUCTION_HOUSE_POST_ERROR() scannerCall("OnPostFailed") end
 function handlers.AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION(notification, text, auctionID)
   scannerCall("OnNotification", notification, text, auctionID)
 end

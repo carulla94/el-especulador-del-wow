@@ -547,6 +547,100 @@ test("/oro cuando con nombre (sin tildes), número o enlace; la descripción del
   assert(has(_G.OroHermandadTextFrame.text, "Cuándo vender · tu hermandad"), "botón")
 end)
 
+test("/oro cuando con el nombre de reserva: el cliente aún no tiene el nombre del objeto (nil) y se encuentra igual", function()
+  fresh()
+  login()
+  eq(ns.Items.Name(2771), nil, "el cliente conoce 2771 pero aún no su nombre")
+  eq(ns.Data.FALLBACK_NAMES[2771], "Mineral de estaño")
+  eq(Timing.FindItem("mineral de estaño"), 2771, "nombre de reserva")
+  eq(Timing.FindItem("MINERAL DE ESTANO"), 2771, "sin tildes ni mayúsculas")
+  eq(Timing.FindItem("mineral de est"), 2771, "parte del nombre")
+  eq(Timing.FindItem("lingote de bronce"), 2841, "otro sin nombre del cliente")
+  eq(Timing.FindItem("estaño"), nil, "parte de dos objetos (mineral y lingote de estaño): ninguno")
+  Stub.printed = {}
+  SlashCmdList.OROHERMANDAD("cuando mineral de estaño")
+  assert(printed("Mineral de estaño: aún no hay datos."), tostring(Stub.printed[1]))
+end)
+
+-- Letras (no bytes) de un texto UTF-8, para rehacer las filas con espacios a partir de las celdas.
+local function letters(s) return #(s:gsub("[\128-\191]", "")) end
+local function padL(s, n) return string.rep(" ", math.max(0, n - letters(s))) .. s end
+local function padR(s, n) return s .. string.rep(" ", math.max(0, n - letters(s))) end
+
+test("Ventana de /oro cuando: la tabla en celdas de ancho fijo alineadas a la derecha (reusadas) y el texto entero para copiar", function()
+  fresh()
+  login()
+  pattern({2772, 2770})
+  SlashCmdList.OROHERMANDAD("cuando")
+  local f = _G.OroHermandadTextFrame
+  assert(f and f.__shown, "ventana abierta")
+  assert(type(f.cells) == "table" and f.grid, "la tabla va en celdas")
+  eq(f.caption:GetText(), "Cuándo vender · tu hermandad · últimas semanas (hora de España)", "título de la tabla")
+  assert(f.caption.__shown, "título visible")
+  local lines = {}
+  for l in (f.text .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = l end
+  local labels = {"Franja", "Precio", "Ventas", "Medido", "Escaneos"}
+  local xs, ys = {}, {}
+  for r = 1, 5 do
+    local row = padR(f.cells[r][1]:GetText(), 11)
+    for c = 1, 7 do
+      local cell = f.cells[r][c]
+      assert(cell and cell.__shown, "celda " .. r .. "," .. c)
+      if c > 1 then row = row .. padL(cell:GetText(), 8) end
+      local p = cell.__points[1]
+      eq(p[1], "TOPLEFT", "anclada arriba a la izquierda"); eq(p[2], f, "a la ventana")
+      -- Misma x y mismo ancho en toda la columna; misma y en toda la fila: no depende de la letra.
+      xs[c] = xs[c] or p[4]; eq(p[4], xs[c], "x de la columna " .. c .. " en la fila " .. r)
+      ys[r] = ys[r] or p[5]; eq(p[5], ys[r], "y de la fila " .. r)
+      eq(cell.__width, c == 1 and 80 or 60, "ancho fijo " .. r .. "," .. c)
+      eq(cell.__justifyH, c == 1 and "LEFT" or "RIGHT", "alineación " .. r .. "," .. c)
+      if c > 1 then eq(xs[c] - xs[c - 1], c == 2 and 80 or 60, "columnas seguidas") end
+    end
+    eq(f.cells[r][1]:GetText(), labels[r])
+    eq(row, lines[r + 1], "las celdas son las mismas cifras que la fila " .. r .. " del texto")
+    if r > 1 then assert(ys[r] < ys[r - 1], "cada fila debajo de la anterior") end
+  end
+  eq(f.cells[1][7]:GetText(), "20-24"); eq(f.cells[3][2]:GetText(), "—")
+  eq(f.cells[6], nil, "5 filas"); eq(f.cells[1][8], nil, "7 columnas")
+  -- El texto para copiar sigue entero (con la tabla), seleccionado, debajo de la tabla.
+  eq(f.edit:GetText(), f.text); assert(f.edit.__highlighted, "seleccionado")
+  assert(has(f.text, "\nEscaneos  "), "la tabla también en el texto")
+  local top = f.scroll.__points[1]
+  eq(top[1], "TOPLEFT"); assert(top[5] < ys[5], "el texto empieza debajo de la última fila: " .. tostring(top[5]))
+  assert(has(f.hint:GetText(), "Arriba, la tabla") and has(f.hint:GetText(), "Ctrl+C"), f.hint:GetText())
+  -- Otra vez (y con un objeto): las mismas celdas, sin crear otras.
+  local same = {}
+  for r = 1, 5 do same[r] = {} for c = 1, 7 do same[r][c] = f.cells[r][c] end end
+  SlashCmdList.OROHERMANDAD("cuando hierro")
+  eq(f.caption:GetText(), "Cuándo vender · Hierro · últimas semanas (hora de España)")
+  for r = 1, 5 do for c = 1, 7 do
+    assert(rawequal(f.cells[r][c], same[r][c]), "celda reusada " .. r .. "," .. c)
+    assert(f.cells[r][c].__shown, "visible " .. r .. "," .. c)
+  end end
+  eq(#f.cells, 5, "sin filas de más")
+  -- Otro texto (/oro tabla, /oro sondeo, un objeto sin datos): sin tabla y el texto vuelve arriba.
+  local function noGrid(what)
+    for r = 1, 5 do for c = 1, 7 do assert(not f.cells[r][c].__shown, what .. ": celda " .. r .. "," .. c .. " oculta") end end
+    assert(not f.caption.__shown and not f.grid, what .. ": sin tabla")
+    eq(f.scroll.__points[1][5], -50, what .. ": el texto arriba")
+    eq(f.hint:GetText(), "Ya está todo seleccionado: Ctrl+C para copiarlo.", what)
+  end
+  ns.UI.ShowText("Oro de Hermandad · sondeo", "otro texto")
+  noGrid("otro texto")
+  SlashCmdList.OROHERMANDAD("cuando 3575")
+  assert(has(f.text, "Aún no hay datos de este objeto"), f.text)
+  noGrid("objeto sin datos")
+  -- La tabla solo va con el texto con el que se hizo.
+  local _, text = Timing.View("")
+  ns.UI.ShowText("x", text .. " ")
+  noGrid("texto distinto")
+  ns.UI.ShowText("x", text)
+  noGrid("ya usada")
+  Timing.View("")
+  ns.UI.ShowText("x", text)
+  assert(f.grid and f.cells[5][7].__shown, "con el mismo texto, otra vez la tabla")
+end)
+
 test("Cobertura de una franja (la usa la propuesta «franja con pocos datos»)", function()
   fresh()
   login()

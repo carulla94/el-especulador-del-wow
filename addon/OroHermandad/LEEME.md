@@ -89,6 +89,7 @@ Mejor franja para vender: 20-24 h (más ventas; precio −3 %). Pon o iguala el 
 - **Medido** son las horas medidas entre parejas de escaneos y **Escaneos**, los escaneos con precio de referencia: así se ve dónde faltan datos.
 - **Cuándo poner:** «Pon o iguala el precio hacia las 19-20 h» es la hora antes de la mejor franja: la subasta vende primero lo más barato y, a igual precio, lo último que se puso, así que basta con igualar el más barato justo antes de que lleguen los compradores. Con 2 h (u 8 h si no vas a volver): el depósito de 8 h es 4 veces el de 2 h y el de 24 h, 12 veces.
 - Con un objeto (`/oro cuando hierro`, su número o su enlace), su tabla. En la descripción de los objetos vigilados: «Cuándo vender: 20-24 h (más ventas)».
+- En la ventana, la tabla sale arriba en columnas; debajo va todo el texto (también la tabla) ya seleccionado para copiarlo con Ctrl+C.
 
 ## Tus ventas
 
@@ -100,7 +101,7 @@ Desde la versión 0.3.0 el addon apunta los precios de una lista de materiales y
 
 - **Pesca (0.5.0):** apunta también el pescado crudo, lo que se cocina con él, los aceites que se destilan (de bocanegra, de fuego y de Escama Tormentosa) y los elixires que los usan. Son 47 objetos más para la pestaña «Pesca» del panel de la hermandad: qué pescar, dónde, si compensa venderlo crudo, cocinarlo o destilarlo, y a qué hora y qué día se vende mejor. Desde la 0.5.1 también se comparten con la hermandad como el resto (ver «Precios compartidos con la hermandad»): así el pescado que escanea cualquiera llega al panel, no solo el de quien tiene el subidor. Al instalar la 0.5.0, el mismo día se rellena con el historial de Auctionator lo que ya tengas escaneado de ellos.
 
-- **Cuándo apunta:** con cada escaneo guardado (los del addon, como mucho uno cada 30 min y 8 al día por reino y facción, y los de Auctionator). Por cada día guarda el precio mínimo más bajo y el más alto, el último, cuántas unidades había a la venta y cuántos escaneos hubo. De los últimos 14 días guarda además cada escaneo con su hora. Una búsqueda que corta el escaneo de Auctionator solo apunta ese momento: no cuenta para el día. Tus propias subastas no cuentan como precio del mercado (en el escaneo completo).
+- **Cuándo apunta:** con cada escaneo guardado (los del addon, como mucho uno cada 30 min y 8 al día por reino y facción, y los de Auctionator). Por cada día guarda el precio mínimo más bajo y el más alto, el último, cuántas unidades había a la venta y cuántos escaneos hubo. De los últimos 14 días guarda además cada escaneo con su hora. Una búsqueda que corta el escaneo de Auctionator no se apunta: solo refresca los precios. Tus propias subastas no cuentan como precio del mercado (en el escaneo completo).
 - **Días que faltan:** al entrar, una vez al día, los rellena con el historial de Auctionator (sus últimos 21 días). Nunca sustituye lo que el addon vio por sí mismo.
 - **Depósitos:** con la subasta abierta apunta cuánto cuesta publicar una unidad de cada objeto, según la duración.
 - **Tamaño:** lo tuyo, como mucho 2 MB (1,25 MB hasta la 0.5.1). Guarda 120 días por objeto; si hiciera falta, recorta primero los días más viejos (de más de 90 y de más de 60 días) y después los escaneos sueltos más viejos, que son lo único con hora. Lo que comparten tus compañeros va aparte, con su propio tope de 4 MB (3 MB hasta la 0.5.1; ver «Precios compartidos con la hermandad»). Desde la 0.6.0 un escaneo puede llevar también la venta estimada desde el anterior de la misma persona.
@@ -176,7 +177,7 @@ El subidor de la hermandad es una ventana para Windows, **«Oro de Hermandad · 
 
 - **Quien tiene el subidor actualiza primero** el addon y el subidor a la 0.6.0: si no, el panel no recibe las ventas.
 - WoW solo guarda los precios en el disco al recargar la interfaz o al salir del juego. En el PC del subidor, cuando hay algo nuevo, la ventana del addon tiene el botón **Guardar y subir** (o `/oro guardar`): pide confirmación dentro de la ventana y recarga la interfaz, para que el subidor, si está abierto, envíe los precios en unos segundos en vez de al salir. Nunca recarga solo ni en combate, y está desactivado mientras aún se guardan precios o si hoy a tu clave le quedan 2 envíos o menos en el panel.
-- El pie de la ventana y `/oro subidor` cuentan lo que dice el subidor: el último envío aceptado y cuántas personas aportan precios, si el panel rechazó la clave o pide esperar, o si el subidor no parece abierto (su último aviso tiene más de 2 h).
+- El pie de la ventana y `/oro subidor` cuentan lo que dice el subidor: el último envío aceptado y cuántas personas aportan precios, si el panel rechazó la clave o pide esperar, o si el subidor no parece abierto (su último aviso ya tenía más de 2 h al entrar en el juego o recargar: el juego solo lo lee entonces).
 - El subidor solo lee el archivo que WoW ya ha guardado y escribe su carpeta de aviso: no toca el juego, ni su memoria, ni pulsa teclas.
 
 ## Descripción de los objetos

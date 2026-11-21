@@ -1188,6 +1188,39 @@ test("PC del subidor: el pie y /oro subidor cuentan el último envío, los aviso
   _G.OroHermandadSubidor = nil
 end)
 
+test("PC del subidor: la edad del aviso cuenta al cargar la interfaz (el juego no ve cómo lo reescribe el subidor)", function()
+  -- El subidor abierto lo escribió hace 50 min (lo reescribe cada hora, pero el juego solo lee el archivo al entrar o
+  -- con /reload): horas de juego sin recargar no lo convierten en «no parece abierto».
+  local t0 = now()
+  local lua = string.format("OroHermandadSubidor = {formato = 1, datos = 2, escrito = %d, version = \"0.6.0\", "
+    .. "envio = {t = %d, estado = \"ok\"}, aportan = 7}", t0 - 3000, t0 - 3100)
+  marker(lua)
+  local s = freshSession()
+  slash("subidor auto")
+  local base = "Subidor del PC (0.6.0): último envío aceptado a las " .. hhmm(t0 - 3100) .. " · 7 personas aportan precios (dato de las "
+    .. hhmm(t0 - 3000) .. ")."
+  local stale = "El subidor del PC no parece abierto (último aviso a las " .. hhmm(t0 - 3000) .. "): ábrelo para que suba."
+  render(s)
+  assert(has(_G.OroHermandadFrame.footer.__text, base), _G.OroHermandadFrame.footer.__text)
+  Stub.advance(2 * 3600 + 60)
+  render(s)
+  assert(has(_G.OroHermandadFrame.footer.__text, base), "2 h después, sin recargar: " .. _G.OroHermandadFrame.footer.__text)
+  eq060(s.Relay.UploaderLines().stale, nil, "sin «no parece abierto»")
+  Stub.printed = {}
+  slash("subidor")
+  assert(printed(base) and not printed("no parece abierto"), table.concat(Stub.printed, " | "))
+  -- Un /reload ahora lee el mismo archivo (el subidor no lo reescribió: está cerrado), de hace más de 2 h.
+  s = Stub.reload("addon/OroHermandad", function() marker(lua) end)
+  Stub.fire("PLAYER_LOGIN")
+  Stub.runUntil(nil, 30)
+  render(s)
+  assert(has(_G.OroHermandadFrame.footer.__text, stale), "tras recargar: " .. _G.OroHermandadFrame.footer.__text)
+  -- Y sigue así en la sesión, aunque pase el tiempo: es lo que se leyó al cargar.
+  Stub.advance(600)
+  eq060(s.Relay.UploaderLines().stale, stale)
+  _G.OroHermandadSubidor = nil
+end)
+
 test("«Guardar y subir» (R12): solo en el PC del subidor con algo nuevo; desactivado mientras se guarda; confirmación; un ReloadUI", function()
   local s = freshSession()
   local frame = _G.OroHermandadFrame

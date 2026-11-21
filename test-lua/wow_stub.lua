@@ -27,6 +27,8 @@ local function newObject(kind, name)
   function methods:SetHeight(h) self.__height = h end
   function methods:GetHeight() return self.__height or 140 end
   function methods:SetMaxLines(n) self.__maxLines = n end
+  function methods:SetWidth(w) self.__width = w end        -- GetWidth sigue dando 140
+  function methods:SetJustifyH(h) self.__justifyH = h end
   function methods:GetCenter() return 700, 500 end
   function methods:GetEffectiveScale() return 1 end
   function methods:SetPoint(...) self.__points[#self.__points + 1] = {...} end
@@ -513,9 +515,13 @@ function Stub.installAuctionHouse()
   function api.GetOwnedAuctionInfo(i)
     local o = ah.ownedList[i]
     if not o then return nil end
-    return {auctionID = 9000 + i, itemKey = {itemID = o.id or 2772}, status = o.status or 0, quantity = o.qty or 1,
+    return {auctionID = o.auctionID or 9000 + i, itemKey = {itemID = o.id or 2772}, status = o.status or 0, quantity = o.qty or 1,
             buyoutAmount = o.buyoutAmount, bidAmount = o.bidAmount, bidder = o.bidder}
   end
+  -- ownedFull: la lista de la pestaña Subastas está entera (se consultó con QueryOwnedAuctions).
+  function api.HasFullOwnedAuctionResults() return ah.ownedFull == true end
+  -- Para una venta de varias piezas en curso (el marco de vender lo llama al cerrarse).
+  function api.CancelSell() ah.cancelSells = (ah.cancelSells or 0) + 1 end
   function api.IsThrottledMessageSystemReady() return ah.ready end
   -- Búsquedas: MakeItemKey, GetItemKeyInfo (nil hasta keyDelay s; entonces ITEM_KEY_ITEM_INFO_RECEIVED) y
   -- SendSearchQuery (100 por minuto; se ignora sin aviso si la clave no tiene datos o el objeto está en ignore).

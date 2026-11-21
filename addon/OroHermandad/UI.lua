@@ -444,10 +444,18 @@ end
 function UI.RestorePosition() applySavedPosition() end
 
 ---------------------------------------------------------------------------
--- Ventana de texto para copiar (/oro tabla, /oro sondeo)
+-- Ventana de texto para copiar (/oro tabla, /oro sondeo, /oro cuando)
 ---------------------------------------------------------------------------
 local TEXT_WIDTH, TEXT_HEIGHT = 640, 440
+local TEXT_TOP = 50 -- donde empieza el texto (debajo de la línea de ayuda), o la tabla si la hay
+-- Tabla en celdas encima del texto (la de «Cuándo vender»): la letra del juego no es de ancho fijo y una tabla hecha
+-- con espacios se tuerce. Una celda por FontString, de ancho fijo: la primera columna a la izquierda y las demás a la
+-- derecha. Se crean la primera vez y luego solo se cambia su texto.
+local GRID_LABEL_WIDTH, GRID_CELL_WIDTH, GRID_ROW_HEIGHT, GRID_CAPTION_HEIGHT = 80, 60, 16, 18
+local GRID_MAX_ROWS, GRID_MAX_COLUMNS = 8, 8
+local GRID_HINT = "Arriba, la tabla; debajo, todo el texto (también la tabla) ya seleccionado: Ctrl+C para copiarlo."
 local textFrame
+local pendingTable -- {text, tbl}: la tabla del próximo texto (UI.SetTextTable)
 
 local function createTextFrame()
   local f = CreateFrame("Frame", "OroHermandadTextFrame", UIParent, "BasicFrameTemplateWithInset")
@@ -474,9 +482,17 @@ local function createTextFrame()
   f.hint:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -30)
   f.hint:SetJustifyH("LEFT")
 
+  f.caption = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  f.caption:SetPoint("TOPLEFT", f, "TOPLEFT", 14, -TEXT_TOP)
+  f.caption:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -TEXT_TOP)
+  f.caption:SetJustifyH("LEFT")
+  if f.caption.SetWordWrap then f.caption:SetWordWrap(false) end
+  f.caption:Hide()
+  f.cells = {} -- f.cells[fila][columna]
+
   local ok, scroll = pcall(CreateFrame, "ScrollFrame", "OroHermandadTextScroll", f, "ScrollFrameTemplate")
   if not ok or not scroll then scroll = CreateFrame("ScrollFrame", "OroHermandadTextScroll2", f, "UIPanelScrollFrameTemplate") end
-  scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -50)
+  scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -TEXT_TOP)
   scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -32, 12)
   local edit = CreateFrame("EditBox", nil, scroll)
   edit:SetMultiLine(true)
@@ -496,12 +512,72 @@ local function createTextFrame()
   return f
 end
 
--- Muestra un texto seleccionado para copiarlo con Ctrl+C. hint: una línea de ayuda encima.
+-- La celda (fila r, columna c) de la tabla, creada una sola vez: rótulos (fila 1 y columna 1) en dorado y cifras en
+-- blanco, todas del mismo ancho en su columna.
+local function gridCell(f, r, c)
+  f.cells[r] = f.cells[r] or {}
+  local cell = f.cells[r][c]
+  if cell then return cell end
+  cell = f:CreateFontString(nil, "OVERLAY", (r == 1 or c == 1) and "GameFontNormal" or "GameFontHighlight")
+  local x = c == 1 and 14 or 14 + GRID_LABEL_WIDTH + (c - 2) * GRID_CELL_WIDTH
+  cell:SetPoint("TOPLEFT", f, "TOPLEFT", x, -(TEXT_TOP + GRID_CAPTION_HEIGHT + (r - 1) * GRID_ROW_HEIGHT))
+  cell:SetWidth(c == 1 and GRID_LABEL_WIDTH or GRID_CELL_WIDTH)
+  cell:SetJustifyH(c == 1 and "LEFT" or "RIGHT")
+  if cell.SetWordWrap then cell:SetWordWrap(false) end
+  f.cells[r][c] = cell
+  return cell
+end
+
+-- Pone la tabla (o la quita con tbl = nil) y coloca el texto debajo. tbl = {caption = texto, rows = {{celdas}, ...}}.
+local function setGrid(f, tbl)
+  local rows = type(tbl) == "table" and type(tbl.rows) == "table" and tbl.rows or {}
+  local used = math.min(#rows, GRID_MAX_ROWS)
+  for r = 1, math.max(used, #f.cells) do
+    local row = r <= used and type(rows[r]) == "table" and rows[r] or {}
+    for c = 1, GRID_MAX_COLUMNS do
+      local value = row[c]
+      if value ~= nil then
+        local cell = gridCell(f, r, c)
+        cell:SetText(tostring(value))
+        cell:Show()
+      elseif f.cells[r] and f.cells[r][c] then
+        f.cells[r][c]:SetText("")
+        f.cells[r][c]:Hide()
+      end
+    end
+  end
+  local top = TEXT_TOP
+  if used > 0 then
+    f.caption:SetText(type(tbl.caption) == "string" and tbl.caption or "")
+    f.caption:Show()
+    top = TEXT_TOP + GRID_CAPTION_HEIGHT + used * GRID_ROW_HEIGHT + 8
+  else
+    f.caption:SetText("")
+    f.caption:Hide()
+  end
+  f.scroll:ClearAllPoints()
+  f.scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -top)
+  f.scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -32, 12)
+  f.edit:SetHeight(TEXT_HEIGHT - top - 20)
+  f.grid = used > 0 and tbl or nil
+end
+
+-- Tabla para el próximo UI.ShowText de este mismo texto (Timing.View la deja; Core solo pasa título y texto).
+-- tbl = {caption = texto, rows = {{"Franja", "00-04", ...}, ...}} o nil para quitarla.
+function UI.SetTextTable(text, tbl)
+  pendingTable = (type(text) == "string" and type(tbl) == "table") and {text = text, tbl = tbl} or nil
+end
+
+-- Muestra un texto seleccionado para copiarlo con Ctrl+C. hint: una línea de ayuda encima. Si a este texto le dejaron
+-- una tabla (UI.SetTextTable), va dibujada en celdas encima y el texto, debajo, sigue entero para copiarlo.
 function UI.ShowText(title, text, hint)
   if not textFrame then textFrame = createTextFrame() end
+  local tbl = pendingTable and pendingTable.text == text and pendingTable.tbl or nil
+  pendingTable = nil
   textFrame.text = text or ""
   textFrame.title:SetText(title or "Oro de Hermandad")
-  textFrame.hint:SetText(hint or "Ya está todo seleccionado: Ctrl+C para copiarlo.")
+  setGrid(textFrame, tbl)
+  textFrame.hint:SetText(hint or (textFrame.grid and GRID_HINT) or "Ya está todo seleccionado: Ctrl+C para copiarlo.")
   textFrame:Show()
   textFrame.edit:SetText(textFrame.text)
   textFrame.edit:SetFocus()
