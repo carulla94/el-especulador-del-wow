@@ -1,9 +1,10 @@
 /** Releases of Oro de Hermandad (.github/workflows/publicar-oro-hermandad.yml, .github/workflows/oro-hermandad.yml,
  * .pkgmeta, scripts/build-oro-hermandad.mjs): the version lines the workflow reads (contract C9), the uploader line of
  * the release notes and its fallback to the previous Subidor_Windows.zip (D15), «solo_subidor», the reusable uploader
- * workflow (C10), what may reach the packager and the CurseForge zip. The shell steps are taken from the workflow file
- * itself and run with bash against a fake `gh` that keeps releases and artifacts in a temporary folder: nothing here
- * talks to GitHub, CurseForge or Wago. */
+ * workflow (C10), what may reach the packager and the CurseForge zip, and which pull requests run these tests (the
+ * check workflow, before the merge: npm test in deploy-cloudflare.yml runs them too). The shell steps are taken from
+ * the workflow file itself and run with bash against a fake `gh` that keeps releases and artifacts in a temporary
+ * folder (or answers the Actions API from a JSON file): nothing here talks to GitHub, CurseForge or Wago. */
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -175,7 +176,11 @@ test("C9: the version step stops before anything slow when the tag, the TOC, Cor
     [{cambios: "## 0.6.0 (2026-11-20)\n\n   \n## 0.5.1 (2026-11-18)\n\n- Pescado.\n"}, "oro-hermandad-v0.6.0", 1, "La sección «## 0.6.0» de CAMBIOS.md está vacía"],
     [{}, "oro-hermandad-v", 1, "«oro-hermandad-v» no es oro-hermandad-vX.Y.Z"],
     [{}, "oro-hermandad-v0.6.0;ls", 1, "no es oro-hermandad-vX.Y.Z"],
-    [{}, "oro-hermandad-v0.6.0 x", 1, "no es oro-hermandad-vX.Y.Z"]
+    [{}, "oro-hermandad-v0.6.0 x", 1, "no es oro-hermandad-vX.Y.Z"],
+    [{}, "oro-hermandad-v0.6.0\n0.6.0", 1, "no es oro-hermandad-vX.Y.Z"],
+    // A test version: the same checks, with its own CAMBIOS.md section.
+    [{toc: "0.6.1-beta1", core: "0.6.1-beta1", hist: "0.6.1-beta1", cambios: "## 0.6.1-beta1 (2026-11-21)\n\n- Escáner propio.\n- Ventas estimadas.\n\n## 0.6.0 (2026-11-20)\n\n- Otra.\n"},
+      "oro-hermandad-v0.6.1-beta1", 0, null]
   ];
   for (const [files, tag, status, message] of cases) {
     const w = world(t);
@@ -185,6 +190,39 @@ test("C9: the version step stops before anything slow when the tag, the TOC, Cor
     if (message) assert.ok(result.stderr.includes(message), result.stderr);
     else assert.equal(fs.readFileSync(path.join(w.dir, ".notas-version.md"), "utf8").replace(/\r/g, ""), "\n- Escáner propio.\n- Ventas estimadas.\n\n");
   }
+});
+
+test("a test version is a prerelease on GitHub and alpha or beta on CurseForge and Wago, never only on one side", t => {
+  if (!bash) return t.skip("needs bash");
+  const check = stepRun(PUBLISH, "comprobar", "Comprobar la versión y sacar sus notas de CAMBIOS.md");
+  const create = stepRun(PUBLISH, "github", "Crear la versión de GitHub con los dos zips");
+  // The pinned packager (v2.7.0, release.sh file_type) uploads to CurseForge, and to Wago, as alpha when the tag has
+  // «alpha», as beta when it has «beta», and as a normal release otherwise. GitHub: the github job's --prerelease.
+  const storeTest = tag => /alpha|beta/.test(tag.toLowerCase());
+  const versions = ["0.6.1", "0.6.1.2", "0.6.1-beta1", "0.6.1-alpha2", "0.6.1-beta", "0.6.1-rc1", "0.6.1-prueba1", "0.6.1beta1",
+    "0.6.1-Beta1", "0.6.1alpha", "0.6.1-beta1-x", "0.6.1-", "0.6.1.2.3"];
+  const accepted = [];
+  for (const version of versions) {
+    // Every version line agrees (C9), so only the form of the version can stop it.
+    const w = world(t), tag = "oro-hermandad-v" + version;
+    addonFiles(w.dir, {toc: version, core: version, hist: version, cambios: `## ${version} (2026-11-21)\n\n- Prueba.\n`});
+    const checked = w.run(check, {ETIQUETA: tag});
+    if (checked.status !== 0) {
+      assert.ok(checked.stderr.includes(`«${tag}» no es oro-hermandad-vX.Y.Z (ni X.Y.Z-alphaN o X.Y.Z-betaN, de prueba)`), `${version}: ${checked.stderr}`);
+      continue;
+    }
+    accepted.push(version);
+    for (const [dir, file, bytes] of [["addon", "OroHermandad.zip", "PK"], ["addon", "notas-version.md", "\n- Prueba.\n"], ["subidor", "Subidor_Windows.zip", ZIP_A]]) {
+      fs.mkdirSync(path.join(w.temp, dir), {recursive: true}); fs.writeFileSync(path.join(w.temp, dir, file), bytes);
+    }
+    fs.writeFileSync(path.join(w.temp, "linea-subidor.txt"), `Subidor para Windows 0.6.0: Subidor_Windows.zip (SHA-256 ${sha256(ZIP_A)})\n`);
+    const created = w.run(create, {ETIQUETA: tag});
+    assert.equal(created.status, 0, created.stderr);
+    const calls = w.log().filter(line => line.startsWith("release create"));
+    assert.equal(calls.length, 1, version);
+    assert.equal(calls[0].endsWith(" --prerelease"), storeTest(tag), `${version}: GitHub and the stores agree on a test version`);
+  }
+  assert.deepEqual(accepted, ["0.6.1", "0.6.1.2", "0.6.1-beta1", "0.6.1-alpha2", "0.6.1-beta"]);
 });
 
 // ---- D15: the uploader line and the fallback to the previous Subidor_Windows.zip -----------------------------------
@@ -382,10 +420,10 @@ test("no GitHub token ever reaches the packager; gh gets one only in the jobs th
   assert.deepEqual(keys, [[], ["CF_API_TOKEN"], ["WAGO_API_TOKEN"]]);
   assert.match(steps[0], /args: -d \$\{\{ env\.EMPAQUETADOR_OPCIONES \}\}/, "the check run uploads nothing");
   assert.doesNotMatch(jobText(PUBLISH, "comprobar"), /GH_TOKEN|github\.token/);
-  // The stores: a read-only token only in the step that looks at earlier attempts of the run, never in another step.
+  // The stores: a read-only token only in the step that looks at earlier runs and attempts, never in another step.
   for (const job of ["curseforge", "wago"]) {
     const steps = jobText(PUBLISH, job).split(/\n      - name: /);
-    assert.deepEqual(steps.filter(step => /GH_TOKEN|github\.token/.test(step)).map(step => step.split("\n")[0]), ["¿Ya se subió en un intento anterior?"], job);
+    assert.deepEqual(steps.filter(step => /GH_TOKEN|github\.token/.test(step)).map(step => step.split("\n")[0]), ["¿Ya se subió esta versión?"], job);
     assert.match(jobText(PUBLISH, job), /^    permissions:\n      contents: read\n      actions: read\n    steps:$/m, job);
   }
   for (const job of ["github", "subidor-suelto"]) {
@@ -397,60 +435,115 @@ test("no GitHub token ever reaches the packager; gh gets one only in the jobs th
   assert.equal(envValue(PUBLISH, "AVISO_DESBLOQUEAR"), "Antes de extraer el subidor: clic derecho en el zip → Propiedades → «Desbloquear».");
 });
 
-test("«Re-run failed jobs» after a failed Windows build never uploads the same version to CurseForge or Wago twice", t => {
-  for (const [job, name] of [["curseforge", "Subir a CurseForge"], ["wago", "Subir a Wago"]]) {
-    const text = jobText(PUBLISH, job), step = "¿Ya se subió en un intento anterior?";
-    assert.match(text, new RegExp(`^    name: ${name}$`, "m"));
-    assert.ok(text.indexOf(`- name: ${step}\n        id: antes`) > 0 && text.indexOf(`- name: ${step}`) < text.indexOf("- name: Descargar el código"), job);
-    // Every later step, the packager's included, only runs when no earlier attempt uploaded.
+// A fake `gh api` for the stores' «¿Ya se subió esta versión?» step, in Node (URL and query parsing) with the step's own
+// --jq run by jq. $FAKE/api.json holds the runs: {id, head_sha, attempts: [[job, …], …], listed?, broken?}. It only reads:
+// any flag but --paginate and --jq (a --method, -f, -F or --input) fails, as does an unknown URL.
+const FAKE_API = String.raw`"use strict";
+const fs = require("fs"), path = require("path"), {spawnSync} = require("child_process");
+const args = process.argv.slice(2), fake = process.env.FAKE;
+fs.appendFileSync(path.join(fake, "log"), args.join(" ") + "\n");
+const fail = message => { process.stderr.write(message + "\n"); process.exit(1); };
+if (args[0] !== "api" || !args[1]) fail("fake gh: only gh api <url>");
+let jq = ".";
+for (let i = 2; i < args.length; i++) {
+  if (args[i] === "--jq") jq = args[++i];
+  else if (args[i] !== "--paginate") fail("fake gh: " + args[i]);
+}
+const url = new URL(args[1], "https://api.github.com/"), base = "/repos/carulla94/el-especulador-del-wow/actions/";
+const rest = url.pathname.startsWith(base) ? url.pathname.slice(base.length) : "";
+const runs = JSON.parse(fs.readFileSync(path.join(fake, "api.json"), "utf8")).runs;
+const find = id => runs.find(run => String(run.id) === id && !run.broken) || fail("HTTP 502: Bad Gateway");
+let body, m;
+if (rest === "workflows/publicar-oro-hermandad.yml/runs") {
+  // The latest attempt of each run of this workflow (on one commit with head_sha).
+  const sha = url.searchParams.get("head_sha");
+  const list = runs.filter(run => run.listed !== false && (sha === null || run.head_sha === sha));
+  body = {total_count: list.length, workflow_runs: list.map(run => ({id: run.id, head_sha: run.head_sha, run_attempt: run.attempts.length}))};
+} else if ((m = /^runs\/(\d+)\/jobs$/.exec(rest))) {
+  // filter=all: the jobs of every attempt; otherwise (latest) only those of the last one.
+  const run = find(m[1]), attempts = url.searchParams.get("filter") === "all" ? run.attempts : run.attempts.slice(-1);
+  const jobs = attempts.flatMap((list, n) => list.map(job => ({...job, run_id: run.id, run_attempt: n + 1})));
+  body = {total_count: jobs.length, jobs};
+} else if ((m = /^runs\/(\d+)\/attempts\/(\d+)\/jobs$/.exec(rest))) {
+  const jobs = find(m[1]).attempts[Number(m[2]) - 1] || fail("HTTP 404: Not Found");
+  body = {total_count: jobs.length, jobs};
+} else fail("HTTP 404: Not Found (" + url.pathname + ")");
+const out = spawnSync("jq", ["-r", jq], {input: JSON.stringify(body), encoding: "utf8"});
+process.stdout.write(out.stdout || ""); process.stderr.write(out.stderr || "");
+process.exit(out.status === null ? 1 : out.status);
+`;
+
+test("CurseForge and Wago never get the same version twice: not on «Re-run failed jobs», not on a new run on the same commit", t => {
+  const step = "¿Ya se subió esta versión?";
+  const stores = ["curseforge", "wago"].map(job => {
+    const text = jobText(PUBLISH, job), steps = text.split(/\n      - name: /).slice(1);
+    return {job, text, name: /^    name: (.+)$/m.exec(text)[1], steps: steps.map(s => s.split("\n")[0]),
+      upload: steps.find(s => s.includes("uses: BigWigsMods/packager@")).split("\n")[0]};
+  });
+  for (const {job, text, steps} of stores) {
+    assert.equal(steps[0], step, `${job}: the first step`);
+    assert.ok(text.includes(`- name: ${step}\n        id: antes\n`), job);
+    // Every later step, the packager's included, only runs when no earlier run or attempt uploaded.
     const later = text.slice(text.indexOf("- name: Descargar el código")).split(/\n      - name: /);
     assert.equal(later.length, 3, job);
     for (const s of later) assert.match(s, /^        if: steps\.antes\.outputs\.ya != '1'$/m, `${job}: ${s.split("\n")[0]}`);
-    assert.match(stepRun(PUBLISH, job, step), new RegExp(`select\\(\\.name == "${name}" and \\.conclusion == "success"\\)`));
   }
   if (!bash || spawnSync("bash", ["-c", "command -v jq"]).status !== 0) return t.skip("needs bash and jq");
-  // A fake gh api: the jobs of attempt n of run 4242 in $FAKE/attempts/<n>.json, filtered with the step's --jq.
-  const fakeApi = String.raw`#!/usr/bin/env bash
-set -eu
-printf '%s\n' "$*" >> "$FAKE/log"
-[ "$1" = api ] || exit 2
-url="$2"; shift 2; expr=""
-while [ $# -gt 0 ]; do case "$1" in --jq) expr="$2"; shift 2 ;; *) shift ;; esac; done
-n=$(printf '%s\n' "$url" | sed -nE 's#^repos/carulla94/el-especulador-del-wow/actions/runs/4242/attempts/([0-9]+)/jobs$#\1#p')
-[ -n "$n" ] && [ -f "$FAKE/attempts/$n.json" ] || { echo "HTTP 404" >&2; exit 1; }
-jq -r "$expr" "$FAKE/attempts/$n.json"
-`;
-  const jobs = list => JSON.stringify({total_count: list.length, jobs: list.map(([name, conclusion], i) => ({id: 100 + i, name, conclusion}))});
-  const attempt1 = [["Comprobar y empaquetar el addon", "success"], ["Subidor para Windows / Compilar y probar en Windows", "failure"],
-    ["Publicar en GitHub", "success"], ["Subir a CurseForge", "success"], ["Subir a Wago", "failure"]];
-  // Per job: what the step writes to GITHUB_OUTPUT and how many attempts it had to ask about.
+  const [cf, wago] = stores;
+  // The jobs as the API lists them: a finished store job whose upload step ended as `upload`; one that never ran
+  // («solo_subidor»); the job running right now (this attempt), with its upload step still to come.
+  const done = (store, upload, conclusion = upload === "failure" ? "failure" : "success") => ({name: store.name, status: "completed", conclusion,
+    steps: store.steps.map((name, i) => ({name, number: i + 1, status: "completed", conclusion: name === store.upload ? upload : "success"}))});
+  const skipped = store => ({name: store.name, status: "completed", conclusion: "skipped", steps: []});
+  const running = store => ({name: store.name, status: "in_progress", conclusion: null,
+    steps: store.steps.map((name, i) => ({name, number: i + 1, status: i ? "pending" : "in_progress", conclusion: null}))});
+  const others = [{name: "Comprobar y empaquetar el addon", status: "completed", conclusion: "success", steps: []},
+    {name: "Publicar en GitHub", status: "completed", conclusion: "success", steps: []}];
+  // This run (4242 on c0ffee, as world() sets): its earlier attempts, then the one running now.
+  const thisRun = (...earlier) => ({id: 4242, head_sha: "c0ffee", attempts: [...earlier, [...others, running(cf), running(wago)]]});
+  const both = (a, b) => [...others, a, b];
   const cases = [
-    {attempt: 1, attempts: {}, curseforge: ["", 0], wago: ["", 0]},
-    {attempt: 2, attempts: {1: attempt1}, curseforge: ["ya=1", 1], wago: ["", 1]},
-    {attempt: 3, attempts: {1: attempt1, 2: [["Subir a CurseForge", "skipped"], ["Subir a Wago", "success"]]}, curseforge: ["ya=1", 1], wago: ["ya=1", 2]},
-    {attempt: 2, attempts: {1: [["Subir a CurseForge", "cancelled"], ["Subir a Wago", null]]}, curseforge: ["", 1], wago: ["", 1]},
+    ["the first run of a version", [thisRun()], null, null],
+    ["«Re-run failed jobs» after Wago failed", [thisRun(both(done(cf, "success"), done(wago, "failure")))], 4242, null],
+    ["a later attempt after one that skipped the upload", [thisRun(both(done(cf, "success"), done(wago, "success")), both(done(cf, "skipped"), done(wago, "skipped")))], 4242, 4242],
+    ["a new Run workflow after a run that uploaded both and was re-run", [{id: 100, head_sha: "c0ffee",
+      attempts: [both(done(cf, "success"), done(wago, "success")), both(done(cf, "skipped"), done(wago, "skipped"))]}, thisRun()], 100, 100],
+    ["the pushed tag after Run workflow (or the other way round)", [{id: 100, head_sha: "c0ffee", attempts: [both(done(cf, "success"), done(wago, "failure"))]},
+      {id: 101, head_sha: "c0ffee", attempts: [both(done(cf, "skipped"), done(wago, "success"))]}, thisRun()], 100, 101],
+    ["an earlier run on another commit", [{id: 100, head_sha: "beef", attempts: [both(done(cf, "success"), done(wago, "success"))]}, thisRun()], null, null],
+    ["an earlier run that stopped before uploading", [{id: 100, head_sha: "c0ffee", attempts: [both(done(cf, "skipped", "failure"), done(wago, "failure"))]}, thisRun()], null, null],
+    ["an earlier «solo_subidor» run on the same commit", [{id: 100, head_sha: "c0ffee", attempts: [[skipped(cf), skipped(wago)]]}, thisRun()], null, null],
+    ["an earlier attempt of this run that the list of runs does not show yet", [{...thisRun(both(done(cf, "success"), done(wago, "success"))), listed: false}], 4242, 4242]
   ];
-  for (const c of cases) {
-    for (const job of ["curseforge", "wago"]) {
-      const w = world(t);
-      fs.writeFileSync(path.join(w.dir, "bin", "gh"), fakeApi, {mode: 0o755});
-      fs.mkdirSync(path.join(w.fake, "attempts"));
-      for (const [n, list] of Object.entries(c.attempts)) fs.writeFileSync(path.join(w.fake, "attempts", n + ".json"), jobs(list));
-      const output = path.join(w.temp, "output");
-      fs.writeFileSync(output, "");
-      const result = w.run(stepRun(PUBLISH, job, "¿Ya se subió en un intento anterior?"), {GITHUB_RUN_ATTEMPT: String(c.attempt), GITHUB_OUTPUT: output});
-      const [out, calls] = c[job];
-      assert.equal(result.status, 0, `attempt ${c.attempt}, ${job}: ${result.stderr}`);
-      assert.equal(fs.readFileSync(output, "utf8").trim(), out, `attempt ${c.attempt}, ${job}`);
-      assert.equal(w.log().length, calls, `attempt ${c.attempt}, ${job}: calls`);
-      if (out) assert.match(result.stdout, /^::notice::Esta versión ya se subió a (CurseForge|Wago) en el intento \d de esta ejecución/m);
+  const fakeWorld = runs => {
+    const w = world(t);
+    fs.writeFileSync(path.join(w.dir, "bin", "gh-api.cjs"), FAKE_API);
+    fs.writeFileSync(path.join(w.dir, "bin", "gh"), `#!/usr/bin/env bash\nexec '${process.execPath.replace(/'/g, "'\\''")}' "$(dirname "$0")/gh-api.cjs" "$@"\n`, {mode: 0o755});
+    if (runs) fs.writeFileSync(path.join(w.fake, "api.json"), JSON.stringify({runs}));
+    fs.writeFileSync(path.join(w.temp, "output"), "");
+    return w;
+  };
+  for (const [what, runs, ...expected] of cases) {
+    for (const [i, store] of stores.entries()) {
+      const w = fakeWorld(runs), attempt = runs.find(run => run.id === 4242).attempts.length;
+      const result = w.run(stepRun(PUBLISH, store.job, step), {GITHUB_RUN_ATTEMPT: String(attempt), GITHUB_OUTPUT: path.join(w.temp, "output")});
+      assert.equal(result.status, 0, `${what}, ${store.job}: ${result.stderr}`);
+      assert.equal(fs.readFileSync(path.join(w.temp, "output"), "utf8"), expected[i] ? "ya=1\n" : "", `${what}, ${store.job}`);
+      const shop = store.job === "curseforge" ? "CurseForge" : "Wago";
+      if (expected[i]) assert.match(result.stdout, new RegExp(`^::notice::Esta versión ya se subió a ${shop} en la ejecución ${expected[i]} de este flujo: no se sube otra vez\\.$`, "m"));
+      else assert.doesNotMatch(result.stdout, /::notice::/);
+      for (const call of w.log()) assert.match(call, /^api repos\/carulla94\/el-especulador-del-wow\/actions\/\S+ --paginate --jq .+$/, "only reads");
     }
   }
-  // If GitHub does not answer, the step fails: better no upload than a second one.
-  const w = world(t);
-  fs.writeFileSync(path.join(w.dir, "bin", "gh"), fakeApi, {mode: 0o755});
-  fs.writeFileSync(path.join(w.temp, "output"), "");
-  assert.notEqual(w.run(stepRun(PUBLISH, "curseforge", "¿Ya se subió en un intento anterior?"), {GITHUB_RUN_ATTEMPT: "2", GITHUB_OUTPUT: path.join(w.temp, "output")}).status, 0);
+  // If GitHub does not answer (the list of runs, or the jobs of one run), the step fails: better no upload than two.
+  for (const runs of [null, [{id: 100, head_sha: "c0ffee", attempts: [both(done(cf, "failure"), done(wago, "failure"))], broken: true}, thisRun()]]) {
+    for (const store of stores) {
+      const w = fakeWorld(runs);
+      const result = w.run(stepRun(PUBLISH, store.job, step), {GITHUB_RUN_ATTEMPT: "1", GITHUB_OUTPUT: path.join(w.temp, "output")});
+      assert.notEqual(result.status, 0, `${store.job}: ${runs ? "jobs" : "runs"}`);
+      assert.equal(fs.readFileSync(path.join(w.temp, "output"), "utf8"), "");
+    }
+  }
 });
 
 test("C10: the reusable uploader workflow has no required input, outputs version and an artifact with Subidor_Windows.zip", () => {
@@ -462,12 +555,52 @@ test("C10: the reusable uploader workflow has no required input, outputs version
   assert.doesNotMatch(app, /gh release|softprops|action-gh-release/, "it never publishes");
 });
 
-test("every addon change runs the packager without uploading and compares its zip with the build script's", () => {
-  for (const event of ["push", "pull_request"]) {
-    const block = CHECK.slice(CHECK.indexOf(`  ${event}:`), CHECK.indexOf(event === "push" ? "  pull_request:" : "  workflow_dispatch:"));
-    for (const filter of ["addon/OroHermandad/**", "scripts/build-oro-hermandad.mjs", ".pkgmeta", ".github/workflows/oro-hermandad.yml"]) assert.ok(block.includes(`- '${filter}'`), `${event}: ${filter}`);
-  }
-  const order = ["Construir el zip del addon", "Notas de prueba para el empaquetador", "Empaquetar como en CurseForge, sin subir", "Comprobar que el zip de CurseForge es el mismo"];
+/** The `paths` filter of one event of a workflow, in order. */
+function pathFilters(yaml, event) {
+  const lines = yaml.split("\n"), start = lines.indexOf(`  ${event}:`);
+  assert.ok(start > 0, event);
+  let end = start + 1;
+  while (end < lines.length && !/^  [a-z_]+:/.test(lines[end]) && !/^\S/.test(lines[end])) end++;
+  const block = lines.slice(start + 1, end).filter(line => line.trim() && !/^\s*#/.test(line));
+  assert.equal(block[0], "    paths:", `${event}: paths`);
+  return block.slice(1).map(line => /^      - '([^']+)'$/.exec(line)?.[1] ?? assert.fail(`${event}: ${line}`));
+}
+/** Whether a change to these files runs the workflow. GitHub: the last pattern that matches a file decides (a «!»
+ * pattern leaves it out), and the workflow runs when at least one file is in; `*` stops at «/», `**` does not. */
+function runsOn(filters, files) {
+  const regex = glob => new RegExp("^" + glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*\*|\*/g, star => star === "**" ? ".*" : "[^/]*") + "$");
+  return files.some(file => filters.reduce((inside, filter) => {
+    const out = filter.startsWith("!");
+    return regex(out ? filter.slice(1) : filter).test(file) ? !out : inside;
+  }, false));
+}
+
+test("every addon change, and every pull request that could break a release, runs the release tests and the packager", () => {
+  const push = pathFilters(CHECK, "push"), pr = pathFilters(CHECK, "pull_request");
+  for (const filter of [...push, ...pr]) assert.match(filter, /^!?[A-Za-z0-9._/*-]+$/, `${filter}: only * and ** (what runsOn reads)`);
+  // A pull request: every file the release tests read, and anything new at the root or in a new folder, so that a
+  // missing .pkgmeta entry fails there and not in deploy-cloudflare.yml (npm test) after the merge.
+  const release = ["LICENSE", "LICENSE.md", "tsconfig.json", "docs/guia.md", "addon/Otro/Otro.toc", "addon/OroHermandad/Core.lua",
+    "addon/OroHermandad/CAMBIOS.md", ".pkgmeta", ".gitignore", "README.md", "CONTRIBUTING.md", "package.json", ".github/workflows/publicar-oro-hermandad.yml",
+    ".github/workflows/oro-hermandad.yml", ".github/workflows/subidor-windows.yml", "test/release-workflow.test.mjs", "scripts/build-oro-hermandad.mjs",
+    "test-lua/test_scanner.lua", "test-vectors/especular-v1.json"];
+  for (const file of release) assert.ok(runsOn(pr, [file]), `pull_request: ${file}`);
+  // Not one that only touches the web, the uploader or their tests...
+  const web = ["src/worker.mjs", "public/hermandad.js", "pages/app.mjs", "test/guild.test.mjs", "test/fixtures/v06/points-v2.json",
+    "pc_sync/hermandad.py", "test-browser/pages.spec.mjs", "scripts/build-pages.mjs"];
+  for (const file of web) assert.ok(!runsOn(pr, [file]), `pull_request: ${file}`);
+  assert.ok(!runsOn(pr, web));
+  assert.ok(runsOn(pr, [...web, "tsconfig.json"]));
+  // ...whose folders are all in the ignore list of .pkgmeta, so a change inside them cannot reach the CurseForge zip.
+  const ignore = read(".pkgmeta").slice(read(".pkgmeta").indexOf("\nignore:"));
+  for (const filter of pr.filter(f => f.startsWith("!"))) assert.match(ignore, new RegExp(`^  - ${filter.slice(1, -3)}$`, "m"), filter);
+  // A push: every addon change, as before.
+  for (const file of ["addon/OroHermandad/Core.lua", "test-lua/test_scanner.lua", "test-vectors/especular-v1.json", "scripts/build-oro-hermandad.mjs",
+    ".pkgmeta", ".github/workflows/oro-hermandad.yml"]) assert.ok(runsOn(push, [file]), `push: ${file}`);
+  assert.ok(!runsOn(push, ["src/worker.mjs"]));
+  assert.match(jobText(CHECK, "lua"), /\n      - name: Pruebas de la publicación\n        run: node --test test\/release-workflow\.test\.mjs\n/);
+  const order = ["Pruebas del addon", "Preparar Node.js", "Pruebas de la publicación", "Construir el zip del addon", "Notas de prueba para el empaquetador",
+    "Empaquetar como en CurseForge, sin subir", "Comprobar que el zip de CurseForge es el mismo"];
   let at = -1;
   for (const name of order) { const next = CHECK.indexOf(`- name: ${name}`); assert.ok(next > at, name); at = next; }
   assert.match(CHECK, /args: -d -u -n "\{package-name\}-\{project-version\}:\{project-version\}"\n\s+pandoc: false/);
@@ -529,8 +662,9 @@ test("the build script zips the TOC, the Lua files it lists, LEEME.md and CAMBIO
   assert.doesNotMatch(entries.get("OroHermandad/OroHermandad.toc")(), /\r/, "LF line endings, like the packager with -u");
 });
 
-test("no license file is added; CONTRIBUTING documents the license chosen, how to change it and the release steps; README starts with CurseForge", () => {
-  for (const name of ["LICENSE", "LICENSE.md", "LICENSE.txt"]) assert.ok(!fs.existsSync(path.join(root, name)), name);
+// A root LICENSE (CONTRIBUTING «Licencia», MIT) is the owners' choice: the tests only check that .pkgmeta keeps it out of
+// the zip (above), never that there is none, so following that procedure does not fail npm test or the deploy.
+test("CONTRIBUTING documents the license chosen, how to change it and the release steps; README starts with CurseForge", () => {
   const contributing = read("CONTRIBUTING.md"), readme = read("README.md");
   assert.ok(contributing.includes("\n## Licencia\n"));
   const license = contributing.slice(contributing.indexOf("\n## Licencia\n"));

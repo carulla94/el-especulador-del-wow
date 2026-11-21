@@ -12,7 +12,8 @@
 # CurseForge va el último: si falla, «Re-run failed jobs» lo repite sin tocar lo ya publicado en GitHub. Si lo que
 # falló es la compilación de Windows, la versión ya ha salido con el subidor anterior: «Re-run failed jobs» la compila
 # otra vez y, si sale, cambia el subidor de la versión; CurseForge y Wago no se suben dos veces (cada uno mira si ya se
-# subió en un intento anterior de la ejecución). También vale lanzar el flujo con «solo_subidor».
+# subió en otra ejecución o intento de este flujo en el mismo commit, también tras un «Run workflow» nuevo de una
+# versión ya publicada). También vale lanzar el flujo con «solo_subidor».
 # Cancelar la ejecución detiene la publicación (lo ya publicado se queda): ningún trabajo sigue tras un «Cancel».
 name: Publicar Oro de Hermandad
 
@@ -23,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Versión del TOC, por ejemplo 0.6.0 (lánzalo desde main; con «solo_subidor» no se usa)'
+        description: 'Versión del TOC, por ejemplo 0.6.0, o 0.6.1-beta1 de prueba (lánzalo desde main; con «solo_subidor» no se usa)'
         required: false
         type: string
       reusar_subidor:
@@ -76,7 +77,11 @@ jobs:
         run: |
           set -eu
           version="${ETIQUETA#oro-hermandad-v}"
-          case "$version" in ""|*[!0-9A-Za-z.-]*) echo "«$ETIQUETA» no es oro-hermandad-vX.Y.Z" >&2; exit 1 ;; esac
+          # X.Y.Z o, para una versión de prueba, X.Y.Z-alphaN o X.Y.Z-betaN: GitHub la marca como «prerelease» por el
+          # guion y el empaquetador la sube a CurseForge y Wago como alpha o beta solo por esas palabras. Con otra forma
+          # (0.6.1-rc1, 0.6.1beta1) no estarían de acuerdo: una de prueba saldría como normal en un sitio o en el otro.
+          formato='^[0-9]+(\.[0-9]+){1,3}(-(alpha|beta)[0-9]*)?$'
+          [[ "$version" =~ $formato ]] || { echo "«$ETIQUETA» no es oro-hermandad-vX.Y.Z (ni X.Y.Z-alphaN o X.Y.Z-betaN, de prueba)" >&2; exit 1; }
           toc=$(tr -d '\r' < addon/OroHermandad/OroHermandad.toc | sed -n 's/^## Version: *//p')
           core=$(tr -d '\r' < addon/OroHermandad/Core.lua | sed -n 's/^Core\.VERSION = "\(.*\)"$/\1/p')
           hist=$(tr -d '\r' < addon/OroHermandad/History.lua | sed -n 's/^local version = "\(.*\)"$/\1/p')
@@ -216,6 +221,7 @@ jobs:
           linea=$(cat "$RUNNER_TEMP/linea-subidor.txt")
           { cat "$RUNNER_TEMP/addon/notas-version.md"; printf '\n%s\n\n%s\n' "$linea" "$AVISO_DESBLOQUEAR"; } > "$RUNNER_TEMP/notas.md"
           extra=()
+          # Con guion solo pasan -alphaN y -betaN («Comprobar la versión»): lo mismo que el empaquetador sube de prueba.
           case "$version" in *-*) extra=(--prerelease) ;; esac
           if gh release view "$ETIQUETA" > /dev/null 2>&1; then
             # Ya existe (se repite el trabajo o se creó a mano): se cambian los dos zips y la línea del subidor de sus notas.
@@ -288,25 +294,31 @@ jobs:
       contents: read
       actions: read
     steps:
-      # «Re-run failed jobs» (o «Re-run all jobs») tras un fallo de la compilación de Windows repite también este
-      # trabajo: si un intento anterior de esta ejecución ya subió la versión, no se sube otra vez. El token de gh solo
-      # está en este paso, nunca en el del empaquetador.
-      - name: ¿Ya se subió en un intento anterior?
+      # Nunca dos veces la misma versión. «Re-run failed jobs» (o «Re-run all jobs») tras un fallo de la compilación de
+      # Windows repite también este trabajo, y un «Run workflow» nuevo de una versión ya publicada (o la etiqueta subida
+      # además de lanzarlo a mano) es otra ejecución en el mismo commit, que es la misma versión (C9). Se miran todas las
+      # ejecuciones de este flujo en este commit, esta incluida, con todos sus intentos: si en alguna terminó bien el paso
+      # que sube, no se sube otra vez. Si GitHub no contesta, el paso falla (mejor ninguna subida que dos). El token de
+      # gh (solo lectura) solo está en este paso, nunca en el del empaquetador.
+      - name: ¿Ya se subió esta versión?
         id: antes
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          for ((n = 1; n < GITHUB_RUN_ATTEMPT; n++)); do
-            ids=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/attempts/$n/jobs" --paginate \
-              --jq '.jobs[] | select(.name == "Subir a CurseForge" and .conclusion == "success") | .id')
-            if [ -n "$ids" ]; then
-              echo "::notice::Esta versión ya se subió a CurseForge en el intento $n de esta ejecución: no se sube otra vez."
+          ejecuciones=$({ printf '%s\n' "$GITHUB_RUN_ID"
+            gh api "repos/$GH_REPO/actions/workflows/publicar-oro-hermandad.yml/runs?head_sha=$GITHUB_SHA&per_page=100" --paginate \
+              --jq '.workflow_runs[].id'; } | sort -un)
+          while IFS= read -r ejecucion; do
+            subido=$(gh api "repos/$GH_REPO/actions/runs/$ejecucion/jobs?filter=all&per_page=100" --paginate \
+              --jq '.jobs[] | select(.name == "Subir a CurseForge") | (.steps // [])[] | select(.name == "Empaquetar y subir a CurseForge" and .conclusion == "success") | .name')
+            if [ -n "$subido" ]; then
+              echo "::notice::Esta versión ya se subió a CurseForge en la ejecución $ejecucion de este flujo: no se sube otra vez."
               echo "ya=1" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-          done
+          done <<< "$ejecuciones"
 
       - name: Descargar el código de la etiqueta
         if: steps.antes.outputs.ya != '1'
@@ -352,25 +364,27 @@ jobs:
       contents: read
       actions: read
     steps:
-      # «Re-run failed jobs» (o «Re-run all jobs») tras un fallo de la compilación de Windows repite también este
-      # trabajo: si un intento anterior de esta ejecución ya subió la versión, no se sube otra vez. El token de gh solo
-      # está en este paso, nunca en el del empaquetador.
-      - name: ¿Ya se subió en un intento anterior?
+      # Nunca dos veces la misma versión: como en CurseForge (todas las ejecuciones de este flujo en este commit, con
+      # todos sus intentos, y el paso que sube a Wago). El token de gh solo está en este paso.
+      - name: ¿Ya se subió esta versión?
         id: antes
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          for ((n = 1; n < GITHUB_RUN_ATTEMPT; n++)); do
-            ids=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/attempts/$n/jobs" --paginate \
-              --jq '.jobs[] | select(.name == "Subir a Wago" and .conclusion == "success") | .id')
-            if [ -n "$ids" ]; then
-              echo "::notice::Esta versión ya se subió a Wago en el intento $n de esta ejecución: no se sube otra vez."
+          ejecuciones=$({ printf '%s\n' "$GITHUB_RUN_ID"
+            gh api "repos/$GH_REPO/actions/workflows/publicar-oro-hermandad.yml/runs?head_sha=$GITHUB_SHA&per_page=100" --paginate \
+              --jq '.workflow_runs[].id'; } | sort -un)
+          while IFS= read -r ejecucion; do
+            subido=$(gh api "repos/$GH_REPO/actions/runs/$ejecucion/jobs?filter=all&per_page=100" --paginate \
+              --jq '.jobs[] | select(.name == "Subir a Wago") | (.steps // [])[] | select(.name == "Empaquetar y subir a Wago" and .conclusion == "success") | .name')
+            if [ -n "$subido" ]; then
+              echo "::notice::Esta versión ya se subió a Wago en la ejecución $ejecucion de este flujo: no se sube otra vez."
               echo "ya=1" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-          done
+          done <<< "$ejecuciones"
 
       - name: Descargar el código de la etiqueta
         if: steps.antes.outputs.ya != '1'

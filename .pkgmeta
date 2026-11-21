@@ -3,7 +3,8 @@
 # El repositorio lleva también la web, las pruebas y el subidor del PC: solo addon/OroHermandad es el addon. El
 # empaquetador copia todo lo que Git conoce a .release/OroHermandad y move-folders sube addon/OroHermandad a la raíz
 # del zip, así que todo lo demás tiene que estar en ignore. Si se añade una carpeta o un archivo en la raíz, añádelo
-# aquí: si no, la comprobación «el zip es el addon y nada más» falla (en la pull request y antes de publicar nada).
+# aquí: si no, la comprobación «el zip es el addon y nada más» falla (en la pull request, con las «Pruebas de la
+# publicación» de oro-hermandad.yml, y antes de publicar nada).
 # Sin tabuladores: solo espacios.
 package-as: OroHermandad
 enable-nolib-creation: no

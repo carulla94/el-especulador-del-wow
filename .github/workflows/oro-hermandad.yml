@@ -9,14 +9,22 @@ on:
       - 'scripts/build-oro-hermandad.mjs'
       - '.pkgmeta'
       - '.github/workflows/oro-hermandad.yml'
+  # En una pull request, todo menos lo que solo toca la web, el subidor o sus pruebas: también un archivo o una carpeta
+  # nueva en la raíz (tiene que ir en el ignore de .pkgmeta), los flujos, README.md o CONTRIBUTING.md. Así un fallo de
+  # las pruebas de la publicación sale en la pull request y no al publicar el panel (deploy-cloudflare.yml las pasa
+  # también, con npm test). El orden importa: el último patrón que encaja con un archivo decide si cuenta.
   pull_request:
     paths:
-      - 'addon/OroHermandad/**'
-      - 'test-lua/**'
-      - 'test-vectors/**'
+      - '**'
+      - '!src/**'
+      - '!public/**'
+      - '!pages/**'
+      - '!pc_sync/**'
+      - '!test-browser/**'
+      - '!test/**'
+      - 'test/release-workflow.test.mjs'
+      - '!scripts/**'
       - 'scripts/build-oro-hermandad.mjs'
-      - '.pkgmeta'
-      - '.github/workflows/oro-hermandad.yml'
   workflow_dispatch:
 
 permissions:
@@ -40,6 +48,10 @@ jobs:
         with:
           node-version: '24.16.0'
           package-manager-cache: false
+      # Los flujos de publicación, .pkgmeta (todo lo de la raíz menos el addon en su ignore), las líneas de versión (C9),
+      # el subidor reutilizable (C10) y el zip del addon. Solo Node, sin npm install.
+      - name: Pruebas de la publicación
+        run: node --test test/release-workflow.test.mjs
       # El zip no se guarda en Git: se construye aquí y queda en la ejecución (artefacto OroHermandad.zip)
       # para que los colaboradores lo descarguen desde la pestaña Actions.
       - name: Construir el zip del addon
