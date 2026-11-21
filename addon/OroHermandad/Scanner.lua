@@ -38,6 +38,9 @@ Scanner.BUSY = 15               -- sin peticiones solas en los 15 s siguientes a
 Scanner.OPEN_DELAY = 2          -- ni en los 2 primeros segundos (la subasta pide favoritos y pujas al abrirse)
 Scanner.READY_POLL, Scanner.READY_WAIT, Scanner.SUMMARY_WAIT = 0.5, 10, 120
 Scanner.TIMEOUTS = 3            -- 3 peticiones propias sin respuesta seguidas: «no responde» hasta el /reload
+Scanner.EARLY = 5               -- una petición hecha mientras se abre la subasta (antes de AUCTION_HOUSE_SHOW) vale 5 s
+Scanner.OWN_MISSES = 2          -- 2 escaneos seguidos sin tus subastas (y con alguna a la venta): no se miden ventas
+Scanner.OWNED_MAX = 200         -- subastas tuyas que se miran en GetOwnedAuctionInfo como mucho (un fotograma)
 Scanner.DROP_RESEND = 5
 Scanner.CHAT_SPACING = 1800
 Scanner.STALE = 1800
@@ -54,6 +57,7 @@ local DURATION_HOURS = {2, 8, 24}
 local PET_CAGE = 82800
 local ID_MAX = 2147483647
 local SOLD, EXPIRED = 4, 5      -- Enum.AuctionHouseNotification.AuctionSold / AuctionExpired
+local ACTIVE = 0                -- Enum.AuctionStatus.Active (1 = Sold: vendida, esperando en el correo)
 local TIME_MAX = Spec.TIME_MAX
 
 local floor, max, min = math.floor, math.max, math.min
@@ -150,6 +154,8 @@ local cb = {}                   -- llamadas de Core: listen, onScanDone, onSumma
 local hooksInstalled = false
 local ahOpen, showAt, visitToken, visitScanned = false, -math.huge, 0, false
 local house, houseInfo = nil, {}
+local visitHouse = nil          -- la casa de la última visita (sigue tras cerrar, hasta el siguiente AUCTION_HOUSE_SHOW)
+local early = nil               -- {t, ours, at}: petición vista con la subasta aún cerrada (se está abriendo)
 local sending, resendNext = false, false
 local req = nil                 -- {t, ours, resent}: la última petición vista con la subasta abierta
 local windowOpen, windowToken, events, firstAt, firstT, settleFor = false, 0, 0, nil, nil, -1
@@ -209,6 +215,7 @@ local function sanitizeScanner(s)
   s.houseZones = cleanMap(s.houseZones, isZone, isTrue, Scanner.ZONES_MAX)
   s.depRef = cleanMap(s.depRef, validMarket, isRefs, Scanner.DEPREF_MARKETS)
   s.visited = cleanMap(s.visited, validMarket, isTime, Scanner.VISITED_MAX)
+  s.sampledUntil = cleanMap(s.sampledUntil, validMarket, isTime, Scanner.VISITED_MAX)
   if type(s.buys) ~= "string" or not s.buys:match("^[%d,;]*$") then s.buys = "" end
   return s
 end
@@ -223,8 +230,11 @@ local function sanitizeSales(p)
   return cleanMap(p, validMarket, function(v) return type(v) == "string" and v:match("^[%d,;]*$") ~= nil end)
 end
 
+-- ",s" al final: una subasta de mercancía que ya avisó de una venta (sigue para la línea de ventas, pero ya no cuenta
+-- como subasta tuya que debería salir en el escaneo).
 local function isAuction(v)
-  return type(v) == "string" and #v <= 120 and v:match("^%d+,%d+,%d+,%d,%d+,[^,]+,[ci]$") ~= nil
+  return type(v) == "string" and #v <= 120 and (v:match("^%d+,%d+,%d+,%d,%d+,[^,]+,[ci]$") ~= nil
+    or v:match("^%d+,%d+,%d+,%d,%d+,[^,]+,c,s$") ~= nil)
 end
 
 local function sanitizeBase(p)
@@ -257,6 +267,7 @@ function Scanner.Init(accountDB, charDB, callbacks)
   cdb.scanBase = sanitizeBase(cdb.scanBase)
   cdb.scanner = type(cdb.scanner) == "table" and cdb.scanner or {}
   if cdb.scanner.ownSeen ~= "yes" and cdb.scanner.ownSeen ~= "no" then cdb.scanner.ownSeen = nil end
+  if not isInt(cdb.scanner.ownMiss, 1, 1000) then cdb.scanner.ownMiss = nil end
   S, cs = db.scanner, cdb.scanner
   Scanner.InstallHooks()
 end
@@ -417,7 +428,7 @@ local function detectHouse()
     end
   end
   info.rule, info.guess = rule, guess or false
-  house, houseInfo = kind, info
+  house, houseInfo, visitHouse = kind, info, kind
   return kind
 end
 
@@ -428,6 +439,12 @@ function Scanner.House()
 end
 
 function Scanner.HouseInfo() return houseInfo end
+
+-- La casa de la visita actual o de la última (nil si aún no se abrió la subasta en esta sesión). Core no guarda los
+-- escaneos de Auctionator hechos en la neutral o en una que no se sabe.
+function Scanner.VisitHouse() return visitHouse end
+
+local function otherHouse() return visitHouse == "neutral" or visitHouse == "unknown" end
 
 ---------------------------------------------------------------------------
 -- Filtro de grabado: un escaneo cada 30 min y 8 al día por mercado
@@ -469,7 +486,7 @@ function Scanner.PairDue(key, t)
   t = t or now()
   if not Scanner.RecordDue(key, t) or cs.ownSeen == "no" then return false end
   local base = cdb.scanBase[key]
-  if not base then return false end
+  if not base or base.t < (S.sampledUntil[key] or 0) then return false end
   local age = t - base.t
   return age >= Scanner.SAMPLE_MIN and age <= Scanner.PAIR_MAX
 end
@@ -727,10 +744,10 @@ end
 
 -- Subastas tuyas seguidas: cdb.auctions[auctionID] = "id,unit,qty,dur,postedAt,market,k" (k: c mercancía, i objeto).
 local function decodeAuction(text)
-  local id, unit, qty, dur, at, key, kind = text:match("^(%d+),(%d+),(%d+),(%d),(%d+),([^,]+),([ci])$")
-  if not id then return nil end
+  local id, unit, qty, dur, at, key, kind, sold = text:match("^(%d+),(%d+),(%d+),(%d),(%d+),([^,]+),([ci])(,?s?)$")
+  if not id or (sold ~= "" and sold ~= ",s") then return nil end
   return {id = tonumber(id), unit = tonumber(unit), qty = tonumber(qty), dur = tonumber(dur), at = tonumber(at),
-          market = key, kind = kind}
+          market = key, kind = kind, sold = sold == ",s"}
 end
 
 local function auctionEnd(a) return a.at + (DURATION_HOURS[a.dur] or 24) * 3600 + 3600 end
@@ -860,7 +877,9 @@ function Scanner.OnNotification(notification, text, auctionID)
     local rec
     if a then
       rec = {t, a.id, a.unit, a.kind == "c" and 0 or 1, a.dur, max(0, t - a.at)}
-      if a.kind ~= "c" then cdb.auctions[key] = nil end -- una subasta de objeto se vende entera; la de mercancía sigue
+      -- Una subasta de objeto se vende entera; la de mercancía sigue (avisa una vez por compra parcial), marcada como
+      -- vendida: puede que ya no esté en la subasta y no debe contar como tuya en el escaneo (ownSeen).
+      if a.kind ~= "c" then cdb.auctions[key] = nil elseif not a.sold then cdb.auctions[key] = cdb.auctions[key] .. ",s" end
     else
       local id = 0
       if type(text) == "string" and text ~= "" then
@@ -953,7 +972,13 @@ local function onRequest()
   local ours = sending
   S.lastAnyRequest = t
   if ours then S.lastOwnRequest = t else stats.otherRequests = stats.otherRequests + 1 end
-  if not ahOpen or house ~= "faction" then return end
+  if not ahOpen then
+    -- La subasta se está abriendo: Auctionator pide su escaneo completo al mostrar su marco, que puede ir antes de
+    -- nuestro AUCTION_HOUSE_SHOW. Se apunta y OnShow abre la ventana de la respuesta (la respuesta tarda más).
+    early = {t = t, ours = ours, at = clock()}
+    return
+  end
+  if house ~= "faction" then return end
   if reading then stats.requestsWhileReading = stats.requestsWhileReading + 1; return end
   if windowOpen then closeWindow() end
   queued = nil
@@ -1152,7 +1177,7 @@ startRead = function(n, t, answered)
     local ok, name = pcall(UnitName, "player")
     me = ok and type(readable(name)) == "string" and name or nil
   end
-  reading = {n = n, i = 0, t = t, req = answered, me = me, watched = watchedIDs(), lo = {}, P = {}, B = {}, C = {},
+  reading = {n = n, n0 = n, i = 0, t = t, req = answered, me = me, watched = watchedIDs(), lo = {}, P = {}, B = {}, C = {},
              rows = 0, valid = 0, watchedRows = 0, ownRows = 0, foreign = 0, frames = 0, maxMs = 0, totalMs = 0,
              statuses = {}, startedAt = clock(), lastNotify = 0}
   phase = "reading"
@@ -1187,32 +1212,31 @@ local function readRows(job)
     local _, _, count, _, _, _, _, _, _, buyout, _, _, _, owner, _, saleStatus, itemID = get(i)
     job.rows = job.rows + 1
     if saleStatus ~= nil and not statuses[saleStatus] then statuses[saleStatus] = true end
-    if type(itemID) == "number" and itemID >= 1 and itemID <= ID_MAX and itemID % 1 == 0 and itemID ~= PET_CAGE
+    if owner ~= nil and owner == me then
+      -- Tus subastas (también las de solo puja) no son el precio del mercado; el nombre no se guarda.
+      job.ownRows = job.ownRows + 1
+    elseif type(itemID) == "number" and itemID >= 1 and itemID <= ID_MAX and itemID % 1 == 0 and itemID ~= PET_CAGE
        and type(count) == "number" and count >= 1 and type(buyout) == "number" and buyout > 0 and saleStatus ~= 1 then
-      if owner ~= nil and owner == me then
-        job.ownRows = job.ownRows + 1 -- tus subastas no son el precio del mercado (el nombre no se guarda)
-      else
-        if type(owner) == "string" and owner ~= "" then job.foreign = job.foreign + 1 end
-        local unit = floor(buyout / count + 0.5)
-        if unit >= 1 and unit <= priceMax then
-          job.valid = job.valid + 1
-          local old = lo[itemID]
-          if not old or unit < old then lo[itemID] = unit end
-          if watched[itemID] then
-            local raw = left(i)
-            if type(raw) == "number" then
-              if not job.rawMin or raw < job.rawMin then job.rawMin = raw end
-              if not job.rawMax or raw > job.rawMax then job.rawMax = raw end
-            end
-            local prices = P[itemID]
-            if not prices then
-              prices = {}
-              P[itemID], B[itemID], C[itemID] = prices, {}, {}
-            end
-            local m = #prices + 1
-            prices[m], B[itemID][m], C[itemID][m] = unit, type(raw) == "number" and raw or -1, count
-            job.watchedRows = job.watchedRows + 1
+      if type(owner) == "string" and owner ~= "" then job.foreign = job.foreign + 1 end
+      local unit = floor(buyout / count + 0.5)
+      if unit >= 1 and unit <= priceMax then
+        job.valid = job.valid + 1
+        local old = lo[itemID]
+        if not old or unit < old then lo[itemID] = unit end
+        if watched[itemID] then
+          local raw = left(i)
+          if type(raw) == "number" then
+            if not job.rawMin or raw < job.rawMin then job.rawMin = raw end
+            if not job.rawMax or raw > job.rawMax then job.rawMax = raw end
           end
+          local prices = P[itemID]
+          if not prices then
+            prices = {}
+            P[itemID], B[itemID], C[itemID] = prices, {}, {}
+          end
+          local m = #prices + 1
+          prices[m], B[itemID][m], C[itemID][m] = unit, type(raw) == "number" and raw or -1, count
+          job.watchedRows = job.watchedRows + 1
         end
       end
     end
@@ -1262,19 +1286,33 @@ local function bandMinimums()
   return out
 end
 
--- Subastas de tus personajes que deberían salir en el escaneo: las seguidas de este mercado aún vigentes y las que
--- dice la subasta (GetNumOwnedAuctions, si da algo).
+-- Subastas de este personaje que deberían salir en el escaneo: las seguidas de este mercado aún vigentes y sin aviso
+-- de venta, y las que la subasta da como activas con precio de compra (GetOwnedAuctionInfo: las vendidas que esperan
+-- en el correo no cuentan). Contar de menos solo hace la comprobación más blanda.
+local function activeOwned()
+  local ok, n = ah("GetNumOwnedAuctions")
+  n = ok and readable(n) or nil
+  if not isInt(n, 1, 100000) then return 0, n end
+  local active = 0
+  for i = 1, min(n, Scanner.OWNED_MAX) do
+    local okInfo, info = ah("GetOwnedAuctionInfo", i)
+    if okInfo and type(info) == "table" then
+      local status, buyout = readable(info.status), readable(info.buyoutAmount)
+      if status == ACTIVE and type(buyout) == "number" and buyout > 0 then active = active + 1 end
+    end
+  end
+  return active, n
+end
+
 local function expectedOwn(key, t)
   local n = 0
   for _, text in pairs(cdb.auctions) do
     local a = decodeAuction(text)
-    if a and a.market == key and auctionEnd(a) >= t then n = n + 1 end
+    if a and a.market == key and not a.sold and auctionEnd(a) >= t then n = n + 1 end
   end
-  local ok, owned = ah("GetNumOwnedAuctions")
-  owned = ok and readable(owned) or nil
-  stats.ownedAuctions = type(owned) == "number" and owned or nil
-  if isInt(owned, 1, 100000) then n = n + owned end
-  return n
+  local active, owned = activeOwned()
+  stats.ownedAuctions = type(owned) == "number" and (active .. " a la venta de " .. owned) or nil
+  return n + active
 end
 
 -- Referencia de ventas de este personaje: los niveles más baratos de un objeto vigilado (sin tus subastas).
@@ -1332,6 +1370,9 @@ end
 local function finishBegin(job)
   local t, key = job.t, market()
   visitScanned = true
+  -- La lista creció durante la lectura: la huella pasa a ser la de la lista entera, o la misma foto se tomaría
+  -- después por una respuesta nueva (otra petición rechazada en silencio y un aviso suelto de la caché de objetos).
+  if job.n ~= job.n0 then S.fp = Scanner.Fingerprint(job.n) end
   stats.lastRead = {rows = job.rows, n = job.n, watchedRows = job.watchedRows, ownRows = job.ownRows,
                     foreign = job.foreign, frames = job.frames, maxMs = job.maxMs, totalMs = job.totalMs,
                     rawMin = job.rawMin, rawMax = job.rawMax, statuses = job.statuses, t = t,
@@ -1352,15 +1393,21 @@ local function finishBegin(job)
   job.agg, job.sorted, job.present = {}, {}, 0
   job.baseItems, job.baseCounts, job.baseTotal = {}, {}, 0
   job.day = Spec.DayIndex(t)
-  -- ¿Salen tus subastas en el escaneo? Si no, en este personaje no se miden ventas.
-  if job.ownRows > 0 then cs.ownSeen = "yes"
-  elseif expectedOwn(key, t) > 0 then cs.ownSeen = "no" end
-  -- Ventas solo si se va a grabar y hay referencia de este personaje de 15 min a 2 h antes, con los mismos tramos.
+  -- ¿Salen tus subastas en el escaneo? Si dos escaneos seguidos no ven ninguna cuando debería haberlas, en este
+  -- personaje no se miden ventas (hasta que un escaneo vea alguna).
+  if job.ownRows > 0 then cs.ownSeen, cs.ownMiss = "yes", nil
+  elseif expectedOwn(key, t) > 0 then
+    cs.ownMiss = (cs.ownMiss or 0) + 1
+    if cs.ownMiss >= Scanner.OWN_MISSES then cs.ownSeen = "no" end
+  end
+  -- Ventas solo si se va a grabar y hay referencia de este personaje de 15 min a 2 h antes, con los mismos tramos, y
+  -- no anterior al último escaneo de la cuenta que ya midió ventas aquí (con un alter, las dos medidas se pisarían).
   local base = cdb.scanBase[key]
   local dt = base and t - base.t
   job.base, job.dt = base, dt
   job.sampling = Scanner.AllowRecord(key, t) and base ~= nil and dt >= Scanner.SAMPLE_MIN and dt <= Scanner.SAMPLE_MAX
     and job.known and job.bandsOK and base.off == offset and cs.ownSeen ~= "no"
+    and base.t >= (S.sampledUntil[key] or 0)
   if job.sampling then
     job.sold, job.bought = {}, boughtIn(base.t, t)
     job.sampleStats = {items = 0, sold = 0, partial = 0, own = 0, dt = dt, from = base.t}
@@ -1418,7 +1465,15 @@ local function finishEnd(job)
     stats.lastSamples = job.sampleStats
   end
   if record then
-    if History.RecordAggregate("full", job.agg, true, opts) then markRecorded(key, t) else record = false end
+    if History.RecordAggregate("full", job.agg, true, opts) then
+      markRecorded(key, t)
+      if opts.dt then
+        S.sampledUntil[key] = max(S.sampledUntil[key] or 0, t)
+        capByVisit(S.sampledUntil, key, Scanner.VISITED_MAX)
+      end
+    else
+      record = false
+    end
   end
   -- Este escaneo es la nueva referencia del personaje (grabado o no).
   storeBaseline(job, key)
@@ -1490,6 +1545,8 @@ local function release(key)
   local h = held[key]
   held[key] = nil
   if not h then return end
+  -- De la subasta neutral o de una que no se sabe: no se guarda (otro mercado).
+  if otherHouse() then return end
   local record = Scanner.AllowRecord(key, h.t)
   if record then markRecorded(key, h.t) end
   stats.lastHeld = {t = h.t, recorded = record}
@@ -1518,6 +1575,7 @@ function Scanner.HoldSummary(summary)
   if type(summary) ~= "table" or not S then return false end
   local key = summary.market or market()
   if not validMarket(key) then return false end
+  if otherHouse() then return "drop" end -- subasta neutral o que no se sabe: ni se retiene ni se graba
   summary.market, summary.t = key, isTime(summary.t) and summary.t or now()
   summary.at = clock()
   if held[key] then release(key) end
@@ -1528,6 +1586,13 @@ function Scanner.HoldSummary(summary)
 end
 
 function Scanner.Held(key) return held[key or market() or ""] end
+
+-- PLAYER_LOGOUT (al salir o con cualquier /reload, también «Guardar y subir»), antes de History.Flush: los resúmenes
+-- retenidos solo están en memoria, así que se sueltan ya (con su filtro de grabado) para que se escriban.
+function Scanner.ReleaseHeld()
+  if not S then return end
+  for key in pairs(held) do release(key) end
+end
 
 ---------------------------------------------------------------------------
 -- Modos, propuesta y revisión de cada minuto con la subasta abierta
@@ -1644,6 +1709,14 @@ function Scanner.OnShow()
     result = nil
     detectHouse()
     touchVisited(market())
+    -- Una petición de la subasta entera hecha mientras se abría (la de Auctionator al mostrar su marco): su respuesta
+    -- aún no ha llegado, así que se escucha desde aquí.
+    local e = early
+    early = nil
+    if e and house == "faction" and clock() - e.at <= Scanner.EARLY and not windowOpen and not reading then
+      req = {t = e.t, ours = e.ours, resent = false}
+      openWindow()
+    end
     local token = visitToken
     if house == "faction" then
       after(Scanner.OPEN_DELAY, function() review(token) end)
@@ -1665,6 +1738,7 @@ function Scanner.OnClose()
     reading, queued, phase = nil, nil, nil
     if sweep then stopSweep() end
     ahOpen = false
+    early = nil
     visitToken = visitToken + 1
     for key in pairs(held) do release(key) end
     if interrupted then result = {state = "interrupted", at = now()} end
@@ -2140,7 +2214,7 @@ end
 function Scanner.Internals()
   return {windowOpen = windowOpen, listening = listening, reading = reading, queued = queued, phase = phase, req = req,
           held = held, pending = pending, sweep = sweep, stats = stats, noresponse = noresponse, result = result,
-          visitScanned = visitScanned, house = house}
+          visitScanned = visitScanned, house = house, early = early}
 end
 
 return Scanner

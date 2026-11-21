@@ -28,8 +28,9 @@ const WEEKDAY_CODES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 let clock = null;
 const slots = new Map();
-/** Weekday (Monday 0), hour and cell of a unix time in Spanish time. Cached per UTC hour (the offset only changes on the
- * hour), so a month of scans asks Intl a few hundred times. */
+/** Weekday (Monday 0), hour and cell of a unix time in Spanish time, and shift: the seconds to add before dayIndex to get
+ * the Spanish date (0 in winter; 3600 in summer, when 00:00-01:00 is already the next day). Cached per UTC hour (the
+ * offset only changes on the hour), so a month of scans asks Intl a few hundred times. */
 export function localSlot(t) {
   const key = Math.floor(t / 3600);
   let slot = slots.get(key);
@@ -37,12 +38,16 @@ export function localSlot(t) {
     clock ??= new Intl.DateTimeFormat("en-GB", {timeZone: TIMING.timeZone, weekday: "short", hour: "2-digit", hourCycle: "h23"});
     const parts = Object.fromEntries(clock.formatToParts(new Date(key * 3600 * 1000)).map(p => [p.type, p.value]));
     const wd = WEEKDAY_CODES.indexOf(parts.weekday), hour = Number(parts.hour) % 24, block = Math.floor(hour / TIMING.hours);
-    slot = {wd, hour, block, cell: wd * TIMING.blocks + block};
+    const offset = (((hour - key % 24) % 24) + 24) % 24; // hours ahead of UTC: 1 (CET) or 2 (CEST)
+    slot = {wd, hour, block, cell: wd * TIMING.blocks + block, shift: (offset - 1) * 3600};
     if (slots.size > 20000) slots.clear();
     slots.set(key, slot);
   }
   return slot;
 }
+/** The Spanish date of a unix time, numbered like dayIndex (the same day in winter). The seven weekday cells of a block
+ * then split the days exactly, as the addon counts them (Spec.MadridSlot). */
+export const localDay = t => dayIndex(t + localSlot(t).shift);
 
 const ratio = (value, ref, limit = TIMING.clipBp) => Math.max(-limit, Math.min(limit, idiv(value * 10000, ref) - 10000));
 /** The values of the days from d - halfWindow to d + halfWindow of a Map day -> [values]. */
@@ -85,9 +90,9 @@ function keptSamples(list) {
  * soldSeconds, soldN, soldDays, maxUnits, maxSeconds]], wd: [[weekday, n, sumBp]]}]} with only the cells and weekdays
  * that have data, items by id. nQty counts the points whose quantity could be compared (the days around them had
  * enough quantities). The sales columns: units and seconds measured by the kept samples whose middle falls in the
- * cell, how many samples, on how many distinct days (of their middle), and the sample with the most units (ties: the
- * longer one), so the advice can leave it out. A cell can have sales and no price point (n = 0), and an item with only
- * samples is listed with n = 0 and wd = []. */
+ * cell, how many samples, on how many distinct Spanish dates (localDay of their middle), and the sample with the most
+ * units (ties: the longer one), so the advice can leave it out. A cell can have sales and no price point (n = 0), and an
+ * item with only samples is listed with n = 0 and wd = []. */
 export function buildTiming({points = [], days = [], T}) {
   const items = new Map();
   const itemOf = id => {
@@ -134,8 +139,8 @@ export function buildTiming({points = [], days = [], T}) {
     }
     // Sales: each kept sample in the cell of the middle of its interval, with or without a price reference.
     for (const s of keptSamples([...item.samples.values()])) {
-      const mid = s.t - Math.floor(s.dt / 2), c = cellOf(localSlot(mid).cell);
-      c.units += s.sold; c.seconds += s.dt; c.sold++; c.soldDays.add(dayIndex(mid));
+      const mid = s.t - Math.floor(s.dt / 2), slot = localSlot(mid), c = cellOf(slot.cell);
+      c.units += s.sold; c.seconds += s.dt; c.sold++; c.soldDays.add(dayIndex(mid + slot.shift));
       if (c.sold === 1 || s.sold > c.maxUnits || (s.sold === c.maxUnits && s.dt > c.maxSeconds)) { c.maxUnits = s.sold; c.maxSeconds = s.dt; }
     }
     // Day values against the days around them (today is not over, so it is left out).

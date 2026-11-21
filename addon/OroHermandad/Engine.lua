@@ -203,10 +203,10 @@ function Engine.DbStatus(ctx, modeKey)
   local mode = Engine.MODES[modeKey] or Engine.MODES.lazy
   local status = {source = ctx.hasPriceSource and true or false}
   if not status.source then
-    status.level, status.text = "error", "Sin Auctionator no hay precios. Instálalo para recibir sugerencias con oro."
+    status.level, status.text = "error", "Aún no hay precios de la subasta: ábrela y pulsa «Escanear» (Auctionator es opcional)."
     return status
   end
-  -- ctx.dbUpdatedAt: último escaneo terminado (completo o el resumen de Auctionator); ctx.fullScanAt: último
+  -- ctx.dbUpdatedAt: último escaneo terminado (el del addon, el completo o el resumen de Auctionator); ctx.fullScanAt: último
   -- escaneo completo terminado. Cualquiera de los dos puede faltar.
   local now = finite(ctx.now) and ctx.now or nil
   if now and finite(ctx.dbUpdatedAt) then status.hours = max(0, (now - ctx.dbUpdatedAt) / 3600) end
@@ -236,8 +236,8 @@ function Engine.DbStatus(ctx, modeKey)
   local recentScan = recentFull or (status.hours ~= nil and status.hours <= mode.staleHours and today >= 5 and today >= 0.4 * known)
   status.recentScan = recentScan
   local scanHint = ctx.autoscan == false
-    and " Activa «escanear al abrir la subasta» en las opciones de Auctionator o pulsa su escaneo completo."
-    or " Haz un escaneo completo con Auctionator en la subasta."
+    and " Pulsa «Escanear» en la subasta o elige «Escanear cada vez que abro la subasta» en las opciones."
+    or " Escanea la subasta con Oro de Hermandad (botón «Escanear»)."
 
   if known == 0 then
     if recentFull then
@@ -670,7 +670,7 @@ local function cholloDays(mode) return CONF_DAYS[mode.specMinConf] or CONF_DAYS.
 local function specStatus(stats, mode)
   local parts, level = {}, "ok"
   if stats.tracked == 0 then
-    return {level = "warn", text = "Aún no hay precios guardados en este mercado: haz un escaneo completo con Auctionator en la subasta."}
+    return {level = "warn", text = "Aún no hay precios guardados en este mercado: escanea la subasta con Oro de Hermandad."}
   end
   local needed = cholloDays(mode)
   if stats.ready == 0 then
@@ -1205,9 +1205,9 @@ function Engine.Suggest(ctx)
           total = total + sell.value
           names[i] = sell.count .. "× " .. sell.name
         end
-        local note = staleSells > 0 and (" Algunos precios son viejos: Auctionator los actualizará al publicar.") or ""
+        local note = staleSells > 0 and (" Algunos precios son viejos: escanea la subasta antes de publicar.") or ""
         now[#now + 1] = {kind = "sell", icon = sells[1].id, title = "Vende en la subasta (≈ " .. Money(total) .. ")",
-          detail = listNames(names) .. ". Acepta el precio que proponga Auctionator." .. note .. specGroupNote(sellNotes, sells),
+          detail = listNames(names) .. ". Ponlo al precio más bajo de la subasta." .. note .. specGroupNote(sellNotes, sells),
           value = total}
       else
         for i, sell in ipairs(sells) do

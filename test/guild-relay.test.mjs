@@ -8,7 +8,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import {DatabaseSync} from "node:sqlite";
 import worker, {Portfolio} from "../src/worker.mjs";
-import {GuildMarket, GuildStore, validateUpload, LIMITS, RELAYED_SLOT_BASE, WATCHLIST} from "../src/guild.mjs";
+import {GuildMarket, GuildStore, validateUpload, LIMITS, RELAYED_SLOT_BASE, WATCHLIST, LATEST_UPLOADER} from "../src/guild.mjs";
 import * as V1 from "./fixtures/relay/guild-v1.mjs";
 import {DAY0, dayIndex, mergeDay, dayValue} from "../src/especular.mjs";
 import * as E from "../src/especular.mjs";
@@ -950,4 +950,14 @@ test("a database of the 0.5.x code gains the nullable dt and sold columns once, 
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.ok(res.body.markets[0].sold > 0);
   assert.equal(r.db.prepare("SELECT count(*) AS n FROM guild_obs_point WHERE dt IS NOT NULL").get().n, res.body.markets[0].sold);
+});
+
+test("LATEST_UPLOADER is 0.6.0 and never newer than the uploader in pc_sync (it is raised after the release, never before)", () => {
+  assert.equal(LATEST_UPLOADER, "0.6.0");
+  const code = fs.readFileSync(new URL("../pc_sync/hermandad.py", import.meta.url), "utf8");
+  const version = /^VERSION = "([0-9.]+)"$/m.exec(code)?.[1];
+  assert.ok(version, "VERSION in pc_sync/hermandad.py");
+  const parts = text => text.split(".").map(Number), [a, b] = [parts(LATEST_UPLOADER), parts(version)];
+  const cmp = Array.from({length: Math.max(a.length, b.length)}, (_, i) => (a[i] ?? 0) - (b[i] ?? 0)).find(x => x !== 0) ?? 0;
+  assert.ok(cmp <= 0, `LATEST_UPLOADER ${LATEST_UPLOADER} is newer than the uploader's ${version}`);
 });

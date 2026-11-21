@@ -375,14 +375,29 @@ test("C1: quien lee con la regla de la 0.5.1 (4 campos) ve los mismos t, lo, qty
   assert(texts >= 10 and samples >= 5, texts .. " textos, " .. samples .. " ventas")
 end)
 
-test("C5 madrid-slots: Spec.MadridSlot da el día, la hora, la franja y la celda de los 1233 vectores", function()
+-- Días desde el 1-1-1970 de una fecha civil (Howard Hinnant), para leer la fecha local del texto de cada vector.
+local function civilDays(y, m, d)
+  if m <= 2 then y = y - 1 end
+  local era = math.floor(y / 400)
+  local yoe = y - era * 400
+  local doy = math.floor((153 * ((m + 9) % 12) + 2) / 5) + d - 1
+  return era * 146097 + yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy - 719468
+end
+
+test("C5 madrid-slots: Spec.MadridSlot da el día, la hora, la franja, la celda y la fecha de los 1233 vectores", function()
   local M = fixture("madrid-slots.json")
   for _, v in ipairs(M.vectors) do
-    local wd, hour, block, cell = Spec.MadridSlot(v[1])
-    if wd ~= v[2] or hour ~= v[3] or block ~= v[4] or cell ~= v[5] then
-      error(string.format("%d (%s): %s %s %s %s", v[1], v[6], tostring(wd), tostring(hour), tostring(block), tostring(cell)))
+    local wd, hour, block, cell, day = Spec.MadridSlot(v[1])
+    local y, m, d = v[6]:match("^(%d+)-(%d+)-(%d+)")
+    local want = civilDays(tonumber(y), tonumber(m), tonumber(d)) - 18262 -- numerada como Spec.DayIndex
+    if wd ~= v[2] or hour ~= v[3] or block ~= v[4] or cell ~= v[5] or day ~= want then
+      error(string.format("%d (%s): %s %s %s %s %s", v[1], v[6], tostring(wd), tostring(hour), tostring(block),
+        tostring(cell), tostring(day)))
     end
   end
+  -- En invierno la fecha es Spec.DayIndex; en verano, de 00:00 a 01:00 ya es el día siguiente.
+  eq(select(5, Spec.MadridSlot(1800000000)), Spec.DayIndex(1800000000))
+  eq(select(5, Spec.MadridSlot(1783895400)), Spec.DayIndex(1783895400) + 1, "lunes 13-7-2026 a las 00:30")
   eq(#M.vectors, 1233)
   eq(Spec.MadridSlot("x"), nil); eq(Spec.MadridSlot(1.5), nil)
 end)

@@ -208,11 +208,14 @@ test("the uploader line of the release notes: both forms are accepted, anything 
 });
 
 test("the github job runs whenever the addon checks passed, and takes the new uploader only when its build succeeded", () => {
+  // !cancelled(), never always(): always() is true even when a person cancels the run, so a cancelled Windows build
+  // would still create the release and upload it to CurseForge. A failed or skipped job still lets the next one run.
+  assert.doesNotMatch(PUBLISH, /always\(\) &&/);
   assert.equal(ifOf(PUBLISH, "comprobar"), "${{ !inputs.solo_subidor }}");
-  assert.equal(ifOf(PUBLISH, "subidor"), "${{ always() && !inputs.reusar_subidor && (inputs.solo_subidor || needs.comprobar.result == 'success') }}");
-  assert.equal(ifOf(PUBLISH, "github"), "${{ always() && !inputs.solo_subidor && needs.comprobar.result == 'success' }}");
-  assert.equal(ifOf(PUBLISH, "subidor-suelto"), "${{ always() && inputs.solo_subidor && needs.subidor.result == 'success' }}");
-  for (const job of ["curseforge", "wago"]) assert.equal(ifOf(PUBLISH, job), "${{ always() && needs.github.result == 'success' }}", job);
+  assert.equal(ifOf(PUBLISH, "subidor"), "${{ !cancelled() && !inputs.reusar_subidor && (inputs.solo_subidor || needs.comprobar.result == 'success') }}");
+  assert.equal(ifOf(PUBLISH, "github"), "${{ !cancelled() && !inputs.solo_subidor && needs.comprobar.result == 'success' }}");
+  assert.equal(ifOf(PUBLISH, "subidor-suelto"), "${{ !cancelled() && inputs.solo_subidor && needs.subidor.result == 'success' }}");
+  for (const job of ["curseforge", "wago"]) assert.equal(ifOf(PUBLISH, job), "${{ !cancelled() && needs.github.result == 'success' }}", job);
   assert.match(jobText(PUBLISH, "github"), /^    needs: \[comprobar, subidor\]$/m);
   assert.match(jobText(PUBLISH, "subidor-suelto"), /^    needs: subidor$/m);
   assert.match(jobText(PUBLISH, "subidor"), /^    uses: \.\/\.github\/workflows\/subidor-windows\.yml$/m);
@@ -378,14 +381,76 @@ test("no GitHub token ever reaches the packager; gh gets one only in the jobs th
   const keys = steps.map(step => [...step.matchAll(/^          ([A-Z_]+): \$\{\{/gm)].map(m => m[1]));
   assert.deepEqual(keys, [[], ["CF_API_TOKEN"], ["WAGO_API_TOKEN"]]);
   assert.match(steps[0], /args: -d \$\{\{ env\.EMPAQUETADOR_OPCIONES \}\}/, "the check run uploads nothing");
-  for (const job of ["comprobar", "curseforge", "wago"]) assert.doesNotMatch(jobText(PUBLISH, job), /GH_TOKEN|github\.token/, job);
+  assert.doesNotMatch(jobText(PUBLISH, "comprobar"), /GH_TOKEN|github\.token/);
+  // The stores: a read-only token only in the step that looks at earlier attempts of the run, never in another step.
+  for (const job of ["curseforge", "wago"]) {
+    const steps = jobText(PUBLISH, job).split(/\n      - name: /);
+    assert.deepEqual(steps.filter(step => /GH_TOKEN|github\.token/.test(step)).map(step => step.split("\n")[0]), ["¿Ya se subió en un intento anterior?"], job);
+    assert.match(jobText(PUBLISH, job), /^    permissions:\n      contents: read\n      actions: read\n    steps:$/m, job);
+  }
   for (const job of ["github", "subidor-suelto"]) {
     assert.match(jobText(PUBLISH, job), /^      GH_TOKEN: \$\{\{ github\.token \}\}$/m, job);
     assert.match(jobText(PUBLISH, job), /^    permissions:\n      contents: write\n      actions: read$/m, job);
   }
-  for (const job of ["comprobar", "subidor", "curseforge", "wago"]) assert.match(jobText(PUBLISH, job), /^    permissions:\n      contents: read$/m, job);
+  for (const job of ["comprobar", "subidor"]) assert.match(jobText(PUBLISH, job), /^    permissions:\n      contents: read$/m, job);
   for (const job of ["curseforge", "wago"]) assert.match(jobText(PUBLISH, job), /^    environment: publicar-addon$/m, job);
   assert.equal(envValue(PUBLISH, "AVISO_DESBLOQUEAR"), "Antes de extraer el subidor: clic derecho en el zip → Propiedades → «Desbloquear».");
+});
+
+test("«Re-run failed jobs» after a failed Windows build never uploads the same version to CurseForge or Wago twice", t => {
+  for (const [job, name] of [["curseforge", "Subir a CurseForge"], ["wago", "Subir a Wago"]]) {
+    const text = jobText(PUBLISH, job), step = "¿Ya se subió en un intento anterior?";
+    assert.match(text, new RegExp(`^    name: ${name}$`, "m"));
+    assert.ok(text.indexOf(`- name: ${step}\n        id: antes`) > 0 && text.indexOf(`- name: ${step}`) < text.indexOf("- name: Descargar el código"), job);
+    // Every later step, the packager's included, only runs when no earlier attempt uploaded.
+    const later = text.slice(text.indexOf("- name: Descargar el código")).split(/\n      - name: /);
+    assert.equal(later.length, 3, job);
+    for (const s of later) assert.match(s, /^        if: steps\.antes\.outputs\.ya != '1'$/m, `${job}: ${s.split("\n")[0]}`);
+    assert.match(stepRun(PUBLISH, job, step), new RegExp(`select\\(\\.name == "${name}" and \\.conclusion == "success"\\)`));
+  }
+  if (!bash || spawnSync("bash", ["-c", "command -v jq"]).status !== 0) return t.skip("needs bash and jq");
+  // A fake gh api: the jobs of attempt n of run 4242 in $FAKE/attempts/<n>.json, filtered with the step's --jq.
+  const fakeApi = String.raw`#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$FAKE/log"
+[ "$1" = api ] || exit 2
+url="$2"; shift 2; expr=""
+while [ $# -gt 0 ]; do case "$1" in --jq) expr="$2"; shift 2 ;; *) shift ;; esac; done
+n=$(printf '%s\n' "$url" | sed -nE 's#^repos/carulla94/el-especulador-del-wow/actions/runs/4242/attempts/([0-9]+)/jobs$#\1#p')
+[ -n "$n" ] && [ -f "$FAKE/attempts/$n.json" ] || { echo "HTTP 404" >&2; exit 1; }
+jq -r "$expr" "$FAKE/attempts/$n.json"
+`;
+  const jobs = list => JSON.stringify({total_count: list.length, jobs: list.map(([name, conclusion], i) => ({id: 100 + i, name, conclusion}))});
+  const attempt1 = [["Comprobar y empaquetar el addon", "success"], ["Subidor para Windows / Compilar y probar en Windows", "failure"],
+    ["Publicar en GitHub", "success"], ["Subir a CurseForge", "success"], ["Subir a Wago", "failure"]];
+  // Per job: what the step writes to GITHUB_OUTPUT and how many attempts it had to ask about.
+  const cases = [
+    {attempt: 1, attempts: {}, curseforge: ["", 0], wago: ["", 0]},
+    {attempt: 2, attempts: {1: attempt1}, curseforge: ["ya=1", 1], wago: ["", 1]},
+    {attempt: 3, attempts: {1: attempt1, 2: [["Subir a CurseForge", "skipped"], ["Subir a Wago", "success"]]}, curseforge: ["ya=1", 1], wago: ["ya=1", 2]},
+    {attempt: 2, attempts: {1: [["Subir a CurseForge", "cancelled"], ["Subir a Wago", null]]}, curseforge: ["", 1], wago: ["", 1]},
+  ];
+  for (const c of cases) {
+    for (const job of ["curseforge", "wago"]) {
+      const w = world(t);
+      fs.writeFileSync(path.join(w.dir, "bin", "gh"), fakeApi, {mode: 0o755});
+      fs.mkdirSync(path.join(w.fake, "attempts"));
+      for (const [n, list] of Object.entries(c.attempts)) fs.writeFileSync(path.join(w.fake, "attempts", n + ".json"), jobs(list));
+      const output = path.join(w.temp, "output");
+      fs.writeFileSync(output, "");
+      const result = w.run(stepRun(PUBLISH, job, "¿Ya se subió en un intento anterior?"), {GITHUB_RUN_ATTEMPT: String(c.attempt), GITHUB_OUTPUT: output});
+      const [out, calls] = c[job];
+      assert.equal(result.status, 0, `attempt ${c.attempt}, ${job}: ${result.stderr}`);
+      assert.equal(fs.readFileSync(output, "utf8").trim(), out, `attempt ${c.attempt}, ${job}`);
+      assert.equal(w.log().length, calls, `attempt ${c.attempt}, ${job}: calls`);
+      if (out) assert.match(result.stdout, /^::notice::Esta versión ya se subió a (CurseForge|Wago) en el intento \d de esta ejecución/m);
+    }
+  }
+  // If GitHub does not answer, the step fails: better no upload than a second one.
+  const w = world(t);
+  fs.writeFileSync(path.join(w.dir, "bin", "gh"), fakeApi, {mode: 0o755});
+  fs.writeFileSync(path.join(w.temp, "output"), "");
+  assert.notEqual(w.run(stepRun(PUBLISH, "curseforge", "¿Ya se subió en un intento anterior?"), {GITHUB_RUN_ATTEMPT: "2", GITHUB_OUTPUT: path.join(w.temp, "output")}).status, 0);
 });
 
 test("C10: the reusable uploader workflow has no required input, outputs version and an artifact with Subidor_Windows.zip", () => {

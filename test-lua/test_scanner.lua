@@ -1,9 +1,8 @@
 -- Pruebas del escáner propio de la subasta (Scanner.lua, 0.6.0) en el cliente simulado de Forever. Desde la raíz del
 -- repositorio: lua5.1 test-lua/test_scanner.lua
--- Core aún no le pasa los eventos al escáner (eso es de la parte B): aquí un marco «shim» hace lo que hará Core
--- (§2.1 de SPEC.md): reenvía los eventos de la subasta, da el callback listen(on) que registra o quita
--- REPLICATE_ITEM_LIST_UPDATE y graba los resúmenes de Auctionator que el escáner suelta. Cuando Core lo haga, basta
--- con quitar el shim (USE_SHIM = false) y que Scanner.Init lo llame Core.
+-- Core le pasa los eventos de la subasta (§2.1 de SPEC.md) y le da el callback listen(on), que registra o quita
+-- REPLICATE_ITEM_LIST_UPDATE en su marco de eventos. Aquí se envuelven los callbacks que Core le pasa a Scanner.Init
+-- para apuntar lo que el escáner cuenta (escaneos terminados, resúmenes soltados, líneas del chat).
 package.path = "test-lua/?.lua;" .. package.path
 local Stub = require("wow_stub")
 local json = require("json")
@@ -12,7 +11,6 @@ Stub.install()
 
 local DIR = "addon/OroHermandad/"
 local KEY = "Forever-Alliance"
-local USE_SHIM = true
 local passed, failed = 0, 0
 local function test(name, fn)
   local ok, err = pcall(fn)
@@ -34,63 +32,43 @@ local function dump(value)
 end
 
 ---------------------------------------------------------------------------
--- Sesión: el addon cargado, el shim de Core y lo que el escáner le cuenta
+-- Sesión: el addon cargado (Core le pasa los eventos al escáner) y lo que el escáner le cuenta a Core
 ---------------------------------------------------------------------------
-local ns, Scanner, History, Spec, shim
+local ns, Scanner, History, Spec
 local BUMP = 299999 -- objeto no vigilado de la primera fila (Stub.ah.autoBump)
-local log
+local log = {done = {}, released = {}, states = 0, say = {}}
 local windowShown = false
 
-local FORWARD = {
-  "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED", "AUCTION_HOUSE_THROTTLED_SYSTEM_READY",
-  "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED", "COMMODITY_SEARCH_RESULTS_UPDATED", "ITEM_SEARCH_RESULTS_UPDATED",
-  "ITEM_KEY_ITEM_INFO_RECEIVED", "AUCTION_HOUSE_AUCTION_CREATED", "AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION",
-  "AUCTION_CANCELED", "COMMODITY_PURCHASED", "ITEM_PURCHASED", "COMMODITY_PURCHASE_SUCCEEDED",
-  "COMMODITY_PURCHASE_FAILED", "PLAYER_LOGOUT",
-}
+-- El marco de eventos de Core (el que registró ADDON_LOADED).
+local function coreFrame()
+  for _, f in ipairs(Stub.frames) do if f.__events.ADDON_LOADED then return f end end
+end
+local shim = setmetatable({}, {__index = function(_, k) return coreFrame()[k] end})
 
-local callbacks = {
-  listen = function(on)
-    if on then shim:RegisterEvent("REPLICATE_ITEM_LIST_UPDATE") else shim:UnregisterEvent("REPLICATE_ITEM_LIST_UPDATE") end
-  end,
-  onScanDone = function(kind, whole, t) log.done[#log.done + 1] = {kind = kind, whole = whole, t = t} end,
-  onSummaryRelease = function(summary, record)
-    log.released[#log.released + 1] = {summary = summary, record = record}
-    if record then History.Record("summary", summary.data, true, {t = summary.t}) end
-  end,
-  onState = function() log.states = log.states + 1 end,
-  say = function(text) log.say[#log.say + 1] = text end,
-  windowShown = function() return windowShown end,
-}
-
-local function makeShim()
-  shim = CreateFrame("Frame")
-  for _, e in ipairs(FORWARD) do shim:RegisterEvent(e) end
-  shim:SetScript("OnEvent", function(_, event, ...)
-    local S = ns.Scanner
-    if event == "AUCTION_HOUSE_SHOW" then S.OnShow()
-    elseif event == "AUCTION_HOUSE_CLOSED" then S.OnClose()
-    elseif event == "REPLICATE_ITEM_LIST_UPDATE" then S.OnReplicate()
-    elseif event:match("^AUCTION_HOUSE_THROTTLED") then S.OnThrottle(event)
-    elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" then S.OnCommodityResults(...)
-    elseif event == "ITEM_SEARCH_RESULTS_UPDATED" then S.OnItemResults(...)
-    elseif event == "ITEM_KEY_ITEM_INFO_RECEIVED" then S.OnItemKeyInfo(...)
-    elseif event == "AUCTION_HOUSE_AUCTION_CREATED" then S.OnAuctionCreated(...)
-    elseif event == "AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION" then S.OnNotification(...)
-    elseif event == "AUCTION_CANCELED" then S.OnAuctionGone(...)
-    elseif event == "COMMODITY_PURCHASED" then S.OnPurchase(...)
-    elseif event == "ITEM_PURCHASED" then S.OnPurchase((...), 1)
-    elseif event == "COMMODITY_PURCHASE_SUCCEEDED" or event == "COMMODITY_PURCHASE_FAILED" then S.OnUserAction()
-    elseif event == "PLAYER_LOGOUT" then ns.History.Flush(); ns.Relay.Flush(); S.BeforeSave() end
-  end)
+-- Envuelve los callbacks que Core le pasa a Scanner.Init: se apunta lo que pasa y se llama a lo de Core. La ventana
+-- del addon, «abierta» o no según windowShown.
+local function wrapInit(loaded)
+  local init = loaded.Scanner.Init
+  loaded.Scanner.Init = function(db, cdb, callbacks)
+    local wrapped = {}
+    for k, fn in pairs(callbacks) do wrapped[k] = fn end
+    wrapped.onScanDone = function(kind, whole, t)
+      log.done[#log.done + 1] = {kind = kind, whole = whole, t = t}
+      return callbacks.onScanDone(kind, whole, t)
+    end
+    wrapped.onSummaryRelease = function(summary, record)
+      log.released[#log.released + 1] = {summary = summary, record = record}
+      return callbacks.onSummaryRelease(summary, record)
+    end
+    wrapped.onState = function() log.states = log.states + 1; return callbacks.onState() end
+    wrapped.say = function(text) log.say[#log.say + 1] = text; return callbacks.say(text) end
+    wrapped.windowShown = function() return windowShown end
+    return init(db, cdb, wrapped)
+  end
 end
 
--- Tras cargar: lo que hará Core en la 0.6.0 (REPLICATE_ITEM_LIST_UPDATE solo dentro de las ventanas de respuesta).
 local function afterLoad()
-  for _, f in ipairs(Stub.frames) do f.__events.REPLICATE_ITEM_LIST_UPDATE = nil end
   Scanner, History, Spec = ns.Scanner, ns.History, ns.Spec
-  if USE_SHIM then makeShim(); Scanner.Init(OroHermandadDB, OroHermandadCharDB, callbacks) end
-  log = {done = {}, released = {}, states = 0, say = {}}
 end
 
 -- Sesión nueva (sin nada guardado) o con sv = {db, cdb, hist}.
@@ -100,13 +78,17 @@ local function boot(sv)
   Stub.ah.refirePending, Stub.ah.pumping, Stub.ah.autoBump = 0, false, BUMP
   _G.OroHermandadDB, _G.OroHermandadCharDB, _G.OroHermandadHist = sv and sv.db, sv and sv.cdb, sv and sv.hist
   ns = Stub.loadAddon(DIR)
+  wrapInit(ns)
+  log = {done = {}, released = {}, states = 0, say = {}}
   Stub.fire("ADDON_LOADED", "OroHermandad")
   afterLoad()
 end
 
--- /reload: PLAYER_LOGOUT, los SavedVariables copiados (como si se escribieran y leyeran) y el addon otra vez.
+-- /reload: PLAYER_LOGOUT (Core: History.Flush, Relay.Flush, BeforeSave de todo), los SavedVariables copiados (como si
+-- se escribieran y leyeran) y el addon otra vez.
 local function reload(beforeLoad)
-  ns = Stub.reload(DIR, beforeLoad)
+  log = {done = {}, released = {}, states = 0, say = {}}
+  ns = Stub.reload(DIR, beforeLoad, wrapInit)
   afterLoad()
 end
 
@@ -370,6 +352,83 @@ test("Otro addon pide la subasta (Auctionator): se lee su respuesta por el ganch
   eq(shim.__events.REPLICATE_ITEM_LIST_UPDATE, nil)
   Stub.advance(10)
   eq(#log.done, done + 1)
+  Stub.closeAH()
+end)
+
+test("Auctionator pide la subasta entera al mostrar su marco, antes de nuestro AUCTION_HOUSE_SHOW: se lee y se graba", function()
+  boot()
+  setNow(dayStart(1))
+  Stub.autoscan, Stub.replicateScan = true, true
+  standardHouse()
+  local s = OroHermandadDB.scanner
+  local calls = #Stub.ah.calls
+  -- Auctionator: AuctionatorAHFrameMixin:OnShow -> InitiateScan -> C_AuctionHouse.ReplicateItems(), y después el evento.
+  Stub.openAH({onShow = function() C_AuctionHouse.ReplicateItems() end})
+  eq(#Stub.ah.calls, calls + 1); eq(Stub.ah.calls[#Stub.ah.calls].accepted, true)
+  assert(s.lastAnyRequest, "la petición se ve")
+  eq(state(), "other", "se escucha su respuesta"); eq(shim.__events.REPLICATE_ITEM_LIST_UPDATE, true)
+  Stub.runUntil(function() return not busy() end, 60)
+  Stub.runUntil(function() return History.Pending() == 0 end, 30)
+  eq(#log.done, 1, "leída una vez"); eq(s.lastSuccess, s.lastAnyRequest, "su petición abre el turno de 15 min")
+  eq(state(), "done"); eq(s.recorded[KEY], log.done[1].t, "grabado")
+  eq(#points(2772), 1); eq(lastPoint(2772).lo, 100)
+  -- Su aviso de escaneo completo (EventBus) no graba otra vez.
+  Stub.scanComplete("full")
+  Stub.runUntil(function() return History.Pending() == 0 end, 30)
+  eq(#points(2772), 1)
+  Stub.closeAH()
+  -- Una petición con la subasta cerrada de hace más de 5 s no abre nada; en la neutral, tampoco.
+  Stub.advance(1000)
+  C_AuctionHouse.ReplicateItems()
+  Stub.advance(6)
+  Stub.openAH()
+  eq(Scanner.Internals().windowOpen, false); eq(state(), "auctionator")
+  Stub.closeAH()
+  Stub.advance(1000)
+  Stub.openAH({npcFaction = "Neutral", onShow = function() C_AuctionHouse.ReplicateItems() end})
+  eq(Scanner.Internals().windowOpen, false); eq(state(), "neutral")
+  eq(shim.__events.REPLICATE_ITEM_LIST_UPDATE, nil)
+  Stub.advance(10)
+  eq(#log.done, 1)
+  Stub.closeAH()
+  eq(Scanner.Internals().early, nil)
+  Stub.autoscan, Stub.replicateScan = false, false
+end)
+
+test("La lista crece durante la lectura: la huella pasa a ser la de la lista entera (la misma foto no se lee dos veces)", function()
+  boot()
+  setNow(dayStart(1) + 7200)
+  standardHouse()
+  local full
+  Stub.ah.onRowRead = function(i)
+    if full and i == 10 and #Stub.ah.list < #full then
+      for k = #Stub.ah.list + 1, #full do Stub.ah.list[k] = full[k] end
+    end
+  end
+  Stub.openAH(); Stub.advance(3)
+  local s = OroHermandadDB.scanner
+  local answers = Stub.ah.answers or 0
+  assert(Scanner.Request(true))
+  -- La respuesta llega con 40 filas; el resto aparece mientras se lee (§2.6).
+  Stub.runUntil(function() return (Stub.ah.answers or 0) > answers end, 10)
+  full = {}
+  for k, r in ipairs(Stub.ah.list) do full[k] = r end
+  while #Stub.ah.list > 40 do table.remove(Stub.ah.list) end
+  Stub.runUntil(function() return not busy() end, 60)
+  Stub.runUntil(function() return History.Pending() == 0 end, 30)
+  Stub.ah.onRowRead = nil
+  eq(#log.done, 1); eq(Scanner.Internals().stats.lastRead.n, #full, "leída entera")
+  eq(s.fp, Scanner.Fingerprint(#full), "huella de la lista entera")
+  local success, baseT = s.lastSuccess, OroHermandadCharDB.scanBase[KEY].t
+  -- 10 min después otro addon pide (el servidor no responde) y llegan avisos sueltos a su ventana: no es nuevo.
+  Stub.advance(600)
+  local stray = Scanner.Internals().stats.strayRejected
+  C_AuctionHouse.ReplicateItems()
+  eq(Stub.ah.calls[#Stub.ah.calls].accepted, false)
+  Stub.strayReplicateEvents(3)
+  Stub.advance(70)
+  eq(#log.done, 1, "no se lee otra vez"); eq(Scanner.Internals().stats.strayRejected, stray + 1)
+  eq(s.lastSuccess, success, "el turno de 15 min no se mueve"); eq(OroHermandadCharDB.scanBase[KEY].t, baseT, "ni la referencia")
   Stub.closeAH()
 end)
 
@@ -652,11 +711,16 @@ test("Por personaje: las subastas de tu alter son ajenas para el principal y al 
   local p = lastPoint(2772)
   eq(p.dt, p.t - T); eq(p.sold, 8, "8 compradas de las 20; las 15 de Alto no se movieron")
   Stub.closeAH()
-  -- Javi tiene subastas seguidas pero el escaneo no ve ninguna suya: no se miden ventas (ownSeen = "no").
+  -- Javi tiene subastas seguidas pero dos escaneos seguidos no ven ninguna suya: no se miden ventas (ownSeen = "no").
+  -- Con uno solo, todavía sí (pudo venderse justo antes).
   OroHermandadCharDB.auctions[555] = table.concat({2772, 101, 5, 3, math.floor(Stub.now), KEY, "c"}, ",")
   house({{2772, 12, 100, {band = 3}}, {2772, 30, 106, {band = 3}}})
   Stub.advance(1900)
   Stub.openAH(); Stub.advance(3)
+  scanNow()
+  eq(OroHermandadCharDB.scanner.ownSeen, "yes", "un escaneo sin las tuyas no basta"); eq(OroHermandadCharDB.scanner.ownMiss, 1)
+  assert(lastPoint(2772).dt, "con ventas")
+  Stub.advance(1900)
   scanNow()
   eq(OroHermandadCharDB.scanner.ownSeen, "no"); eq(lastPoint(2772).dt, nil, "sin ventas")
   local probe = table.concat(Scanner.ProbeLines(), "\n")
@@ -665,8 +729,126 @@ test("Por personaje: las subastas de tu alter son ajenas para el principal y al 
   house({{2772, 12, 100, {band = 3}}, {2772, 30, 106, {band = 3}}, {2772, 5, 101, {band = 3, owner = "Javi"}}})
   Stub.advance(1900)
   scanNow()
-  eq(OroHermandadCharDB.scanner.ownSeen, "yes")
+  eq(OroHermandadCharDB.scanner.ownSeen, "yes"); eq(OroHermandadCharDB.scanner.ownMiss, nil)
   Stub.closeAH()
+end)
+
+test("Ventas: tus subastas de mercancía vendidas ya no cuentan como tuyas en el escaneo (la pareja sigue midiendo)", function()
+  boot()
+  setNow(dayStart(5))
+  local me = UnitName("player")
+  -- Dos lotes tuyos de hierro con precio de compra y uno tuyo de solo puja (también es tuyo).
+  standardHouse({{2772, 10, 99, {band = 3, owner = me}}, {2772, 10, 99, {band = 3, owner = me}},
+                 {2772, 5, 120, {band = 3, owner = me, bid = 500}}})
+  Stub.openAH(); Stub.advance(3)
+  Stub.asUser(function() C_AuctionHouse.PostCommodity({itemID = 2772}, 3, 10, 99) end)
+  Stub.fire("AUCTION_HOUSE_AUCTION_CREATED", 5001)
+  Stub.asUser(function() C_AuctionHouse.PostCommodity({itemID = 2772}, 3, 10, 99) end)
+  Stub.fire("AUCTION_HOUSE_AUCTION_CREATED", 5002)
+  Stub.advance(20)
+  scanNow()
+  eq(OroHermandadCharDB.scanner.ownSeen, "yes"); eq(Scanner.Internals().stats.lastRead.ownRows, 3, "la de solo puja, también")
+  Stub.closeAH()
+  -- Se venden: siguen apuntadas para la línea de ventas, marcadas como vendidas (una vez).
+  Stub.advance(1200)
+  Stub.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", 4, "", 5001)
+  Stub.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", 4, "", 5002)
+  Stub.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", 4, "", 5001) -- otra compra parcial
+  assert(OroHermandadCharDB.auctions[5001]:match(",c,s$"), OroHermandadCharDB.auctions[5001])
+  assert(OroHermandadCharDB.auctions[5002]:match(",c,s$"), OroHermandadCharDB.auctions[5002])
+  eq(#Scanner.Sales(KEY), 3, "tres avisos de venta")
+  -- La pestaña Subastas: dos vendidas esperando en el correo y una de solo puja: ninguna debería salir con precio.
+  Stub.ah.ownedList = {{status = 1, buyoutAmount = 990, bidder = "Comprador"}, {status = 1, buyoutAmount = 990},
+                       {status = 0, bidAmount = 500}}
+  -- La pareja: dos escaneos a 40 min sin ninguna tuya en la subasta.
+  Stub.advance(2400)
+  standardHouse()
+  Stub.openAH(); Stub.advance(3)
+  scanNow()
+  Stub.closeAH()
+  Stub.advance(2400)
+  standardHouse()
+  Stub.openAH(); Stub.advance(3)
+  eq(Scanner.PairDue(KEY), true); eq(Scanner.Proposal().reason, "pareja")
+  scanNow()
+  assert(lastPoint(2772).dt, "con ventas")
+  eq(OroHermandadCharDB.scanner.ownSeen, "yes"); eq(OroHermandadCharDB.scanner.ownMiss, nil)
+  local probe = table.concat(Scanner.ProbeLines(), "\n")
+  assert(has(probe, "la subasta dice 0 a la venta de 3"), probe)
+  assert(not has(probe, "Comprador"), "el pujador nunca se lee")
+  Stub.closeAH()
+  -- Una subasta tuya activa con precio que no sale en dos escaneos seguidos: entonces sí, «no».
+  Stub.ah.ownedList = {{status = 0, buyoutAmount = 990}}
+  for k = 1, 2 do
+    Stub.advance(1900)
+    Stub.openAH(); Stub.advance(3)
+    scanNow()
+    Stub.closeAH()
+    eq(OroHermandadCharDB.scanner.ownSeen, k == 1 and "yes" or "no", "escaneo " .. k)
+  end
+  Stub.ah.ownedList = {}
+  -- Lo guardado: «,s» solo en mercancías; lo demás, fuera al cargar.
+  reload(function()
+    OroHermandadCharDB.auctions[6001] = "2772,99,10,3,1800000000,Forever-Alliance,i,s"
+    OroHermandadCharDB.auctions[6002] = "2772,99,10,3,1800000000,Forever-Alliance,c,s,s"
+  end)
+  assert(OroHermandadCharDB.auctions[5001], "la vendida sigue"); eq(OroHermandadCharDB.auctions[6001], nil)
+  eq(OroHermandadCharDB.auctions[6002], nil); eq(OroHermandadCharDB.scanner.ownSeen, "no")
+end)
+
+test("Ventas con un alter de la misma cuenta: las dos medidas no se pisan (una compra cuenta una vez)", function()
+  boot()
+  local realName = _G.UnitName
+  local chars, current = {}, "Javi"
+  local function switch(name)
+    chars[current] = Stub.deepCopy(OroHermandadCharDB)
+    reload(function()
+      _G.OroHermandadCharDB = chars[name]
+      _G.UnitName = function() return name end
+    end)
+    current = name
+  end
+  _G.UnitName = function() return "Javi" end
+  local function houseWith(big)
+    local spec = {{2772, 5, 100, {band = 2}}, {2772, 30, 104, {band = 3}}, {2772, 50, 130, {band = 3}},
+                  {2770, 40, 30, {band = 3}}, {2770, 10, 31, {band = 2}}}
+    if big then table.insert(spec, 1, {2772, 20, 99, {band = 3}}) end
+    house(spec)
+  end
+  local function scanAt(t, expected)
+    setNow(t)
+    Stub.openAH(); Stub.advance(3)
+    scanNow()
+    eq(state(), expected)
+    Stub.closeAH()
+    return lastPoint(2772)
+  end
+  local T0 = dayStart(8)
+  houseWith(true)
+  scanAt(T0, "done")                                   -- Javi, grabado
+  switch("Alto")
+  scanAt(T0 + 16 * 60, "done-refresh")                 -- Alto: su referencia
+  houseWith(false)                                     -- se compran las 20 a 99
+  switch("Javi")
+  local a = scanAt(T0 + 46 * 60, "done")               -- Javi: mide (T0, T0+46]
+  eq(a.sold, 20); eq(OroHermandadDB.scanner.sampledUntil[KEY], a.t)
+  switch("Alto")
+  local altBase = OroHermandadCharDB.scanBase[KEY].t
+  setNow(T0 + 76 * 60)
+  Stub.openAH(); Stub.advance(3)
+  eq(Scanner.PairDue(KEY), false, "su referencia es de antes de la última medida")
+  Stub.closeAH()
+  local b = scanAt(T0 + 76 * 60, "done")               -- Alto: (T0+16, T0+76] se pisaría con la de Javi
+  eq(b.dt, nil, "sin ventas")
+  assert(OroHermandadCharDB.scanBase[KEY].t > altBase, "la referencia de Alto se movió")
+  local c = scanAt(T0 + 110 * 60, "done")              -- y el siguiente de Alto ya mide desde ahí
+  eq(c.dt, c.t - b.t)
+  -- Ninguna medida se pisa con otra.
+  local samples = {}
+  for _, p in ipairs(points(2772)) do if p.dt then samples[#samples + 1] = p end end
+  eq(#samples, 2)
+  for i = 2, #samples do assert(samples[i].t - samples[i].dt >= samples[i - 1].t, "se pisan") end
+  _G.UnitName = realName
 end)
 
 ---------------------------------------------------------------------------
@@ -674,6 +856,7 @@ end)
 ---------------------------------------------------------------------------
 test("Automático: pide a los 2 s de abrir; con la subasta abierta, solo si toca grabar o medir ventas; nada en el chat", function()
   boot()
+  Stub.printed = {} -- (las propuestas de las pruebas de antes, en modo proponer con la ventana cerrada)
   setNow(dayStart(4))
   Scanner.SetMode("auto")
   standardHouse()
@@ -886,6 +1069,47 @@ test("Resumen sin clic en «proponer»: se graba al cerrar con su hora; con «no
   eq(Scanner.HoldSummary(summary(math.floor(Stub.now), 84)), false, "sin escaneo completo posible en 10 min")
   eq(log.released[4].record, false, "a 100 s del último grabado: solo precios")
   Stub.closeAH()
+end)
+
+test("Subasta neutral o que no se sabe: los escaneos de Auctionator solo refrescan (nada grabado, compartido ni fechado)", function()
+  Stub.advance(4000)
+  local before, out, recorded = #points(2772), #OroHermandadCharDB.relay.out, OroHermandadDB.scanner.recorded[KEY]
+  local fullScan, rows, released = OroHermandadDB.fullScan[KEY], OroHermandadDB.scanRows[KEY], #log.released
+  for _, o in ipairs({{npcFaction = false, mapID = 9001}, {npcFaction = false, mapID = 2001, depositFactor = 2}}) do
+    Stub.openAH(o); Stub.advance(3)
+    assert(Scanner.House() == "neutral" or Scanner.House() == "unknown", tostring(Scanner.House()))
+    Stub.scanComplete("summary", 1000)                 -- entero
+    Stub.scanComplete("summary", 10)                   -- parcial
+    Stub.scanComplete("full")
+    eq(Scanner.HoldSummary(summary(math.floor(Stub.now), 70)), "drop"); eq(Scanner.Held(KEY), nil)
+    Stub.advance(5)
+    Stub.runUntil(function() return History.Pending() == 0 end, 30)
+    Stub.closeAH()
+    Stub.scanComplete("summary", 1000)                 -- el aviso llega justo después de cerrar: igual
+    Stub.advance(5)
+  end
+  eq(#points(2772), before, "ningún punto"); eq(#OroHermandadCharDB.relay.out, out, "nada compartido")
+  eq(OroHermandadDB.scanner.recorded[KEY], recorded, "el filtro del mercado no se gasta")
+  eq(OroHermandadDB.fullScan[KEY], fullScan, "ni se fecha"); eq(OroHermandadDB.scanRows[KEY], rows); eq(#log.released, released)
+  -- En la de tu facción, el mismo resumen se retiene como siempre.
+  Stub.openAH({mapID = 1453}); Stub.advance(3)
+  eq(Scanner.House(), "faction")
+  eq(Scanner.HoldSummary(summary(math.floor(Stub.now), 71)), true)
+  Stub.closeAH()
+  eq(#log.released, released + 1)
+end)
+
+test("Resumen retenido y /reload (o «Guardar y subir») con la subasta abierta: se graba antes de que el juego escriba", function()
+  Stub.advance(4000)
+  Stub.openAH({mapID = 1453}); Stub.advance(3)
+  local t = math.floor(Stub.now)
+  eq(Scanner.HoldSummary(summary(t, 86)), true)
+  eq(state(), "ready", "«Guardar y subir» no espera")
+  local out = #OroHermandadCharDB.relay.out
+  reload() -- PLAYER_LOGOUT sin AUCTION_HOUSE_CLOSED antes
+  eq(lastPoint(2772).t, t, "con la hora del resumen"); eq(lastPoint(2772).lo, 86)
+  eq(OroHermandadDB.scanner.recorded[KEY], t)
+  eq(#OroHermandadCharDB.relay.out, out + 1, "compartido")
 end)
 
 ---------------------------------------------------------------------------

@@ -834,7 +834,7 @@ const ADVICE = v06("timing-advice.json"), TIMING2 = v06("timing-v2.json");
 test("the panel's 0.6.0 fixtures are byte copies of the shared ones", () => {
   const sha = name => crypto.createHash("sha256").update(fs.readFileSync(new URL("./fixtures/v06/" + name, import.meta.url))).digest("hex");
   assert.equal(sha("timing-advice.json"), "62b1870351a68d3552e6687ec98147ffab42590762471f49f1908e3d2f5191fc");
-  assert.equal(sha("timing-v2.json"), "4b312978359deeffde566386da38f3e8eae34d1e3f6c51519fb66c88b6a62023");
+  assert.equal(sha("timing-v2.json"), "baf20ede58ace9f768148efe8534f12abcae1cae49ccb939c2c231ef0392a8d9");
 });
 
 test("timingAdvice is contract C11: every case of timing-advice.json, as the addon's Timing.Advice", () => {
@@ -871,6 +871,12 @@ test("item blocks add up the weekday cells, and the whale and the doubled purcha
     assert.equal(blocks[b].u, mine.reduce((sum, c) => sum + c[6], 0));
     assert.equal(blocks[b].mu, Math.max(0, ...mine.map(c => c[10])));
   }
+  // Summer: middles on Sunday 02:00 and 03:00 and Monday 00:30 and 02:00 (CEST), all in block 00-04. Spanish dates split
+  // them into one day per weekday cell, so the block has 2 days, as the addon's Timing counts the same samples (by
+  // dayIndex the Monday cell would have 2 and the block 3).
+  const summer = H.itemBlocks(TIMING2.expected.items.find(i => i.id === 2589));
+  assert.deepEqual([summer[0].n, summer[0].days, summer[0].u], [4, 2, 24]);
+  assert.deepEqual(TIMING2.expected.items.find(i => i.id === 2589).cells.map(c => [c[0], c[9]]), [[0, 1], [36, 1]]);
   assert.deepEqual(blocks[2].u, 400, "the 400-unit whale of the morning…");
   assert.equal(sales.advice.salesOK[2], false, "…is its block's largest sample, left out");
   assert.deepEqual([sales.advice.best, sales.advice.reason, sales.advice.hint], [5, "ventas", [19, 20]]);

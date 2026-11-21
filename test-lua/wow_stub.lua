@@ -453,7 +453,7 @@ local PROTECTED = {"PostCommodity", "PostItem", "ConfirmPostCommodity", "Confirm
 function Stub.installAuctionHouse()
   local api = _G.C_AuctionHouse
   local ah = {rows = {}, list = {}, calls = {}, answerDelay = 2, answerEvents = 3, cooldown = 900, lastSuccess = nil,
-              bandBase = 1, refirePending = 0, refired = 0, owned = 0, ready = true, keyCached = {}, keyDelay = 0.3,
+              bandBase = 1, refirePending = 0, refired = 0, ownedList = {}, ready = true, keyCached = {}, keyDelay = 0.3,
               keyPending = {}, ignore = {}, queries = {}, searchDelay = 0.3, protectedCalls = {}, asUser = false,
               usPerRow = 0, fakeMs = 0, bandInfo = {0, 1800, 7200, 43200}, refuseAll = false, nextAuctionID = 1000}
   Stub.ah = ah
@@ -507,7 +507,15 @@ function Stub.installAuctionHouse()
     local lo = ah.bandInfo[b + 1]
     return lo, ({1800, 7200, 43200, 172800})[b + 1]
   end
-  function api.GetNumOwnedAuctions() return ah.owned end
+  -- Tus subastas (pestaña Subastas): ownedList = {{status = 0 activa o 1 vendida (espera en el correo), buyoutAmount,
+  -- bidder}, ...}. El pujador está ahí, como en el cliente; el addon nunca lo lee.
+  function api.GetNumOwnedAuctions() return #ah.ownedList end
+  function api.GetOwnedAuctionInfo(i)
+    local o = ah.ownedList[i]
+    if not o then return nil end
+    return {auctionID = 9000 + i, itemKey = {itemID = o.id or 2772}, status = o.status or 0, quantity = o.qty or 1,
+            buyoutAmount = o.buyoutAmount, bidAmount = o.bidAmount, bidder = o.bidder}
+  end
   function api.IsThrottledMessageSystemReady() return ah.ready end
   -- Búsquedas: MakeItemKey, GetItemKeyInfo (nil hasta keyDelay s; entonces ITEM_KEY_ITEM_INFO_RECEIVED) y
   -- SendSearchQuery (100 por minuto; se ignora sin aviso si la clave no tiene datos o el objeto está en ignore).
@@ -602,7 +610,8 @@ end
 
 -- Abre la subasta: o.npcFaction ("Alliance", "Horde", "Neutral"; false = el cliente no da facción; por defecto la tuya),
 -- o.npcGUID, o.mapID, o.depositFactor (5 en la neutral). Muestra AuctionHouseFrame (pestaña Comprar) y lanza
--- AUCTION_HOUSE_SHOW.
+-- AUCTION_HOUSE_SHOW. o.onShow(): lo que otro addon hace al mostrarse su marco, antes de que el nuestro oiga
+-- AUCTION_HOUSE_SHOW (Auctionator pide ahí su escaneo completo si lo tiene activado al abrir).
 function Stub.openAH(o)
   o = o or {}
   if o.npcFaction == false then Stub.npcFaction = nil else Stub.npcFaction = o.npcFaction or Stub.playerFaction end
@@ -626,6 +635,7 @@ function Stub.openAH(o)
   end
   frame.displayMode = _G.AuctionHouseFrameDisplayMode.Buy
   frame:Show()
+  if o.onShow then o.onShow() end
   Stub.fire("AUCTION_HOUSE_SHOW")
 end
 
@@ -675,7 +685,9 @@ Stub.deepCopy = deepCopy
 
 -- /reload en el mismo proceso: PLAYER_LOGOUT, copia de los SavedVariables (como si se escribieran y se volvieran a
 -- leer), fuera marcos, temporizadores y ganchos, y el addon cargado otra vez con ADDON_LOADED. Devuelve su ns.
-function Stub.reload(dir, beforeLoad)
+-- onLoaded(ns): entre cargar los archivos y ADDON_LOADED (para envolver funciones antes de que Core las llame).
+-- skip: archivos que no se cargan esta vez (Stub.loadAddon).
+function Stub.reload(dir, beforeLoad, onLoaded, skip)
   Stub.fire("PLAYER_LOGOUT")
   local db, cdb, hist = deepCopy(_G.OroHermandadDB), deepCopy(_G.OroHermandadCharDB), deepCopy(_G.OroHermandadHist)
   Stub.frames, Stub.timers = {}, {}
@@ -683,7 +695,8 @@ function Stub.reload(dir, beforeLoad)
   if Stub.ah then Stub.ah.refirePending, Stub.ah.pumping = 0, false end
   _G.OroHermandadDB, _G.OroHermandadCharDB, _G.OroHermandadHist = db, cdb, hist
   if beforeLoad then beforeLoad() end
-  local ns = Stub.loadAddon(dir)
+  local ns = Stub.loadAddon(dir, skip)
+  if onLoaded then onLoaded(ns) end
   Stub.fire("ADDON_LOADED", "OroHermandad")
   return ns
 end
@@ -727,10 +740,13 @@ Stub.RELAY_SHA256 = {
 -- Relay.lua de la 0.5.1 (git show f645d15:addon/OroHermandad/Relay.lua), para probar que los de antes siguen entendiendo.
 Stub.LEGACY_RELAY_SHA256 = "f1d30bd42b0f6cdb0fc8057b082833913524588c95b931148c39689015c8d71e"
 
-function Stub.loadAddon(dir)
+-- skip: {["Archivo.lua"] = true} que no se cargan (tras actualizar con solo un /reload, el juego carga la lista de
+-- archivos de la versión anterior: sin los nuevos de la 0.6.0, Scanner.lua y Timing.lua).
+Stub.NEW_IN_060 = {["Scanner.lua"] = true, ["Timing.lua"] = true}
+function Stub.loadAddon(dir, skip)
   local ns = {}
   for line in io.lines(dir .. "/OroHermandad.toc") do
-    if line:match("%.lua$") then assert(loadfile(dir .. "/" .. line))("OroHermandad", ns) end
+    if line:match("%.lua$") and not (skip and skip[line]) then assert(loadfile(dir .. "/" .. line))("OroHermandad", ns) end
   end
   return ns
 end

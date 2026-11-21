@@ -285,10 +285,22 @@ local function listings(items)
   table.sort(out, function(a, b) return a.id < b.id end)
   return out
 end
+-- 0.6.0: el escaneo completo lo lee Scanner.lua y se lo pasa a History ya resumido (RecordAggregate); el de Auctionator
+-- (EventBus) ya no se graba con el escáner cargado. Sin Scanner.lua (un /reload tras actualizar, skip), Core graba el de
+-- Auctionator como en la 0.5.1.
 local function scan(c, items)
-  local data = Stub.scanRows("full", nil, listings(items))
-  for _, l in ipairs(Stub.bus["replicate_scan_complete"] or {}) do
-    if l.__owner == c then current = c; l:ReceiveEvent("replicate_scan_complete", data); current = nil end
+  if c.ns.Scanner then
+    local agg = {}
+    for id, it in pairs(items) do agg[id] = {lo = it[1], qty = it[2], qty5 = it[3]} end
+    local prev = current
+    current = c
+    c.History.RecordAggregate("full", agg, true)
+    current = prev
+  else
+    local data = Stub.scanRows("full", nil, listings(items))
+    for _, l in ipairs(Stub.bus["replicate_scan_complete"] or {}) do
+      if l.__owner == c then current = c; l:ReceiveEvent("replicate_scan_complete", data); current = nil end
+    end
   end
   run(5)
 end

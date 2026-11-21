@@ -10,6 +10,8 @@ import json
 import os
 import queue
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -66,7 +68,7 @@ class Quiet(unittest.TestCase):
         self.addCleanup(h.set_output_sink, previous)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        self.tmp = Path(folder.name)
+        self.tmp = Path(folder.name).resolve()   # nombre largo también en Windows (no RUNNER~1)
         h.set_log_file(self.tmp / "registro.txt")
         self.addCleanup(h.set_log_file, None)
 
@@ -305,6 +307,25 @@ class LockTests(Quiet):
                     self.assertEqual((asked, removed), ([c.MIGRATE], [1]))
                     self.assertEqual(h.lock_holder(self.tmp)["modo"], "ventana")
 
+    def test_a_stale_holder_file_does_not_hide_the_old_hidden_start(self):
+        """The window ended without removing subidor.quien.json (Windows logoff, Task Manager); now the 0.5.0 hidden
+        task holds the lock and writes no holder file: the old start is offered, not «ya está abierto»."""
+        ended = subprocess.Popen([sys.executable, "-c", "pass"])
+        ended.wait()
+        for modo in ("ventana", "consola"):
+            for task, expected in ((True, ("ok", c.MIGRATED)), (False, ("bloqueado", c.BLOCKED_CONSOLE))):
+                with self.subTest(modo=modo, task=task):
+                    holder = self.hold("segundo-plano")
+                    (self.tmp / h.LOCK_HOLDER).write_text(
+                        json.dumps({"pid": ended.pid, "modo": modo, "desde": int(time.time()) - 3600}), encoding="utf-8")
+                    ask, asked = self.ask(True)
+                    with contextlib.ExitStack() as stack:
+                        outcome = c.take_lock(self.tmp, stack, ask, task_installed=lambda: task,
+                                              remove_task=holder.close, tries=2, pause=lambda s: None)
+                        self.assertEqual(outcome, expected)
+                        self.assertEqual(asked, [c.MIGRATE] if task else [])
+                    holder.close()
+
     def test_declined_or_still_running_stays_blocked(self):
         holder = self.hold("segundo-plano")
         ask, _ = self.ask(False)
@@ -522,6 +543,43 @@ class SetupTests(Quiet):
         broken = c.Setup({}, None, detect=lambda: 1 / 0)
         self.assertEqual(broken.folders(), [])
 
+    def test_a_new_panel_address_sends_everything_again(self):
+        """«Cambiar» (Panel): what was sent and the status belong to the old panel; the same address keeps them."""
+        wow = self.tmp / "World of Warcraft"
+        path = wow / "_forever_" / "WTF" / "Account" / "JUSEP" / "SavedVariables" / "OroHermandad.lua"
+        write(path, saved_variables(sample_hist()), age=60)
+        sent = []
+
+        def poster(url, key, payload, timeout):
+            body = json.loads(payload)
+            items = [item for market in body["markets"] for observer in market["observers"] for item in observer["items"]]
+            sent.append((url, sum(len(item["days"]) for item in items), sum(len(item["points"]) for item in items)))
+            return accepted()
+
+        def cycle(config):
+            uploader = h.GuildUploader(config["url"], KEY, config["wow"], state=config["sources"], poster=poster,
+                                       clock=lambda: NOW)
+            return [e.kind for e in uploader.cycle()["events"]]
+        protector = h.TestOnlyProtector()
+        config = {"schema": 1, "url": URL, "wow": str(wow), "key": h.seal_key(KEY, protector), "sources": {},
+                  "estado": {"aceptado": NOW - 60, "ultimo": "ok", "suben": 2, "aportan": 7, "quedan": 3}}
+        self.assertEqual(cycle(config), ["uploaded"])
+        first = sent[-1]
+        same = c.Setup(config, protector, steps=("url",))
+        self.assertEqual(same.check_url(URL + "/hermandad"), "")
+        same.finish()
+        self.assertIn(str(path), config["sources"], "same panel: the record is kept")
+        self.assertIn("estado", config)
+        other = "https://otro-panel.example.com"
+        setup = c.Setup(config, protector, steps=("url",))
+        self.assertEqual(setup.check_url(other), "")
+        self.assertEqual(setup.finish()[0], other)
+        self.assertEqual((config["url"], config["sources"]), (other, {}))
+        self.assertNotIn("estado", config, "the old panel's numbers are not shown for the new one")
+        self.assertIn(c.NEW_PANEL, self.lines[-1])
+        self.assertEqual(cycle(config), ["uploaded"], "the same file goes to the new panel")
+        self.assertEqual(sent[-1], (other,) + first[1:], "complete, like the first upload to the old panel")
+
     def test_accounts_row_counts_saved_files(self):
         root = self.wow()
         self.assertEqual(c.scan_accounts(root), (0, None))
@@ -732,7 +790,9 @@ class PackagingTests(unittest.TestCase):
                        'python -m unittest discover -s pc_sync -p "test_*.py"',
                        'python -B pc_sync/empaquetar_windows.py --salida "$RUNNER_TEMP/Subidor_Windows.zip"',
                        "name: Subidor_Windows\n", "path: ${{ runner.temp }}/Subidor_Windows.zip", "retention-days: 30",
-                       'echo "version=$version" >> "$GITHUB_OUTPUT"'):
+                       'echo "version=$version" >> "$GITHUB_OUTPUT"',
+                       # Windows Python prints "\r\n" and Git Bash keeps the "\r" in $(...): the check would always fail.
+                       "print(hermandad.VERSION)' | tr -d '\\r')\""):
             self.assertIn(needle, text)
         for forbidden in ("contents: write", "gh release", "inputs:", "secrets.", "archive: false"):
             self.assertNotIn(forbidden, text)
@@ -779,7 +839,7 @@ class PackagerTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        self.tmp = Path(folder.name)
+        self.tmp = Path(folder.name).resolve()   # nombre largo también en Windows (no RUNNER~1)
         self.runtime = self.tmp / "Python313"
         for name, text in RUNTIME_FILES.items():
             (self.runtime / name).parent.mkdir(parents=True, exist_ok=True)
@@ -1011,6 +1071,56 @@ class WindowTests(Quiet):
         window.refresh(controller)
         self.assertEqual(window.action["text"], "Cambiar clave")
         self.assertEqual(window.light.itemcget(window.dot, "fill"), c.LIGHTS["rojo"])
+
+    def blocked_app(self):
+        """A window started while a console HERMANDAD.cmd holds subidor.lock: state «bloqueado»."""
+        home = self.tmp / "home"
+        holder = contextlib.ExitStack()
+        self.addCleanup(holder.close)
+        self.assertTrue(holder.enter_context(h.instance_lock(home, "consola")))
+        wow = self.tmp / "World of Warcraft"
+        (wow / "_forever_" / "WTF").mkdir(parents=True)
+        h.save_config(home, {"schema": 1, "url": URL, "wow": str(wow), "key": h.seal_key(KEY, h.TestOnlyProtector()),
+                             "acceso_ofrecido": True, "estado": {"aceptado": NOW, "ultimo": "ok"},
+                             "sources": {"C:\\otra\\OroHermandad.lua": {"file": "a" * 64, "payload": "b" * 64}}})
+        for name, value in (("repair_autostart", None), ("autostart_installed", False), ("startup_task_installed", False)):
+            patcher = patch.object(h, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        app = self.app()
+        self.addCleanup(app.stack.close)
+        app.window.ask = lambda question: True
+        app.window.tell = lambda text: self.fail("no dialog: " + text)
+        self.assertTrue(app.start())
+        self.assertEqual(app.controller.state, "bloqueado")
+        return app, home, holder
+
+    def test_while_blocked_nothing_changes_the_config_or_starts_an_upload(self):
+        app, home, holder = self.blocked_app()
+        before = (home / "config.json").read_bytes()
+        app.window.refresh(app.controller)
+        self.assertTrue(all(b.instate(["disabled"]) for b in app.window.change_buttons))
+        self.assertEqual([str(app.window.menu.entrycget(i, "state")) for i in app.window.config_entries],
+                         ["disabled", "disabled"])
+        app.change(("url",))                                           # «Cambiar» next to «Panel»
+        app.begin()                                                    # what its «Cancelar» calls
+        app.finish_setup(c.Setup({}, h.TestOnlyProtector(), detect=lambda: []), False)   # «Empezar» of a wizard
+        app.reset()                                                    # «Más…» → «Borrar mis datos de este PC»
+        self.root.update()
+        self.assertIsNone(app.session)
+        self.assertEqual((home / "config.json").read_bytes(), before, "config.json untouched")
+        self.assertEqual(app.controller.state, "bloqueado")
+        self.assertEqual(app.window.wizard.winfo_manager(), "", "no wizard")
+        # The console ends: «Reintentar» takes the lock and reads config.json from disk.
+        holder.close()
+        with patch.object(app, "begin") as begin:
+            app.status_action()
+        self.assertTrue(app.locked)
+        begin.assert_called_once_with()
+        self.assertEqual(app.config["url"], URL)
+        app.controller.configuring()
+        app.window.refresh(app.controller)
+        self.assertFalse(any(b.instate(["disabled"]) for b in app.window.change_buttons))
 
     def test_the_first_run_wizard_walks_its_steps(self):
         app = self.app()

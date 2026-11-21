@@ -1,5 +1,5 @@
 {
- "about": "buildTiming input and output for TIMING_VERSION cuando-vender-2 (contract C8, revision 2). Input points may carry dt and sold (a sell-through sample of the interval (t - dt, t]; valid when dt is an integer 600..7200 and sold an integer 0..1000000). Every column of cuando-vender-1 is unchanged. Samples: (1) one per person and moment (same person and t: the larger dt, equal dt: the larger sold); (2) per item, sorted by dt descending, sold descending, t ascending, person ascending, a sample is dropped when it overlaps a sample already kept from a different person by more than half of the shorter interval (overlap = min(t1, t2) - max(t1 - dt1, t2 - dt2)); (3) each kept sample goes to the cell of Spanish local time of mid = t - floor(dt / 2), with or without a price reference. Each cell gains six columns: soldUnits, soldSeconds, soldN (kept samples), soldDays (distinct dayIndex(mid)), maxUnits and maxSeconds (the sample with the largest sold, ties: the larger dt; 0, 0 when soldN = 0). A cell can therefore have n = 0 and only sales; an item with only samples is listed with n = 0 and wd = []. Cells: [cell, n, days, sumBp, nQty, sumQtyBp, soldUnits, soldSeconds, soldN, soldDays, maxUnits, maxSeconds]. Implementations must not compare every pair of samples (bucket kept samples per hour of t).",
+ "about": "buildTiming input and output for TIMING_VERSION cuando-vender-2 (contract C8, revision 3). Input points may carry dt and sold (a sell-through sample of the interval (t - dt, t]; valid when dt is an integer 600..7200 and sold an integer 0..1000000). Every column of cuando-vender-1 is unchanged. Samples: (1) one per person and moment (same person and t: the larger dt, equal dt: the larger sold); (2) per item, sorted by dt descending, sold descending, t ascending, person ascending, a sample is dropped when it overlaps a sample already kept from a different person by more than half of the shorter interval (overlap = min(t1, t2) - max(t1 - dt1, t2 - dt2)); (3) each kept sample goes to the cell of Spanish local time of mid = t - floor(dt / 2), with or without a price reference. Each cell gains six columns: soldUnits, soldSeconds, soldN (kept samples), soldDays (distinct Spanish local dates of mid, numbered like dayIndex: dayIndex(mid) in winter, dayIndex(mid + 3600) in summer, so the weekday cells of a block never share a day), maxUnits and maxSeconds (the sample with the largest sold, ties: the larger dt; 0, 0 when soldN = 0). A cell can therefore have n = 0 and only sales; an item with only samples is listed with n = 0 and wd = []. Cells: [cell, n, days, sumBp, nQty, sumQtyBp, soldUnits, soldSeconds, soldN, soldDays, maxUnits, maxSeconds]. Implementations must not compare every pair of samples (bucket kept samples per hour of t).",
  "input": {
   "T": 2530,
   "points": [
@@ -1231,6 +1231,42 @@
     "qty": 300,
     "dt": 1800,
     "sold": 3
+   },
+   {
+    "item_id": 2589,
+    "person": 7,
+    "t": 1783816200,
+    "lo": 90,
+    "qty": 30,
+    "dt": 3600,
+    "sold": 4
+   },
+   {
+    "item_id": 2589,
+    "person": 7,
+    "t": 1783819800,
+    "lo": 90,
+    "qty": 30,
+    "dt": 3600,
+    "sold": 6
+   },
+   {
+    "item_id": 2589,
+    "person": 7,
+    "t": 1783897200,
+    "lo": 90,
+    "qty": 30,
+    "dt": 3600,
+    "sold": 9
+   },
+   {
+    "item_id": 2589,
+    "person": 7,
+    "t": 1783902600,
+    "lo": 90,
+    "qty": 30,
+    "dt": 3600,
+    "sold": 5
    }
   ],
   "days": [
@@ -1393,6 +1429,41 @@
   "blocks": 6,
   "days": 28,
   "items": [
+   {
+    "id": 2589,
+    "n": 4,
+    "cells": [
+     [
+      0,
+      2,
+      1,
+      0,
+      2,
+      0,
+      14,
+      7200,
+      2,
+      1,
+      9,
+      3600
+     ],
+     [
+      36,
+      2,
+      1,
+      0,
+      2,
+      0,
+      10,
+      7200,
+      2,
+      1,
+      6,
+      3600
+     ]
+    ],
+    "wd": []
+   },
    {
     "id": 2772,
     "n": 131,

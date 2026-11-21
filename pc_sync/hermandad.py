@@ -2236,9 +2236,47 @@ LOCK_HOLDER = "subidor.quien.json"
 LOCK_MODES = ("ventana", "segundo-plano", "consola")
 
 
-def lock_holder(directory):
+class _FILETIME(ctypes.Structure):
+    _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
+
+
+def process_alive(pid, since):
+    """False when pid is not a running process, or (Windows) is a newer process that reused the pid: started more than
+    2 s after `since`. When it cannot be told, True. Never os.kill on Windows: it would end the process."""
+    try:
+        if not _windows():
+            os.kill(pid, 0)
+            return True
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        kernel32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(_FILETIME)] * 4
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.OpenProcess(0x1000, 0, pid)            # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() != 87                   # ERROR_INVALID_PARAMETER: no such process
+        try:
+            code = ctypes.c_uint32()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value != 259:     # STILL_ACTIVE
+                return False
+            times = [_FILETIME() for _ in range(4)]
+            if kernel32.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
+                started = ((times[0].high << 32) | times[0].low) / 1e7 - 11644473600
+                return started <= since + 2
+            return True
+        finally:
+            kernel32.CloseHandle(handle)
+    except ProcessLookupError:
+        return False
+    except Exception:                                               # PermissionError (alive) and anything unexpected
+        return True
+
+
+def lock_holder(directory, alive=None):
     """{"pid", "modo", "desde"} of the uploader holding subidor.lock (the file it writes next to it), or None: no file
-    (a 0.5.0 uploader writes none), or a malformed one."""
+    (a 0.5.0 uploader writes none), a malformed one, or a stale one left by a holder that ended without removing it
+    (Task Manager, Windows logoff, the console's X): its pid is not running (alive(pid, desde), process_alive)."""
     try:
         with open(Path(directory) / LOCK_HOLDER, "rb") as stream:
             data = json.loads(stream.read(4096).decode("utf-8"))
@@ -2246,6 +2284,8 @@ def lock_holder(directory):
         return None
     if (not isinstance(data, dict) or not _is_int(data.get("pid"), 1, 2**32) or data.get("modo") not in LOCK_MODES
             or not _is_int(data.get("desde"), 0, TIME_MAX)):
+        return None
+    if not (alive or process_alive)(data["pid"], data["desde"]):
         return None
     return {"pid": data["pid"], "modo": data["modo"], "desde": data["desde"]}
 

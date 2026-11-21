@@ -84,6 +84,7 @@ CHANGE_KEY, REMOVE_MARKER, RESET = "Cambiar clave", "Quitar el aviso del addon",
 RESET_CONFIRM = ("¿Borrar de este PC la dirección del panel, la carpeta, la clave cifrada, el registro de envíos y el "
                  "inicio con Windows? Después tendrás que configurarlo otra vez.")
 RESET_DONE = "Datos del subidor borrados de este PC."
+NEW_PANEL = "Panel nuevo: se le enviará todo otra vez."
 LOG_TITLE = "Registro"
 NEW_VERSION = ("Hay una versión nueva del subidor ({v}). Para actualizar: cierra el subidor, descarga «Subidor para "
                "Windows» en el panel (Descargas), desbloquea el zip y extrae su carpeta encima de la anterior "
@@ -229,6 +230,7 @@ class Setup:
         self.url = self.folder = self.key = None
         with contextlib.suppress(h.SyncError):
             self.url = h.validate_panel_url(config.get("url"))
+        self.stored_url = self.url               # another panel needs everything again (finish)
         with contextlib.suppress(h.SyncError):
             self.folder = h.validate_wow_folder(config.get("wow"))
         self.key = h.open_key(config.get("key"), protector)
@@ -272,6 +274,12 @@ class Setup:
         Returns (url, folder, key); raises SyncError when something is still missing."""
         if not (self.url and self.folder and self.key):
             raise h.SyncError("Falta algún dato: la dirección del panel, la carpeta de WoW o tu clave.")
+        if self.url != self.stored_url:
+            # What was sent («sources») and the status («estado») belong to the old panel: the new one gets it all.
+            self.config["sources"] = {}
+            self.config.pop("estado", None)
+            if self.stored_url is not None:
+                h.say(NEW_PANEL)
         self.config.update({"schema": 1, "url": self.url, "wow": str(self.folder)})
         self.config.setdefault("sources", {})
         if self.protector is not None:

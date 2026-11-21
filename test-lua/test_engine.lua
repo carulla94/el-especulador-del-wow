@@ -64,14 +64,17 @@ test("Nombres de reserva: esES por defecto y esMX si el cliente es mexicano", fu
   Data.ApplyLocale("esES")
 end)
 
-test("Sin Auctionator: aviso rojo, nada con precio, pero sí la chatarra gris", function()
+test("Sin precios (ni del escáner ni de Auctionator): aviso rojo, nada con precio, pero sí la chatarra gris", function()
   local r = Engine.Suggest(ctx({hasPriceSource = false, bags = {[2770] = {count = 20, quality = 1}, [1000] = {count = 2, quality = 0, vendor = 50}}}))
   eq(r.db.level, "error"); eq(kinds(r, "sell"), 0); eq(kinds(r, "gray"), 1)
+  -- 0.6.0: Auctionator es opcional; el texto manda a escanear con el addon.
+  eq(r.db.text, "Aún no hay precios de la subasta: ábrela y pulsa «Escanear» (Auctionator es opcional).")
 end)
 
 test("Base vacía: error aunque haya una actualización reciente", function()
   local r = Engine.Suggest(ctx({price = function() return nil end, dbUpdatedAt = NOW - 60}))
-  eq(r.db.level, "error"); assert(has(r.db.text, "escaneo completo"), r.db.text)
+  eq(r.db.level, "error")
+  eq(r.db.text, "Aún no hay precios. Escanea la subasta con Oro de Hermandad (botón «Escanear»).")
 end)
 
 test("Pocos precios de referencia: aviso de cobertura", function()
@@ -87,9 +90,12 @@ test("Antigüedad por modo; más de 48 h se muestra en días", function()
   assert(has(old.db.text, "3 días"), old.db.text)
 end)
 
-test("Si el autoescaneo de Auctionator está apagado, lo dice", function()
+test("Sin escanear al abrir la subasta (ni el addon ni Auctionator), lo dice", function()
   local r = Engine.Suggest(ctx({mode = "farm", autoscan = false, dbUpdatedAt = NOW - 10 * 3600}))
-  assert(has(r.db.text, "escanear al abrir la subasta"), r.db.text)
+  eq(r.db.text, "Precios de hace 10 h. Pulsa «Escanear» en la subasta o elige «Escanear cada vez que abro la subasta» en las opciones.")
+  local auto = Engine.Suggest(ctx({mode = "farm", autoscan = true, dbUpdatedAt = NOW - 10 * 3600}))
+  eq(auto.db.text, "Precios de hace 10 h. Escanea la subasta con Oro de Hermandad (botón «Escanear»).")
+  for _, text in ipairs({r.db.text, auto.db.text}) do assert(not has(text, "Auctionator"), text) end
 end)
 
 test("Escaneo parcial: avisa si casi toda la cesta es antigua", function()
@@ -128,7 +134,7 @@ end)
 test("Una o dos búsquedas sobre una base vieja siguen avisando", function()
   local price, age = basket(28, 2, 4)
   local r = Engine.Suggest(ctx({mode = "farm", price = price, age = age, dbUpdatedAt = NOW - 60, fullScanAt = NOW - 6 * 86400}))
-  eq(r.db.level, "warn"); assert(has(r.db.text, "%") and has(r.db.text, "escaneo completo"), r.db.text)
+  eq(r.db.level, "warn"); assert(has(r.db.text, "%") and has(r.db.text, "Escanea la subasta con Oro de Hermandad"), r.db.text)
   -- Base nueva con solo 3 búsquedas: avisa de la cobertura.
   local price2, age2 = basket(3, 3, 0)
   local r2 = Engine.Suggest(ctx({mode = "farm", price = price2, age = age2, dbUpdatedAt = NOW - 60}))
@@ -795,7 +801,7 @@ test("Si no tienes prisa, espera: nota en las filas de venta (no en una bajada d
   eq(iron.detail, "≈ 14o 25p en la subasta, ya descontada la comisión. Hoy está un 25 % por debajo de lo normal: si no tienes prisa, espera.")
   local lazy = Engine.Suggest(specCtx({mode = "lazy", price = low, bags = bags}, items))
   local grouped = find(lazy.sections.now, function(x) return x.kind == "sell" end)
-  assert(has(grouped.detail, "Acepta el precio que proponga Auctionator. Hoy Hierro y Paño de seda están por debajo de lo normal: si no tienes prisa, espera."),
+  assert(has(grouped.detail, "Ponlo al precio más bajo de la subasta. Hoy Hierro y Paño de seda están por debajo de lo normal: si no tienes prisa, espera."),
     grouped.detail)
   -- Bajada de nivel (dos días seguidos muy por debajo): no es un mal día, esperar no lo arregla.
   local shifted = {[2772] = watched({10000, 10000, 10000, 10000, 8000, 10000, 8000, 8000, 10000, 7000, false, 10000, 8000, 8000})}
@@ -980,6 +986,17 @@ test("Días para los chollos: 7 para el precio normal, 10 para un chollo (12 en 
   -- Antes de los 7 días solo sale la línea de aprendizaje (con los dos números).
   local six = status("spec", 6)
   eq(six.spec.text, "Aprendiendo precios: día 7 de 7. Haz un escaneo completo cada día: el precio normal necesita 7 días y los chollos, 10.")
+end)
+
+test("0.6.0, sin Auctionator: la venta dice a qué precio ponerlo y Especular manda a escanear con el addon", function()
+  local old = function(id) if PRICES[id] then return 9, false end end
+  local r = Engine.Suggest(ctx({mode = "lazy", age = old, bags = {[2772] = {count = 20, quality = 1}}}))
+  local sell = find(r.sections.now, function(x) return x.kind == "sell" end)
+  assert(sell and has(sell.detail, "Ponlo al precio más bajo de la subasta. Algunos precios son viejos: escanea la subasta antes de publicar."),
+    sell and sell.detail)
+  eq(Engine.Suggest(specCtx({mode = "spec"}, {})).spec.text,
+    "Aún no hay precios guardados en este mercado: escanea la subasta con Oro de Hermandad.")
+  for _, x in ipairs(all(r)) do assert(not has(x.detail, "Auctionator") and not has(x.title, "Auctionator"), x.detail) end
 end)
 
 print(string.format("motor: %d pruebas correctas, %d fallidas", passed, failed))

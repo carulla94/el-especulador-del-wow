@@ -5,7 +5,7 @@ local Guild, UI, Tooltip, Extras, History, Spec = ns.Guild, ns.UI, ns.Tooltip, n
 local Core = {}
 ns.Core = Core
 
-Core.VERSION = "0.5.1"
+Core.VERSION = "0.6.0"
 
 local DEFAULTS = {mode = "lazy", autoOpen = true, sound = true, tooltip = true}
 -- Un escaneo de resumen cuenta como completo si trae al menos esta parte de los resultados del último que contó
@@ -49,6 +49,31 @@ local function relayCall(name, ...)
   local relay = ns.Relay
   if type(relay) ~= "table" or type(relay[name]) ~= "function" then return false end
   return pcall(relay[name], ...)
+end
+-- Lo mismo con los archivos nuevos de la 0.6.0: el escáner de la subasta (Scanner.lua) y «Cuándo vender» (Timing.lua).
+-- Sin ellos (un /reload tras actualizar), el addon sigue como la 0.5.1 y /oro escanear, /oro cuando y /oro sondeo dicen
+-- que hay que salir del juego del todo.
+local function scannerLoaded() return type(ns.Scanner) == "table" end
+local function scannerCall(name, ...)
+  local scanner = ns.Scanner
+  if type(scanner) ~= "table" or type(scanner[name]) ~= "function" then return false end
+  local ok, a, b, c = pcall(scanner[name], ...)
+  if not ok then scanner.lastError = name .. ": " .. tostring(a) end
+  return ok, a, b, c
+end
+local function timingLoaded() return type(ns.Timing) == "table" end
+local function timingCall(name, ...)
+  local timing = ns.Timing
+  if type(timing) ~= "table" or type(timing[name]) ~= "function" then return false end
+  local ok, a, b, c = pcall(timing[name], ...)
+  if not ok then timing.lastError = name .. ": " .. tostring(a) end
+  return ok, a, b, c
+end
+-- ¿Es la subasta de tu facción? Sin el escáner, como en la 0.5.1 (siempre sí).
+local function factionHouse()
+  if not scannerLoaded() then return true end
+  local ok, house = scannerCall("House")
+  return ok and house == "faction"
 end
 
 -- Precios de Auctionator: uno por reino y facción.
@@ -218,6 +243,8 @@ local function footer()
   if stats and stats.seconds >= 300 then
     text = text .. "\nSesión: " .. Engine.Money(stats.net) .. " (" .. Engine.Money(stats.perHour) .. " por hora)"
   end
+  local uploader = Core.UploaderFooter()
+  if uploader then text = text .. "\n" .. uploader end
   return text
 end
 
@@ -234,7 +261,8 @@ end
 local function render(result)
   -- guildKnown: hay alguien de la hermandad con datos (el pie lo cuenta); si su sección sale vacía, no es por eso.
   safely("la ventana", UI.Render, result, {footer = footer(), canShop = Prices.CanShop() or Prices.AuctionHouseOpen(),
-    guildKnown = next(members()) ~= nil})
+    guildKnown = next(members()) ~= nil, cuando = timingLoaded(), save = Core.SaveButton()})
+  Core.UpdatePanel()
 end
 
 function Core.Refresh()
@@ -250,7 +278,8 @@ local importRosterSoon = function() end
 local scanBankSoon = function() end
 
 local specTips, specTipsAt = {}, -math.huge
-local function invalidateSpecTips() specTips, specTipsAt = {}, -math.huge end
+local timingTips, timingTipsAt = {}, -math.huge
+local function invalidateSpecTips() specTips, specTipsAt = {}, -math.huge; timingTips, timingTipsAt = {}, -math.huge end
 
 function Core.SetMode(mode, quiet)
   if not Engine.MODES[mode] then return end
@@ -325,7 +354,13 @@ local function printStatus()
     .. "; en Tranquilo, A tope y la descripción de los objetos, " .. (db.spec.on ~= false and "encendido." or "apagado."))
   local okRelay, relayLine = relayCall("StatusLine")
   if okRelay and relayLine then say(relayLine) end
-  if not Prices.Available() then say("Auctionator no está activo: sin él no hay precios.") end
+  local okMode, mode = scannerCall("Mode")
+  if okMode and mode then
+    say("escanear la subasta: " .. ({auto = "automático cada vez que la abres", propose = "te lo propone el addon",
+      off = "solo con el botón o /oro escanear"})[mode] .. ".")
+  end
+  if not Prices.Available() then say("Aún no hay precios: abre la subasta y pulsa «Escanear».") end
+  if type(_G.Auctionator) ~= "table" then say("Auctionator: no está (es opcional).") end
 end
 
 -- /oro comprar y el botón «Comprar lo que falta»: siempre con sugerencias calculadas ahora (la ventana puede llevar
@@ -387,13 +422,162 @@ end
 local function openOptions()
   if not (Extras.OpenSettings and Extras.OpenSettings()) then
     say("opciones: /oro auto on|off, /oro minimapa on|off, /oro sonido on|off, /oro info on|off, /oro especular on|off, "
-      .. "/oro compartir on|off, /oro subidor on|off|auto")
+      .. "/oro compartir on|off, /oro subidor on|off|auto, /oro escanear auto|proponer|off")
   end
 end
 
 local function toggleWindow()
   UI.Toggle()
   Core.Refresh()
+end
+
+---------------------------------------------------------------------------
+-- Escáner de la subasta en la ventana (0.6.0): la fila de acciones con su estado, sus botones y la propuesta
+---------------------------------------------------------------------------
+local function hhmm(t)
+  if type(date) ~= "function" or not t then return "--:--" end
+  local ok, text = pcall(date, "%H:%M", t)
+  return ok and text or "--:--"
+end
+
+local SCANNER_MODES = {auto = "automático cada vez que la abres", propose = "te lo propone el addon",
+                       off = "solo con el botón o /oro escanear"}
+local confirming = nil    -- texto de la confirmación de «Guardar y subir» mientras se ve (nil = no)
+
+-- Fila del escáner (nil con la subasta cerrada o sin Scanner.lua).
+local function scannerPanel()
+  local ok, st = scannerCall("State")
+  if not ok or type(st) ~= "table" or st.state == "closed" then return nil end
+  local okText, text = scannerCall("StateText", st)
+  if not okText or type(text) ~= "string" or text == "" then return nil end
+  local s = st.state
+  local panel = {text = text, buttons = {}, level = "info"}
+  if s == "neutral" or s == "unknown" or s == "timeout" or s == "noresponse" or s == "interrupted" then panel.level = "warn" end
+  local function add(label, width, fn)
+    panel.buttons[#panel.buttons + 1] = {label = label, width = width, onClick = function()
+      fn()
+      Core.UpdatePanel()
+    end}
+  end
+  if s == "reading" or s == "requested" or s == "queued" or s == "sweep" then
+    add("Parar", 70, function() scannerCall("Stop") end)
+  elseif st.canScan then
+    add("Escanear", 84, function() scannerCall("Request", true) end)
+  end
+  local okOffer, offer = scannerCall("OfferSweep")
+  if okOffer and offer and s ~= "sweep" then add("Escanear la lista", 120, function() scannerCall("StartSweep") end) end
+  -- Modo «proponer»: la razón para escanear ahora (la pareja que mide ventas, nadie escaneó hace rato, franja con
+  -- pocos datos), la pregunta y la casilla para escanear siempre al abrir la subasta.
+  local okMode, mode = scannerCall("Mode")
+  if s == "ready" and okMode and mode == "propose" then
+    local okP, proposal = scannerCall("Proposal")
+    if okP and type(proposal) == "table" and proposal.text then
+      panel.text = proposal.text .. " ¿Escanear ahora? (unos segundos)"
+      panel.check = {label = "Escanear siempre al abrir la subasta", onClick = function()
+        scannerCall("SetMode", "auto")
+        Core.UpdatePanel()
+      end}
+    end
+  end
+  return panel
+end
+
+---------------------------------------------------------------------------
+-- «Guardar y subir» (solo en el PC del subidor): WoW guarda los SavedVariables al recargar o salir; nunca solo
+---------------------------------------------------------------------------
+local unsavedScans = 0    -- escaneos tuyos grabados y de compañeros aplicados desde que entraste o recargaste
+local savedNote = nil     -- {text, untilAt}: «Guardado a las HH:MM…» tras recargar con el botón o /oro guardar
+local SAVE_WAIT = "Espera unos segundos: aún se están guardando los precios."
+local SAVE_CONFIRM = "WoW solo guarda los precios en el disco al recargar la interfaz o al salir. ¿Recargar ahora para "
+  .. "que el subidor, si está abierto, los envíe? (Si tienes la subasta abierta, se cerrará.)"
+local SCANNER_BUSY = {queued = true, requested = true, other = true, reading = true, sweep = true}
+
+local function uploaderMode()
+  local ok, on = relayCall("UploaderMode")
+  return ok and on == true
+end
+
+-- nil si se puede recargar ya; si no, el motivo.
+local function saveBlocked()
+  if History.Pending() > 0 then return SAVE_WAIT end
+  local okIdle, idle = relayCall("Idle")
+  if okIdle and idle == false then return SAVE_WAIT end
+  local ok, st = scannerCall("State")
+  if ok and type(st) == "table" and SCANNER_BUSY[st.state] then return SAVE_WAIT end
+  local okLeft, left = relayCall("UploadsLeftToday")
+  if okLeft and type(left) == "number" and left <= 2 then
+    if left == 0 then return "Hoy ya no le quedan envíos a tu clave en el panel: los precios se subirán mañana." end
+    if left == 1 then return "Hoy solo le queda 1 envío a tu clave en el panel: los precios se subirán al salir del juego." end
+    return "Hoy solo le quedan " .. left .. " envíos a tu clave en el panel: los precios se subirán al salir del juego."
+  end
+  return nil
+end
+
+-- Recarga si se puede (lo pidió el jugador: clic en [Recargar] o /oro guardar). Devuelve true o false y el motivo.
+local function reloadNow()
+  local why = saveBlocked()
+  if why then return false, why end
+  if type(InCombatLockdown) == "function" and InCombatLockdown() then return false, "Espera a salir de combate." end
+  if type(ReloadUI) ~= "function" then return false, "Este cliente no deja recargar la interfaz desde un addon." end
+  db.savedAt = time()
+  ReloadUI()
+  return true
+end
+
+-- El botón: nil (no se ve) o {enabled, tooltip}.
+function Core.SaveButton()
+  if not db or unsavedScans == 0 or not uploaderMode() then return nil end
+  local why = saveBlocked()
+  return {enabled = why == nil, tooltip = why or "Recarga la interfaz para que WoW guarde los precios y el subidor los envíe."}
+end
+
+local function confirmPanel()
+  return {text = confirming, level = "info", buttons = {
+    {label = "Recargar", width = 84, onClick = function()
+      local ok, why = reloadNow()
+      if not ok then confirming = why .. " " .. SAVE_CONFIRM; Core.UpdatePanel() end
+    end},
+    {label = "Ahora no", width = 84, onClick = function() confirming = nil; Core.UpdatePanel() end},
+  }}
+end
+
+local function onSave()
+  if not Core.SaveButton() then return end
+  confirming = SAVE_CONFIRM
+  Core.UpdatePanel()
+end
+
+-- Repinta la fila de acciones y el botón «Guardar y subir» (sin recalcular sugerencias).
+function Core.UpdatePanel()
+  if not UI.IsShown() then return end
+  if confirming and not uploaderMode() then confirming = nil end
+  UI.SetPanel(confirming and confirmPanel() or scannerPanel())
+  if UI.SetSave then UI.SetSave(Core.SaveButton()) end
+end
+
+-- Línea del pie en el PC del subidor: «Guardado a las…» unos minutos tras recargar con el botón; si no, lo que diga el
+-- aviso del subidor (no parece abierto, avisa de un problema o el último envío aceptado).
+function Core.UploaderFooter()
+  if savedNote and clock() < savedNote.untilAt then return savedNote.text end
+  local ok, lines = relayCall("UploaderLines")
+  if ok and type(lines) == "table" then return lines.stale or lines.warn or lines.base end
+  return nil
+end
+
+-- Para las opciones (Extras.RegisterSettings): el modo del escáner y si se apuntan tus ventas.
+function Core.ScannerLoaded() return scannerLoaded() and db ~= nil and type(db.scanner) == "table" end
+function Core.ScannerMode() local ok, mode = scannerCall("Mode"); return ok and mode or "propose" end
+function Core.SetScannerMode(mode) scannerCall("SetMode", mode); Core.UpdatePanel() end
+function Core.ScannerSales() return not (db and type(db.scanner) == "table" and db.scanner.sales == false) end
+function Core.SetScannerSales(on) scannerCall("SetSales", on) end
+
+-- /oro cuando y el botón «Cuándo vender».
+local function cuandoCommand(arg)
+  if not timingLoaded() then say("«Cuándo vender» aún no está cargado: " .. RELAY_RESTART); return end
+  local ok, title, text, line = timingCall("View", arg or "")
+  if not ok then say("error en cuándo vender: " .. tostring(title)); return end
+  if title then safely("la ventana", UI.ShowText, title, text) end
+  if line then say(line) end
 end
 
 ---------------------------------------------------------------------------
@@ -433,6 +617,17 @@ local function tooltipLines(itemID)
     for _, line in ipairs(spec or {}) do lines[#lines + 1] = {left = line.left, right = line.right, color = line.color} end
   end
   if used then lines[#lines + 1] = {left = used} end
+  -- «Cuándo vender» de los objetos vigilados (Timing.lua), con la misma caché de 30 s.
+  if timingLoaded() then
+    if t - timingTipsAt > 30 or t < timingTipsAt then timingTips, timingTipsAt = {}, t end
+    local tip = timingTips[itemID]
+    if tip == nil then
+      local ok, line = timingCall("TooltipLine", itemID)
+      tip = ok and type(line) == "string" and line or false
+      timingTips[itemID] = tip
+    end
+    if tip then lines[#lines + 1] = {left = tip} end
+  end
   local inBank = cdb and cdb.bank and cdb.bank.items and cdb.bank.items[itemID]
   if inBank and not bankOpen then lines[#lines + 1] = {left = "En tu banco", right = tostring(inBank.count)} end
   if #lines > 0 then lines[1].left = "Oro de Hermandad · " .. lines[1].left end
@@ -450,12 +645,16 @@ local HELP = {
   "/oro especular on|off — chollos y precio normal también en Tranquilo, A tope y la descripción de los objetos",
   "/oro especular presupuesto 200 — oro máximo para chollos  ·  /oro especular presupuesto auto: el 25 % del que llevas",
   "/oro estado — precios, profesiones y hermandad",
-  "/oro comprar — lista de la compra en Auctionator: lo que falta para tus recetas (A tope) y los chollos",
+  "/oro escanear — escanea la subasta entera ahora (unos segundos)  ·  /oro escanear lista|parar",
+  "/oro escanear auto|proponer|off — escanear cada vez que abres la subasta, que te lo proponga o solo con el botón",
+  "/oro cuando [objeto] — a qué hora se vende mejor (hora de España), con tus escaneos y los de la hermandad",
+  "/oro comprar — lo que falta para tus recetas (A tope) y los chollos: lista en Auctionator o, sin él, búsqueda en la subasta",
   "/oro sesion — oro ganado en esta sesión  ·  /oro sesion reset",
   "/oro amigo Ana ingenieria 150 — añade a alguien a mano  ·  /oro amigo borrar Ana",
   "/oro sync — envía tus datos a la hermandad y le pide los suyos",
   "/oro compartir on|off — comparte con la hermandad los precios de tus escaneos completos (sin nombres; por defecto sí)",
   "/oro subidor on|off|auto — el PC que sube los precios al panel pide a la hermandad los que se perdió (auto: lo detecta)",
+  "/oro guardar — en el PC del subidor: recarga la interfaz para que WoW guarde los precios y el subidor los envíe",
   "/oro comision 5 — porcentaje que se queda la subasta (por defecto 5)",
   "/oro tabla — precios guardados de la lista vigilada, para copiarlos a Excel",
   "/oro vigilar [enlace] — guarda también los precios de ese objeto (hasta 40)  ·  /oro olvidar [enlace]",
@@ -590,6 +789,35 @@ local function subidorCommand(args)
     say(marker and "subidor: automático (este PC sube precios: sí). Pide a la hermandad los precios que se perdió mientras no estabas."
       or "subidor: automático (este PC sube precios: no).")
   end
+  -- 0.6.0: lo que cuenta el aviso del subidor (último envío, problemas, si parece cerrado).
+  local okLines, lines = relayCall("UploaderLines")
+  if okLines and type(lines) == "table" then
+    for _, k in ipairs({"base", "warn", "stale"}) do if lines[k] then say(lines[k]) end end
+  end
+end
+
+-- /oro guardar: en el PC del subidor, recarga (con las mismas comprobaciones que el botón «Guardar y subir»).
+local function saveCommand()
+  if not relayLoaded() then say("los precios compartidos aún no están cargados: " .. RELAY_RESTART); return end
+  if not uploaderMode() then say("Este PC no sube precios: no hace falta (tus precios llegan al panel por la hermandad).") return end
+  local ok, why = reloadNow()
+  if not ok then say(why) end
+end
+
+-- /oro escanear [ahora|lista|parar|auto|proponer|off]: lo hace y contesta con una línea.
+local SCAN_WORDS = {[""] = "", ahora = "", lista = "lista", parar = "parar", stop = "parar", auto = "auto",
+                    automatico = "auto", proponer = "proponer", propon = "proponer", off = "off", boton = "off"}
+local function scanCommand(args)
+  if not scannerLoaded() then say("el escáner de la subasta aún no está cargado: " .. RELAY_RESTART); return end
+  local word = SCAN_WORDS[Data.Normalize(args[2] or "")]
+  if not word then say("uso: /oro escanear [lista|parar|auto|proponer|off]"); return end
+  local ok, line = scannerCall("Command", word)
+  if ok and type(line) == "string" and line ~= "" then
+    say(line:sub(1, 1):lower() .. line:sub(2))
+  elseif not ok then
+    say("error en el escáner: " .. tostring(line))
+  end
+  Core.UpdatePanel()
 end
 
 local function shareCommand(args)
@@ -606,7 +834,7 @@ end
 local function tableCommand()
   local text, count, hint = History.Table()
   if count == 0 then
-    say("aún no hay precios guardados en este mercado: haz un escaneo completo con Auctionator en la subasta.")
+    say("aún no hay precios guardados en este mercado: escanea la subasta con Oro de Hermandad.")
     return
   end
   safely("la tabla", UI.ShowText, "Oro de Hermandad · tabla de precios", text, hint)
@@ -615,7 +843,25 @@ end
 
 local function probeCommand()
   local lines = History.Probe()
-  if not relayLoaded() then lines[#lines + 1] = "Precios compartidos: aún no están cargados: " .. RELAY_RESTART end
+  if not relayLoaded() then
+    lines[#lines + 1] = "Precios compartidos: aún no están cargados: " .. RELAY_RESTART
+  else
+    local ok, line = relayCall("MarkerProbeLine")
+    if ok and line then lines[#lines + 1] = line end
+  end
+  -- 0.6.0: escáner de la subasta y «Cuándo vender» (con la línea «Capas»), solo cifras.
+  local okScanner, scannerLines = scannerCall("ProbeLines")
+  if not scannerLoaded() then
+    lines[#lines + 1] = "Escáner de la subasta: aún no está cargado: " .. RELAY_RESTART
+  elseif okScanner and type(scannerLines) == "table" then
+    for _, line in ipairs(scannerLines) do lines[#lines + 1] = line end
+  end
+  local okTiming, timingLines = timingCall("ProbeLines")
+  if not timingLoaded() then
+    lines[#lines + 1] = "Cuándo vender: aún no está cargado: " .. RELAY_RESTART
+  elseif okTiming and type(timingLines) == "table" then
+    for _, line in ipairs(timingLines) do lines[#lines + 1] = line end
+  end
   say("sondeo (también en la ventana, para copiarlo y pegarlo en una incidencia):")
   for _, line in ipairs(lines) do print("  " .. line) end
   safely("el sondeo", UI.ShowText, "Oro de Hermandad · sondeo", table.concat(lines, "\n"),
@@ -647,6 +893,12 @@ local function handleSlash(input)
       .. ((okAsk and asked == "sent") and ", y también los precios que este PC se perdió." or "."))
   elseif cmd == "subidor" then
     subidorCommand(args)
+  elseif cmd == "escanear" or cmd == "scan" then
+    scanCommand(args)
+  elseif cmd == "cuando" then
+    cuandoCommand((input or ""):match("^%s*%S+%s*(.-)%s*$"))
+  elseif cmd == "guardar" then
+    saveCommand()
   elseif cmd == "compartir" then
     shareCommand(args)
   elseif cmd == "auto" then
@@ -762,12 +1014,12 @@ function handlers.ADDON_LOADED(name)
   local modes = {}
   for _, key in ipairs(Engine.MODE_ORDER) do modes[#modes + 1] = {key = key, label = Engine.MODES[key].label} end
   safely("la ventana", UI.Create, {position = db.window, onMode = Core.SetMode, onRefresh = Core.Refresh,
-    onShop = shop, onOptions = openOptions, onTable = tableCommand, modes = modes})
+    onShop = shop, onOptions = openOptions, onTable = tableCommand, modes = modes, onSave = onSave,
+    onCuando = function() cuandoCommand("") end})
   Extras.Init(db, toggleWindow, openOptions)
-  Extras.RegisterSettings(Core)
   Tooltip.Install(tooltipLines)
-  -- Historial de precios: se limpia, se poda y se deja en 1,25 MB como mucho. Si falla, OroHermandadHist se queda
-  -- como lo cargó el juego (y se guarda igual al salir) y no se graba nada en esta sesión.
+  -- Historial de precios: se limpia, se poda y se deja en 2 MB como mucho (4 MB lo de los compañeros). Si falla,
+  -- OroHermandadHist se queda como lo cargó el juego (y se guarda igual al salir) y no se graba nada en esta sesión.
   safely("el historial de precios", function()
     OroHermandadHist = History.Load(OroHermandadHist, {db = db, market = marketKey, version = Core.VERSION,
                                                        dbLoaded = dbLoaded})
@@ -777,6 +1029,40 @@ function handlers.ADDON_LOADED(name)
   local okRelay, relayError = relayCall("Init", db, cdb)
   if not okRelay and relayLoaded() then ns.Relay.lastError = tostring(relayError) end
   relayCall("OnChange", function() invalidateSpecTips(); refreshSoon() end)
+  -- 0.6.0: el escáner propio de la subasta. REPLICATE_ITEM_LIST_UPDATE solo se escucha cuando él lo pide (listen):
+  -- dentro de los 60 s que siguen a una petición de la subasta entera.
+  scannerCall("Init", db, cdb, {
+    listen = function(on)
+      if on then pcall(events.RegisterEvent, events, "REPLICATE_ITEM_LIST_UPDATE")
+      else pcall(events.UnregisterEvent, events, "REPLICATE_ITEM_LIST_UPDATE") end
+    end,
+    onScanDone = function(kind, whole, t)
+      local key = marketKey()
+      db.dbUpdated[key] = t or time()
+      if whole then db.fullScan[key] = t or time() end
+      lastAhWarning = nil
+      invalidateSpecTips()
+      refreshSoon()
+    end,
+    -- Un resumen de Auctionator que se retuvo por si llegaba el escaneo completo: se graba con su hora si pasa el
+    -- filtro (un escaneo cada 30 min y 8 al día); si no, solo refresca.
+    onSummaryRelease = function(summary, record)
+      if record then safely("el historial de precios", History.Record, "summary", summary.data, true, {t = summary.t}) end
+      refreshSoon()
+    end,
+    onState = function() Core.UpdatePanel() end,
+    say = say,
+    windowShown = function() return UI.IsShown() end,
+  })
+  -- «Cuándo vender»: escucha cada punto que se escribe (lo tuyo y lo de compañeros).
+  timingCall("Init", db)
+  -- «Guardar y subir» aparece en el PC del subidor en cuanto hay algo nuevo guardado (un escaneo tuyo o de un compañero).
+  History.OnPoint(function(event)
+    if event ~= "done" then return end
+    unsavedScans = unsavedScans + 1
+    if unsavedScans == 1 then refreshSoon() end
+  end)
+  Extras.RegisterSettings(Core)
 end
 
 -- Un escaneo de Auctionator ha terminado: kind "full" (completo, el de replicate) o "summary" (el de resumen, el que
@@ -792,7 +1078,11 @@ end
 -- así que no se graba en el historial (la importación diaria de su historial lo cubre).
 -- Aquí se repinta lo que cambia en el acto (fechas y avisos); lo que el escaneo deja en el historial se repinta
 -- cuando History termina de escribirlo (History.OnChange, en ADDON_LOADED).
+-- Con el escáner propio, un escaneo hecho en la subasta neutral (goblin) o en una que no se sabe solo refresca: es otro
+-- mercado y no se graba, ni se fecha, ni cuenta para la referencia de filas.
 local function scanFinished(kind, rows, data, fromClient)
+  local okHouse, visitHouse = scannerCall("VisitHouse")
+  if okHouse and (visitHouse == "neutral" or visitHouse == "unknown") then refreshSoon(); return end
   local key, now = marketKey(), time()
   local whole = kind == "full"
   if kind == "summary" and type(rows) == "number" then
@@ -801,7 +1091,19 @@ local function scanFinished(kind, rows, data, fromClient)
     db.scanRows[key] = whole and rows or math.max(rows, math.floor(last * SCAN_DECAY))
     if not whole then safely("el historial de precios", History.Record, kind, data, false); refreshSoon(); return end
   end
-  if not fromClient then safely("el historial de precios", History.Record, kind, data, whole) end
+  if not fromClient then
+    if not scannerLoaded() then
+      safely("el historial de precios", History.Record, kind, data, whole)
+    elseif kind == "summary" and whole then
+      -- Con el escáner propio: el resumen entero espera por si llega el escaneo completo de esta visita (que lo
+      -- sustituye); si no llega, se graba con su hora al soltarlo (onSummaryRelease, también al salir o recargar).
+      local ok = scannerCall("HoldSummary", {t = time(), rows = rows, data = data, market = key})
+      if not ok then safely("el historial de precios", History.Record, kind, data, whole) end
+    elseif kind ~= "full" then
+      safely("el historial de precios", History.Record, kind, data, whole)
+    end
+    -- El escaneo completo de Auctionator no se graba aquí: el escáner lee la misma respuesta (gancho en ReplicateItems).
+  end
   db.dbUpdated[key] = now
   if whole then db.fullScan[key] = now end
   lastAhWarning = nil
@@ -820,7 +1122,17 @@ function handlers.PLAYER_LOGIN()
   if type(C_GuildInfo) == "table" and type(C_GuildInfo.GuildRoster) == "function" then pcall(C_GuildInfo.GuildRoster) end
   after(15, function() Guild.UpdateKey(); Guild.Announce(); Guild.Request(); importRosterSoon() end)
   -- Después del anuncio: tu código, el aviso del subidor y, en ese PC, la petición de los precios que se perdió.
-  after(25, function() relayCall("Login") end)
+  after(25, function() relayCall("Login"); refreshSoon() end)
+  -- «Cuándo vender»: primera pasada por lo guardado, 30 s después de entrar.
+  timingCall("Login")
+  -- Recargaste con «Guardar y subir» o /oro guardar: el pie lo dice unos minutos.
+  if type(db.savedAt) == "number" then
+    if time() - db.savedAt < 600 then
+      savedNote = {text = "Guardado a las " .. hhmm(db.savedAt) .. ": si el subidor está abierto, lo envía en unos segundos "
+        .. "(la confirmación sale en su ventana).", untilAt = clock() + 300}
+    end
+    db.savedAt = nil
+  end
   -- Una vez al día: rellena con el historial de Auctionator los días que faltan (su base ya está cargada).
   local importTries = 0
   local function importHistory()
@@ -850,8 +1162,11 @@ function handlers.PLAYER_ENTERING_WORLD(isInitialLogin, isReloadingUi)
   end)
 end
 
--- Respaldo si no se oyen los escaneos de Auctionator: los datos de un escaneo completo acaban de llegar.
+-- Con el escáner (0.6.0) solo llega dentro de una ventana de respuesta y se le pasa tal cual (O(1), sin crear nada).
+-- Sin él (un /reload tras actualizar), el respaldo de la 0.5.1 si no se oyen los escaneos de Auctionator.
 function handlers.REPLICATE_ITEM_LIST_UPDATE()
+  local scanner = ns.Scanner
+  if scanner then scanner.OnReplicate(); return end
   if not Prices.WatchingScans() and Prices.Available() then scanFinished("full", nil, nil, true) end
 end
 
@@ -910,6 +1225,7 @@ function handlers.PLAYERBANKSLOTS_CHANGED() if bankOpen then scanBankSoon() end 
 function handlers.BANK_TABS_CHANGED() if bankOpen then scanBankSoon() end end
 
 function handlers.AUCTION_HOUSE_SHOW()
+  scannerCall("OnShow") -- antes que nada: qué subasta es (la de tu facción, la neutral o no se sabe)
   openNow.subasta = true
   Prices.Invalidate()
   if db.autoOpen and not UI.IsShown() then
@@ -918,8 +1234,17 @@ function handlers.AUCTION_HOUSE_SHOW()
     after(0, function() UI.AttachTo(_G.AuctionHouseFrame) end)
   end
   refreshSoon()
-  after(3, function() safely("los depósitos", History.LearnDeposits) end)
+  Core.UpdatePanel()
+  -- Depósitos y libros de lotes solo en la subasta de tu facción (la neutral es otro mercado).
+  after(3, function() if factionHouse() then safely("los depósitos", History.LearnDeposits) end end)
   after(2, function()
+    -- Con el escáner: en la subasta neutral (o dudosa) los precios no son de este mercado, y en modo automático el
+    -- escaneo ya viene: no se avisa.
+    if scannerLoaded() then
+      if not factionHouse() then return end
+      local okMode, mode = scannerCall("Mode")
+      if okMode and mode == "auto" then return end
+    end
     local ok, status = pcall(function() return Engine.DbStatus(Core.Context(), db.mode) end)
     if not ok then return end
     if status.level == "ok" then lastAhWarning = nil; return end
@@ -937,18 +1262,48 @@ function handlers.AUCTION_HOUSE_CLOSED()
     UI.RestorePosition()
   end
   openedByAH = false
+  scannerCall("OnClose")
+  Core.UpdatePanel()
 end
 
--- Lotes de un objeto vigilado que el jugador ha abierto en la subasta: el chollo se recalcula con ellos.
+-- Lotes de un objeto vigilado que el jugador ha abierto en la subasta (solo en la de tu facción): el chollo se
+-- recalcula con ellos. También es la respuesta de «Escanear la lista».
 local function commodityResults(itemID)
-  if History.CaptureBook(itemID) then invalidateSpecTips(); refreshSoon() end
+  if factionHouse() and History.CaptureBook(itemID) then invalidateSpecTips(); refreshSoon() end
+  scannerCall("OnCommodityResults", itemID)
 end
 handlers.COMMODITY_SEARCH_RESULTS_UPDATED = commodityResults
 handlers.COMMODITY_SEARCH_RESULTS_ADDED = commodityResults
 
--- Justo antes de que el juego escriba los SavedVariables: el historial no pasa de 1,25 MB (lo tuyo) y 3 MB (lo de
--- los compañeros).
-function handlers.PLAYER_LOGOUT() History.BeforeSave() end
+-- 0.6.0: lo demás que el escáner necesita de la subasta (todo pasa por scannerCall: sin Scanner.lua no hace nada).
+function handlers.ITEM_SEARCH_RESULTS_UPDATED(itemKey) scannerCall("OnItemResults", itemKey) end
+function handlers.ITEM_KEY_ITEM_INFO_RECEIVED(itemID) scannerCall("OnItemKeyInfo", itemID) end
+function handlers.AUCTION_HOUSE_THROTTLED_SYSTEM_READY() scannerCall("OnThrottle", "AUCTION_HOUSE_THROTTLED_SYSTEM_READY") end
+function handlers.AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED() scannerCall("OnThrottle", "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED") end
+function handlers.AUCTION_HOUSE_AUCTION_CREATED(auctionID) scannerCall("OnAuctionCreated", auctionID) end
+function handlers.AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION(notification, text, auctionID)
+  scannerCall("OnNotification", notification, text, auctionID)
+end
+function handlers.AUCTION_CANCELED(auctionID) scannerCall("OnAuctionGone", auctionID) end
+function handlers.COMMODITY_PURCHASED(itemID, quantity) scannerCall("OnPurchase", itemID, quantity or 1) end
+function handlers.ITEM_PURCHASED(itemID) scannerCall("OnPurchase", itemID, 1) end
+function handlers.COMMODITY_PURCHASE_SUCCEEDED() scannerCall("OnUserAction") end
+function handlers.COMMODITY_PURCHASE_FAILED() scannerCall("OnUserAction") end
+
+-- Justo antes de que el juego escriba los SavedVariables (al salir o con cualquier /reload): primero se suelta el
+-- resumen de Auctionator retenido (solo está en memoria) y se termina lo que estaba a medio escribir (los escaneos por
+-- grabar, con su envío a la hermandad, y el de un compañero a medio aplicar); después, los topes del historial (2 MB lo
+-- tuyo y 4 MB lo de los compañeros), las cachés del escáner y «Cuándo vender».
+function handlers.PLAYER_LOGOUT()
+  scannerCall("ReleaseHeld")
+  local ok, err = pcall(History.Flush)
+  if not ok then History.lastError = tostring(err) end
+  relayCall("Flush")
+  ok, err = pcall(History.BeforeSave)
+  if not ok then History.lastError = tostring(err) end
+  scannerCall("BeforeSave")
+  timingCall("BeforeSave")
+end
 
 function handlers.PLAYER_GUILD_UPDATE() Guild.UpdateKey(); invalidateMembers(); importRosterSoon() end
 function handlers.GUILD_ROSTER_UPDATE() importRosterSoon() end
@@ -975,5 +1330,8 @@ local function validEvent(event)
   return true
 end
 for event in pairs(handlers) do
-  if validEvent(event) then pcall(events.RegisterEvent, events, event) end
+  -- Con el escáner, REPLICATE_ITEM_LIST_UPDATE solo se registra dentro de una ventana de respuesta (listen).
+  if validEvent(event) and not (event == "REPLICATE_ITEM_LIST_UPDATE" and scannerLoaded()) then
+    pcall(events.RegisterEvent, events, event)
+  end
 end

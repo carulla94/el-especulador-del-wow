@@ -55,7 +55,10 @@ local function freshHistory(ns)
   return H.History
 end
 
-local ns = Stub.loadAddon(DIR)
+-- Sin Scanner.lua ni Timing.lua: como tras actualizar con solo un /reload (el juego no carga los archivos nuevos). Core
+-- sigue entonces como la 0.5.1 y los escaneos de Auctionator llegan a History tal cual, que es lo que se prueba aquí.
+-- Con el escáner cargado, lo que History recibe de él (RecordAggregate) está más abajo y en test_scanner.lua.
+local ns = Stub.loadAddon(DIR, Stub.NEW_IN_060)
 local History, Spec, Data = ns.History, ns.Spec, ns.Data
 local TODAY = Spec.DayIndex(Stub.now)
 local function market() return OroHermandadHist.markets[KEY] end
@@ -828,13 +831,13 @@ test("Record con opts.t: un resumen retenido se graba con su hora; el de reserva
   eq(p[#p].t, t, "con la hora del resumen"); eq(p[#p].lo, 88)
   -- El precio de reserva (filas que no se entienden) sale de Auctionator, nunca de la caché propia (que sale de lo
   -- ya grabado: se escribiría a sí misma).
-  local scanner = ns.Scanner
-  local own = scanner.OwnPrice
-  scanner.OwnPrice = function() return 7, 0 end
+  -- (Esta sesión va sin Scanner.lua: se pone uno de mentira con una caché que daría 7.)
+  ns.Scanner = {OwnPrice = function() return 7, 0 end, HasPrices = function() return true end}
+  eq(ns.Prices.Price(2772), 7, "Prices sí la usaría")
   Stub.now = Stub.now + 86400
   History.Record("full", {{rara = true}}, true)
   Stub.runTimers(5)
-  scanner.OwnPrice = own
+  ns.Scanner = nil
   eq(History.lastResult.fallback, true)
   eq(dayOf(2772, Spec.DayIndex(Stub.now)).lo, Stub.prices[2772], "el de Auctionator, no el propio")
 end)

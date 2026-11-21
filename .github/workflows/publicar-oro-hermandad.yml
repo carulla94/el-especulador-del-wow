@@ -9,7 +9,11 @@
 # El subidor para Windows se construye con .github/workflows/subidor-windows.yml. Si esa compilación falla (o se pide
 # «reusar_subidor»), la versión sale igual con el Subidor_Windows.zip de la versión anterior, sin cambios: el addon no
 # espera al subidor. «solo_subidor» (versiones 0.6.x del subidor) solo cambia Subidor_Windows.zip en la última versión.
-# CurseForge va el último: si falla, «Re-run failed jobs» lo repite sin tocar lo ya publicado en GitHub.
+# CurseForge va el último: si falla, «Re-run failed jobs» lo repite sin tocar lo ya publicado en GitHub. Si lo que
+# falló es la compilación de Windows, la versión ya ha salido con el subidor anterior: «Re-run failed jobs» la compila
+# otra vez y, si sale, cambia el subidor de la versión; CurseForge y Wago no se suben dos veces (cada uno mira si ya se
+# subió en un intento anterior de la ejecución). También vale lanzar el flujo con «solo_subidor».
+# Cancelar la ejecución detiene la publicación (lo ya publicado se queda): ningún trabajo sigue tras un «Cancel».
 name: Publicar Oro de Hermandad
 
 on:
@@ -143,7 +147,7 @@ jobs:
   subidor:
     name: Subidor para Windows
     needs: comprobar
-    if: ${{ always() && !inputs.reusar_subidor && (inputs.solo_subidor || needs.comprobar.result == 'success') }}
+    if: ${{ !cancelled() && !inputs.reusar_subidor && (inputs.solo_subidor || needs.comprobar.result == 'success') }}
     permissions:
       contents: read
     uses: ./.github/workflows/subidor-windows.yml
@@ -152,7 +156,7 @@ jobs:
   github:
     name: Publicar en GitHub
     needs: [comprobar, subidor]
-    if: ${{ always() && !inputs.solo_subidor && needs.comprobar.result == 'success' }}
+    if: ${{ !cancelled() && !inputs.solo_subidor && needs.comprobar.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -185,7 +189,8 @@ jobs:
           printf '%s\n' "$linea" | grep -Eq "$LINEA_SUBIDOR" || { echo "Línea del subidor no válida: $linea" >&2; exit 1; }
           printf '%s\n' "$linea" > "$RUNNER_TEMP/linea-subidor.txt"
 
-      # La compilación de Windows falló, se canceló o se pidió «reusar_subidor»: el zip de la última versión, tal cual.
+      # La compilación de Windows falló, se quedó sin tiempo o se pidió «reusar_subidor»: el zip de la última versión,
+      # tal cual. (Si alguien cancela la ejecución, este trabajo ni empieza: !cancelled().)
       - name: Reutilizar el subidor de la última versión
         if: ${{ needs.subidor.result != 'success' }}
         run: |
@@ -233,8 +238,9 @@ jobs:
   subidor-suelto:
     name: Cambiar el subidor de la última versión
     needs: subidor
-    # always(): «comprobar» no se ejecuta con solo_subidor, y sin always() GitHub saltaría también este trabajo.
-    if: ${{ always() && inputs.solo_subidor && needs.subidor.result == 'success' }}
+    # !cancelled(): «comprobar» no se ejecuta con solo_subidor, y sin una condición así GitHub saltaría también este
+    # trabajo (always() seguiría aunque alguien cancelara la ejecución).
+    if: ${{ !cancelled() && inputs.solo_subidor && needs.subidor.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -274,14 +280,36 @@ jobs:
   curseforge:
     name: Subir a CurseForge
     needs: github
-    if: ${{ always() && needs.github.result == 'success' }}
+    if: ${{ !cancelled() && needs.github.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: publicar-addon
     permissions:
       contents: read
+      actions: read
     steps:
+      # «Re-run failed jobs» (o «Re-run all jobs») tras un fallo de la compilación de Windows repite también este
+      # trabajo: si un intento anterior de esta ejecución ya subió la versión, no se sube otra vez. El token de gh solo
+      # está en este paso, nunca en el del empaquetador.
+      - name: ¿Ya se subió en un intento anterior?
+        id: antes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for ((n = 1; n < GITHUB_RUN_ATTEMPT; n++)); do
+            ids=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/attempts/$n/jobs" --paginate \
+              --jq '.jobs[] | select(.name == "Subir a CurseForge" and .conclusion == "success") | .id')
+            if [ -n "$ids" ]; then
+              echo "::notice::Esta versión ya se subió a CurseForge en el intento $n de esta ejecución: no se sube otra vez."
+              echo "ya=1" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
       - name: Descargar el código de la etiqueta
+        if: steps.antes.outputs.ya != '1'
         uses: actions/checkout@v7.0.1
         with:
           ref: refs/tags/${{ env.ETIQUETA }}
@@ -289,6 +317,7 @@ jobs:
           persist-credentials: false
 
       - name: Notas de la versión y comprobar el ID y la clave
+        if: steps.antes.outputs.ya != '1'
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: |
@@ -304,6 +333,7 @@ jobs:
 
       # -a 0: aquí solo CurseForge (Wago va en su propio trabajo). Sin ID en el TOC, el empaquetador no sube nada.
       - name: Empaquetar y subir a CurseForge
+        if: steps.antes.outputs.ya != '1'
         uses: BigWigsMods/packager@01e8631a69c69d7654c788d152630d5fed9e3812 # v2.7.0
         with:
           args: -a 0 ${{ env.EMPAQUETADOR_OPCIONES }}
@@ -314,14 +344,36 @@ jobs:
   wago:
     name: Subir a Wago
     needs: github
-    if: ${{ always() && needs.github.result == 'success' }}
+    if: ${{ !cancelled() && needs.github.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: publicar-addon
     permissions:
       contents: read
+      actions: read
     steps:
+      # «Re-run failed jobs» (o «Re-run all jobs») tras un fallo de la compilación de Windows repite también este
+      # trabajo: si un intento anterior de esta ejecución ya subió la versión, no se sube otra vez. El token de gh solo
+      # está en este paso, nunca en el del empaquetador.
+      - name: ¿Ya se subió en un intento anterior?
+        id: antes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for ((n = 1; n < GITHUB_RUN_ATTEMPT; n++)); do
+            ids=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/attempts/$n/jobs" --paginate \
+              --jq '.jobs[] | select(.name == "Subir a Wago" and .conclusion == "success") | .id')
+            if [ -n "$ids" ]; then
+              echo "::notice::Esta versión ya se subió a Wago en el intento $n de esta ejecución: no se sube otra vez."
+              echo "ya=1" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
       - name: Descargar el código de la etiqueta
+        if: steps.antes.outputs.ya != '1'
         uses: actions/checkout@v7.0.1
         with:
           ref: refs/tags/${{ env.ETIQUETA }}
@@ -329,6 +381,7 @@ jobs:
           persist-credentials: false
 
       - name: Notas de la versión y comprobar el ID y la clave
+        if: steps.antes.outputs.ya != '1'
         env:
           WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
         run: |
@@ -344,6 +397,7 @@ jobs:
 
       # -p 0: aquí solo Wago. Sin X-Wago-ID en el TOC, el empaquetador no sube nada.
       - name: Empaquetar y subir a Wago
+        if: steps.antes.outputs.ya != '1'
         uses: BigWigsMods/packager@01e8631a69c69d7654c788d152630d5fed9e3812 # v2.7.0
         with:
           args: -p 0 ${{ env.EMPAQUETADOR_OPCIONES }}

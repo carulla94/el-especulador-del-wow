@@ -3,13 +3,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import {buildTiming, localSlot, TIMING, TIMING_VERSION, SALES} from "../src/timing.mjs";
+import {buildTiming, localSlot, localDay, TIMING, TIMING_VERSION, SALES} from "../src/timing.mjs";
 import {DAY0, weekdayOf, dayIndex} from "../src/especular.mjs";
 
 /** Byte copies of the shared 0.6.0 fixtures (contracts C5 and C8), pinned: never edited here. */
 const v06 = name => fs.readFileSync(new URL("./fixtures/v06/" + name, import.meta.url));
 const V06_SHA = {"madrid-slots.json": "6cb2edb2be99aff756484a928084dc151191488fffc8b45d2cbe27dcf18f0a5b",
-  "timing-v2.json": "4b312978359deeffde566386da38f3e8eae34d1e3f6c51519fb66c88b6a62023"};
+  "timing-v2.json": "baf20ede58ace9f768148efe8534f12abcae1cae49ccb939c2c231ef0392a8d9"};
 
 const DAY = 86400;
 const T = 2530;                                            // 2026-12-05, a Saturday
@@ -18,11 +18,11 @@ const at = (d, hour, minute = 0) => DAY0 + d * DAY + hour * 3600 + minute * 60;
 
 test("localSlot gives the weekday and the time of day in Spanish time, summer time included", () => {
   // Wednesday 18 November 2026, 20:30 in Madrid (19:30 UTC).
-  assert.deepEqual(localSlot(Date.UTC(2026, 10, 18, 19, 30) / 1000), {wd: 2, hour: 20, block: 5, cell: 17});
+  assert.deepEqual(localSlot(Date.UTC(2026, 10, 18, 19, 30) / 1000), {wd: 2, hour: 20, block: 5, cell: 17, shift: 0});
   // Sunday 5 July 2026, 14:00 in Madrid (12:00 UTC, summer time).
-  assert.deepEqual(localSlot(Date.UTC(2026, 6, 5, 12, 0) / 1000), {wd: 6, hour: 14, block: 3, cell: 39});
+  assert.deepEqual(localSlot(Date.UTC(2026, 6, 5, 12, 0) / 1000), {wd: 6, hour: 14, block: 3, cell: 39, shift: 3600});
   // Monday 00:10 in Madrid is still Sunday 23:10 UTC.
-  assert.deepEqual(localSlot(Date.UTC(2026, 10, 22, 23, 10) / 1000), {wd: 0, hour: 0, block: 0, cell: 0});
+  assert.deepEqual(localSlot(Date.UTC(2026, 10, 22, 23, 10) / 1000), {wd: 0, hour: 0, block: 0, cell: 0, shift: 0});
   assert.equal(weekdayOf(T), 5, "the fixture's today is a Saturday");
   assert.equal(localSlot(at(T, 12)).wd, 5);
 });
@@ -92,7 +92,15 @@ test("the 0.6.0 fixtures are byte copies of the shared ones", () => {
 test("localSlot gives exactly the weekday, hour, block and cell of every vector of madrid-slots.json (the addon's Spec.MadridSlot)", () => {
   const {vectors} = JSON.parse(v06("madrid-slots.json"));
   assert.ok(vectors.length > 1000);
-  for (const [t, wd, hour, block, cell, text] of vectors) assert.deepEqual(localSlot(t), {wd, hour, block, cell}, text);
+  for (const [t, wd, hour, block, cell, text] of vectors) {
+    const {shift, ...slot} = localSlot(t);
+    assert.deepEqual(slot, {wd, hour, block, cell}, text);
+    // localDay: the Spanish date of the vector's text, numbered like dayIndex (Spec.MadridSlot's fifth value).
+    assert.equal(localDay(t), Date.parse(text.slice(0, 10) + "T00:00:00Z") / 86400000 - (DAY0 + 3600) / DAY, text);
+  }
+  assert.equal(localDay(at(T, 12)), T, "in winter the Spanish date is dayIndex");
+  assert.equal(localDay(Date.UTC(2026, 6, 12, 22, 30) / 1000), dayIndex(Date.UTC(2026, 6, 12, 22, 30) / 1000) + 1,
+    "Monday 13 July 2026 at 00:30 (summer) is Monday, not Sunday's dayIndex");
 });
 
 test("buildTiming equals timing-v2.json: twelve-column cells, one sample per person and moment, overlapping persons merged", () => {

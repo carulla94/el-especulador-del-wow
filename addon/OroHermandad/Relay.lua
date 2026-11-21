@@ -532,6 +532,14 @@ function Relay.GuildItems(key)
   return cache.items
 end
 
+-- ¿Está ya todo decodificado en GuildItems(key)? (Timing.lua espera a esto para su primera pasada.) Si la caché era de
+-- otro mercado, empieza a decodificar este.
+function Relay.GuildItemsReady(key)
+  if not key or not History.Hist() then return true end
+  if cache.key ~= key then resetCache(key) end
+  return cache.job == nil and #cache.queue == 0
+end
+
 function Relay.OnChange(fn) onChange = type(fn) == "function" and fn or nil end
 
 local function notifyChange()
@@ -1017,6 +1025,78 @@ function Relay.UploaderMode()
   return markerSeen
 end
 
+-- Aviso del subidor 0.6.0 (datos = 2, contrato C7, marker-v2.json): devuelve detected (formato = 1, también el de la
+-- 0.5.x) e info, los campos que valen uno a uno (nil si datos no es 2): escrito, version, envio = {t, estado}, suben,
+-- aportan y quedan/dia (solo juntos). Se lee de _G cada vez: el aviso carga después que este addon (al entrar, en
+-- PLAYER_LOGIN ya está). Solo se lee; nunca se escribe.
+local MARKER_STATES = {ok = true, clave = true, red = true, cuota = true, rechazado = true}
+function Relay.MarkerInfo()
+  local marker = _G["OroHermandadSubidor"]
+  if type(marker) ~= "table" or secret(marker.formato) or marker.formato ~= 1 then return false, nil end
+  if marker.datos ~= 2 then return true, nil end
+  local function count(value, hi) return (not secret(value) and isInt(value, 0, hi)) and value or nil end
+  local info = {escrito = (not secret(marker.escrito) and isInt(marker.escrito, 1, TIME_MAX)) and marker.escrito or nil}
+  local version = marker.version
+  if type(version) == "string" and not secret(version) and #version <= 16 and version:match("^%d[%d%.]*$") then
+    info.version = version
+  end
+  local envio = marker.envio
+  if type(envio) == "table" and count(envio.t, TIME_MAX) and type(envio.estado) == "string" and MARKER_STATES[envio.estado] then
+    info.envio = {t = envio.t, estado = envio.estado}
+  end
+  info.suben, info.aportan = count(marker.suben, 100000), count(marker.aportan, 100000)
+  local quedan, dia = count(marker.quedan, 1000), count(marker.dia, 100000)
+  if quedan and dia then info.quedan, info.dia = quedan, dia end
+  return true, info
+end
+
+local function hhmm(t)
+  if type(date) ~= "function" or not t then return "--:--" end
+  local ok, text = pcall(date, "%H:%M", t)
+  return ok and text or "--:--"
+end
+
+local MARKER_WARNINGS = {clave = "el panel ha rechazado la clave", red = "sin conexión con el panel",
+                         cuota = "el panel pide esperar", rechazado = "el panel no aceptó los datos"}
+Relay.MARKER_STALE = 7200
+
+-- Líneas del subidor del PC (solo en el PC que sube precios y con un aviso 0.6.0), de la más importante a la menos:
+-- {stale = «no parece abierto», warn = «avisa: …», base = «último envío aceptado…»}; la ventana enseña la primera que
+-- haya y /oro subidor, todas. nil si no toca.
+function Relay.UploaderLines(t)
+  if not Relay.UploaderMode() then return nil end
+  local _, info = Relay.MarkerInfo()
+  if not info then return nil end
+  t = t or unixNow()
+  local out = {}
+  local parts = {}
+  local envio = info.envio
+  if envio and envio.t > 0 then
+    parts[#parts + 1] = "último envío aceptado a las " .. hhmm(envio.t)
+  else
+    parts[#parts + 1] = "aún ningún envío aceptado"
+  end
+  if info.aportan then
+    parts[#parts + 1] = plural(info.aportan, "persona aporta", "personas aportan") .. " precios"
+      .. (info.escrito and (" (dato de las " .. hhmm(info.escrito) .. ")") or "")
+  end
+  out.base = "Subidor del PC" .. (info.version and (" (" .. info.version .. ")") or "") .. ": " .. table.concat(parts, " · ") .. "."
+  if envio and envio.estado ~= "ok" then out.warn = "El subidor del PC avisa: " .. MARKER_WARNINGS[envio.estado] .. "." end
+  if info.escrito and t and t - info.escrito > Relay.MARKER_STALE then
+    out.stale = "El subidor del PC no parece abierto (último aviso a las " .. hhmm(info.escrito) .. "): ábrelo para que suba."
+  end
+  return out
+end
+
+-- Envíos que le quedan hoy a la clave del subidor en el panel (nil si el aviso no lo dice o es de otro día).
+function Relay.UploadsLeftToday(t)
+  local _, info = Relay.MarkerInfo()
+  t = t or unixNow()
+  if not (info and info.quedan and t) then return nil end
+  if info.dia ~= Spec.DayIndex(t) then return nil end
+  return info.quedan
+end
+
 -- La petición a toda la hermandad se arma justo al ponerla en cola (con lo que ya se tiene de cada compañero) y solo
 -- cuando se pueden enviar mensajes de precios: en combate, instancias o con los mensajes restringidos espera y se
 -- mira cada 30 s. lastAsk (los 10 min de espera) cuenta desde que sale de verdad; si caduca en la cola sin salir,
@@ -1311,6 +1391,21 @@ function Relay.ProbeLine()
     .. " · en cola: " .. plural(Guild.RelayQueued(), "mensaje", "mensajes")
     .. " · subidor: " .. subidorText() .. " · compartir: " .. (shareOn() and "sí" or "no")
     .. " · " .. string.format("%.0f", size / 1024) .. " KB de " .. floor(History.OBS_MAX_BYTES / 1024) .. " KB"
+end
+
+-- /oro sondeo: el aviso del subidor (versión del formato, campos que valen y edad), solo cifras.
+function Relay.MarkerProbeLine()
+  local detected, info = Relay.MarkerInfo()
+  if not detected then return "Aviso del subidor: no está." end
+  if not info then return "Aviso del subidor: formato 1 (0.5.x o datos de otra versión), sin estado." end
+  local fields = {}
+  for _, k in ipairs({"escrito", "version", "envio", "suben", "aportan", "quedan", "dia"}) do
+    if info[k] ~= nil then fields[#fields + 1] = k end
+  end
+  local t = unixNow()
+  return "Aviso del subidor: datos 2, campos válidos " .. (#fields > 0 and table.concat(fields, ",") or "ninguno")
+    .. (info.envio and (", último intento " .. info.envio.estado) or "")
+    .. ((info.escrito and t) and (", escrito " .. agoText(t - info.escrito)) or "")
 end
 
 -- /oro estado: cuántos compañeros comparten precios contigo en este mercado.

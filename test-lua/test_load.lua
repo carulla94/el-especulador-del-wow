@@ -6,6 +6,13 @@ local realPrint = print
 Stub.install()
 assert(_G.GetItemInfo == nil and _G.GetTradeSkillLine == nil, "la simulación debe parecerse a Forever")
 local ns = Stub.loadAddon("addon/OroHermandad")
+-- Lo que Core le pasa al escáner (0.6.0) al cargar: se guarda para hacer en las pruebas lo que el escáner hace al
+-- terminar un escaneo (grabar y avisar a Core).
+local scannerCallbacks
+do
+  local init = ns.Scanner.Init
+  ns.Scanner.Init = function(db, cdb, callbacks) scannerCallbacks = callbacks; return init(db, cdb, callbacks) end
+end
 
 local passed, failed = 0, 0
 local function test(name, fn)
@@ -77,7 +84,7 @@ test("Pie de la ventana: hueco propio entre la lista y los botones", function()
   assert(y(frame.optionsButton) == y(frame.shopButton), "botones a la misma altura")
   assert(#frame.footer.__points == 2, "anclado por los dos lados: el ancho no depende del texto")
   assert(y(frame.footer, 1) >= buttonTop and y(frame.footer, 2) >= buttonTop, "el pie empieza encima de los botones")
-  assert(frame.footer.__height and frame.footer.__maxLines == 3, "alto fijo y como mucho 3 líneas")
+  assert(frame.footer.__height and frame.footer.__maxLines == 4, "alto fijo y como mucho 4 líneas (0.6.0: la del subidor)")
   assert(y(frame.scroll, 2) >= y(frame.footer) + frame.footer.__height, "la lista termina encima del pie")
 end)
 
@@ -241,7 +248,8 @@ test("Precios viejos: aviso al abrir la subasta, ventana pegada a ella; una bús
   assert(ns.UI.IsShown(), "se abre sola")
   local frame = _G.OroHermandadFrame
   assert(frame.__points[1] and frame.__points[1][2] == _G.AuctionHouseFrame, "pegada a la subasta")
-  assert(printed("Precios de hace 12 h") and printed("escanear al abrir la subasta"), "aviso en el chat")
+  assert(printed("Precios de hace 12 h") and printed("Escanear cada vez que abro la subasta"), "aviso en el chat")
+  assert(not printed("Auctionator"), "sin mandar a Auctionator")
   assert(#Stub.sounds == 1, "sonido de aviso")
   -- Una tanda de búsqueda (los favoritos que la subasta busca al abrirse, la pestaña Comprar, una lista de la
   -- compra) actualiza unos pocos objetos: no es un escaneo.
@@ -293,17 +301,16 @@ test("Escaneos de Auctionator sin su EventBus: se usa su hora guardada", functio
   assert(P.Prices.LastScanTime() == nil, "sin Auctionator")
   _G.Auctionator = saved
   assert(ns.Prices.WatchingScans() == true, "el addon sí los oye")
-  -- Oyéndolos, los datos de un escaneo completo de otro addon (REPLICATE_ITEM_LIST_UPDATE) no fechan nada:
-  -- Auctionator solo procesa los suyos.
+  -- 0.6.0: con el escáner, REPLICATE_ITEM_LIST_UPDATE ni se registra fuera de sus ventanas de respuesta (el respaldo
+  -- de la 0.5.1 solo sigue sin Scanner.lua: «Sin los archivos nuevos», más abajo).
   local before = OroHermandadDB.fullScan["Forever-Alliance"]
   OroHermandadDB.fullScan["Forever-Alliance"] = nil
-  Stub.fire("REPLICATE_ITEM_LIST_UPDATE")
-  assert(OroHermandadDB.fullScan["Forever-Alliance"] == nil, "solo como respaldo")
   local watching = ns.Prices.WatchingScans
-  ns.Prices.WatchingScans = function() return false end -- sin EventBus: el evento del cliente es el respaldo
+  ns.Prices.WatchingScans = function() return false end
   Stub.fire("REPLICATE_ITEM_LIST_UPDATE")
   ns.Prices.WatchingScans = watching
-  assert(OroHermandadDB.fullScan["Forever-Alliance"] == Stub.now, "respaldo")
+  for _, f in ipairs(Stub.frames) do assert(not f.__events.REPLICATE_ITEM_LIST_UPDATE, "no se escucha fuera de una ventana") end
+  assert(OroHermandadDB.fullScan["Forever-Alliance"] == nil, "nada")
   OroHermandadDB.fullScan["Forever-Alliance"] = before
 end)
 
@@ -368,8 +375,10 @@ test("Comandos en español: auto no / auto / comision / amigo", function()
   Stub.printed = {}
   slash("amigo borrar nadie"); assert(printed("no encuentro a nadie"))
   slash("amigo borrar bea"); assert(printed("he quitado a Bea de tu lista."))
-  slash("ayuda"); assert(printed("/oro comprar — lista de la compra en Auctionator: lo que falta para tus recetas (A tope) y los chollos"),
+  slash("ayuda"); assert(printed("/oro comprar — lo que falta para tus recetas (A tope) y los chollos: lista en Auctionator o, sin él, búsqueda en la subasta"),
     "la ayuda dice para qué modo es")
+  assert(printed("/oro escanear — escanea la subasta entera ahora") and printed("/oro escanear auto|proponer|off")
+    and printed("/oro cuando [objeto]") and printed("/oro guardar — en el PC del subidor"), "y lo de la 0.6.0")
   assert(printed("/oro especular — modo para especular") and printed("/oro especular presupuesto 200"), "y el modo Especular")
   -- Al entrar, la hermandad tarda unos segundos en cargar: se dice en vez de mostrar el uso.
   local setManual = ns.Guild.SetManual
@@ -602,6 +611,8 @@ end)
 
 test("Lo que muestra la subasta al buscar el objeto: precio confirmado y sin tus propias unidades", function()
   Stub.commodity[14047] = {{5000, 10, 10}, {5800, 1}, {6000, 40}, {6200, 60}, {7900, 100}, {9500, 200}}
+  -- Los resultados de una búsqueda solo llegan con la subasta abierta (0.6.0: y solo se guardan en la de tu facción).
+  Stub.fire("AUCTION_HOUSE_SHOW")
   Stub.fire("COMMODITY_SEARCH_RESULTS_UPDATED", 14047)
   Stub.runTimers(5)
   local book = ns.History.Books()[14047]
@@ -615,6 +626,7 @@ test("Lo que muestra la subasta al buscar el objeto: precio confirmado y sin tus
   Stub.commodity[2901] = {{900, 1}}
   Stub.fire("COMMODITY_SEARCH_RESULTS_UPDATED", 2901)
   assert(ns.History.Books()[2901] == nil, "no vigilado")
+  Stub.fire("AUCTION_HOUSE_CLOSED")
   -- Pasados 5 minutos vuelve a valer el último escaneo (estimado).
   Stub.now = Stub.now + 400
   ns.History.Hist().markets[KEY].items[14047].p = Spec.EncodePoints({{t = Stub.now - 60, lo = 6000, qty = 300, qty5 = 40}})
@@ -685,7 +697,12 @@ test("Escaneo grande con la ventana abierta: se repinta cuando el historial term
       if id ~= 14047 then listings[#listings + 1] = {id = id, price = 1000, qty = 50, lots = {{50, 1000}}} end
     end
     local t0 = Stub.gameTime
-    Stub.scanComplete("full", 60000, Stub.scanRows("full", 60000, listings))
+    -- 0.6.0: el escáner lee la subasta entera (60 000 filas) y deja a History el resumen de los vigilados; después
+    -- avisa a Core (onScanDone), como en Scanner.lua al terminar.
+    local agg = {}
+    for _, l in ipairs(listings) do agg[l.id] = {lo = l.price, qty = l.qty, qty5 = l.qty} end
+    assert(ns.History.RecordAggregate("full", agg, true, {t = Stub.now}))
+    scannerCallbacks.onScanDone("full", true, Stub.now)
     local doneAt, during
     for i = 1, 600 do
       frame()
@@ -732,8 +749,10 @@ test("Escaneo de resumen con un chollo: «Posible chollo», «Comprar lo que fal
     Stub.shoppingList and Stub.shoppingList.strings[1])
   -- Al abrirlo en la subasta hay 300 a 60p: ya es un chollo calculado, con el precio confirmado.
   Stub.commodity[14047] = {{6000, 300}}
+  Stub.fire("AUCTION_HOUSE_SHOW")
   Stub.fire("COMMODITY_SEARCH_RESULTS_UPDATED", 14047)
   Stub.runTimers(5)
+  Stub.fire("AUCTION_HOUSE_CLOSED")
   assert(specRow("check") == nil and specRow("flip"), "con lo que hay a la venta, el chollo de verdad")
   assert(has(specRow("flip").detail, "Precio confirmado en la subasta"), specRow("flip").detail)
 end)
@@ -830,6 +849,553 @@ test("Sin Auctionator no rompe y lo explica", function()
   slash("tranquilo")
   assert(lastRender.result.db.level == "error" and has(lastRender.result.db.text, "Auctionator"))
   _G.Auctionator = saved
+end)
+
+---------------------------------------------------------------------------
+-- 0.6.0: escáner propio, «Cuándo vender», «Guardar y subir» y aviso v2 del subidor (cada una en una sesión nueva)
+---------------------------------------------------------------------------
+local json060 = require("json")
+local function readFile(path) local f = assert(io.open(path, "rb")); local s = f:read("*a"); f:close(); return s end
+local function eq060(a, b, msg) if a ~= b then error((msg or "") .. ": esperado " .. tostring(b) .. ", obtenido " .. tostring(a), 2) end end
+
+-- Una sesión nueva (otro personaje, otro PC o tras salir del juego): marcos, temporizadores y escuchas de Auctionator
+-- de cero. opts: db/cdb/hist (lo guardado), skip (archivos que no se cargan), auctionator (false = sin él).
+local function freshSession(opts)
+  opts = opts or {}
+  Stub.frames, Stub.timers, Stub.bus = {}, {}, {}
+  for k, v in pairs(Stub.ahOriginals) do C_AuctionHouse[k] = v end
+  if opts.auctionator == false then _G.Auctionator = nil end
+  _G.OroHermandadDB, _G.OroHermandadCharDB, _G.OroHermandadHist = opts.db, opts.cdb, opts.hist
+  local s = Stub.loadAddon("addon/OroHermandad", opts.skip)
+  local callbacks
+  if s.Scanner then
+    local init = s.Scanner.Init
+    s.Scanner.Init = function(db, cdb, cb) callbacks = cb; return init(db, cdb, cb) end
+  end
+  Stub.fire("ADDON_LOADED", "OroHermandad")
+  Stub.fire("PLAYER_LOGIN")
+  Stub.fire("PLAYER_ENTERING_WORLD", true, false)
+  Stub.runUntil(nil, opts.wait or 40)
+  return s, callbacks
+end
+
+local function coreFrame()
+  for _, f in ipairs(Stub.frames) do if f.__events.ADDON_LOADED then return f end end
+end
+
+local function render(s) s.UI.Show(); s.Core.Refresh() end
+local function hhmm(t) return os.date("%H:%M", t) end
+local function now() return math.floor(Stub.now) end
+
+-- La subasta con algo a la venta (hierro y cobre vigilados; relleno no vigilado; la primera fila cambia en cada
+-- respuesta para que la huella no la confunda con la anterior).
+local function houseRows()
+  local rows = {Stub.row(299999, 1, 100, {band = 2})}
+  for _, r in ipairs({{2772, 20, 100}, {2772, 30, 104}, {2770, 40, 30}, {3575, 10, 150}, {12365, 10, 300}}) do
+    rows[#rows + 1] = Stub.row(r[1], r[2], r[3], {band = 3})
+  end
+  for i = 1, 30 do rows[#rows + 1] = Stub.row(200000 + i, 1, 500 + i, {band = 2}) end
+  Stub.ah.rows, Stub.ah.autoBump = rows, 299999
+end
+
+test("TOC 0.6.0: versión, notas, web, sin el número de CurseForge, archivos nuevos en su sitio y los mismos SavedVariables", function()
+  local toc = readFile("addon/OroHermandad/OroHermandad.toc")
+  assert(toc:find("\n## Version: 0.6.0\n", 1, true), "versión")
+  assert(toc:find("\n## Notes: Escanea la subasta con hora, te dice cuándo se vende mejor y te sugiere qué hacer para ganar oro "
+    .. "con tus profesiones y tu hermandad. Auctionator es opcional.\n", 1, true), "notas")
+  assert(toc:find("\n## X-Website: https://github.com/carulla94/el-especulador-del-wow\n", 1, true), "web")
+  assert(not toc:find("X-Curse-Project-ID", 1, true), "el número del proyecto lo pone una persona")
+  assert(toc:find("\n## SavedVariables: OroHermandadDB, OroHermandadHist\n## SavedVariablesPerCharacter: OroHermandadCharDB\n", 1, true),
+    "ningún SavedVariables nuevo")
+  local files = {}
+  for line in toc:gmatch("[^\n]+") do if line:match("%.lua$") then files[#files + 1] = line end end
+  eq060(table.concat(files, ","), "Data.lua,Items.lua,Spec.lua,Engine.lua,Prices.lua,History.lua,Scan.lua,Money.lua,Guild.lua,"
+    .. "Relay.lua,Scanner.lua,Timing.lua,UI.lua,Tooltip.lua,Extras.lua,Core.lua", "orden de carga")
+  local core = readFile("addon/OroHermandad/Core.lua")
+  assert(core:find('\nCore.VERSION = "0.6.0"\n', 1, true), "Core.VERSION en su propia línea (C9)")
+  eq060(ns.Core.VERSION, "0.6.0")
+  assert(readFile("addon/OroHermandad/CAMBIOS.md"):match("\n## 0%.6%.0 %(%d%d%d%d%-%d%d%-%d%d%)\n"), "CAMBIOS.md con la sección 0.6.0")
+end)
+
+test("Escaneo completo de Auctionator (EventBus «full») con el escáner: History no lo graba; un resumen entero se retiene", function()
+  local s, cb = freshSession()
+  local recorded = 0
+  local record = s.History.Record
+  s.History.Record = function(kind, ...) if kind == "full" then recorded = recorded + 1 end; return record(kind, ...) end
+  Stub.scanComplete("full")
+  Stub.runTimers(5)
+  eq060(recorded, 0, "el escáner lee la misma respuesta (gancho en ReplicateItems): aquí no se graba")
+  assert(OroHermandadDB.fullScan["Forever-Alliance"], "pero los precios quedan fechados")
+  -- Resumen entero con la subasta cerrada: no puede llegar un escaneo completo en esta visita, se suelta y se graba.
+  local released = 0
+  Stub.scanComplete("summary")
+  Stub.runTimers(5)
+  assert(s.Scanner.Internals().stats.lastHeld and s.Scanner.Internals().stats.lastHeld.recorded, "soltado y grabado")
+  s.History.Record = record
+end)
+
+test("Subasta neutral o dudosa: ni depósitos, ni libros de lotes, ni petición; en la tuya, sí (D9)", function()
+  local s = freshSession()
+  local deposits, books = 0, 0
+  local learn, capture = s.History.LearnDeposits, s.History.CaptureBook
+  s.History.LearnDeposits = function(...) deposits = deposits + 1; return learn(...) end
+  s.History.CaptureBook = function(...) books = books + 1; return capture(...) end
+  Stub.commodity[2772] = {{100, 20}}
+  Stub.openAH({npcFaction = "Neutral"})
+  Stub.runUntil(nil, 5)
+  Stub.fire("COMMODITY_SEARCH_RESULTS_UPDATED", 2772)
+  eq060(s.Scanner.House(), "neutral"); eq060(deposits, 0, "sin depósitos"); eq060(books, 0, "sin libros")
+  Stub.printed = {}
+  slash("escanear")
+  assert(printed("subasta neutral: aquí no se guardan precios."), "/oro escanear lo dice")
+  Stub.closeAH()
+  Stub.openAH()
+  Stub.runUntil(nil, 5)
+  Stub.fire("COMMODITY_SEARCH_RESULTS_UPDATED", 2772)
+  eq060(s.Scanner.House(), "faction"); eq060(deposits, 1, "depósitos en la tuya"); eq060(books, 1, "libros en la tuya")
+  Stub.closeAH()
+  Stub.commodity[2772] = nil
+end)
+
+test("Sin los archivos nuevos (un /reload tras actualizar): como la 0.5.1, y /oro sondeo, escanear y cuando lo dicen", function()
+  local s = freshSession({skip = Stub.NEW_IN_060})
+  assert(s.Scanner == nil and s.Timing == nil, "sin Scanner.lua ni Timing.lua")
+  assert(coreFrame().__events.REPLICATE_ITEM_LIST_UPDATE, "el respaldo de la 0.5.1 sigue registrado")
+  local watching = s.Prices.WatchingScans
+  s.Prices.WatchingScans = function() return false end
+  OroHermandadDB.fullScan["Forever-Alliance"] = nil
+  Stub.fire("REPLICATE_ITEM_LIST_UPDATE")
+  s.Prices.WatchingScans = watching
+  assert(OroHermandadDB.fullScan["Forever-Alliance"], "respaldo")
+  -- Los escaneos de Auctionator se graban como en la 0.5.1.
+  Stub.scanComplete("full")
+  Stub.runTimers(5)
+  eq060(s.History.lastResult and s.History.lastResult.kind, "full", "grabado por History")
+  local RESTART = "tras actualizar el addon, sal del juego del todo y vuelve a entrar (un /reload no carga sus archivos nuevos)."
+  Stub.printed = {}
+  slash("escanear")
+  assert(printed("el escáner de la subasta aún no está cargado: " .. RESTART), "escanear")
+  slash("cuando")
+  assert(printed("«Cuándo vender» aún no está cargado: " .. RESTART), "cuando")
+  slash("sondeo")
+  local probe = _G.OroHermandadTextFrame.text
+  assert(has(probe, "Escáner de la subasta: aún no está cargado: " .. RESTART) and has(probe, "Cuándo vender: aún no está cargado: " .. RESTART), probe)
+  -- La subasta se abre sin errores y aprende depósitos como antes.
+  Stub.openAH()
+  Stub.runUntil(nil, 5)
+  Stub.closeAH()
+  render(s)
+  assert(not _G.OroHermandadFrame.cuandoButton.__shown, "sin Timing.lua no hay botón «Cuándo vender»")
+  for _, line in ipairs(Stub.printed) do assert(not has(line, "error"), line) end
+end)
+
+test("Sin Auctionator (H2): se abre la subasta, se escanea con el addon y salen sugerencias con oro; los textos no lo piden", function()
+  local savedAuctionator = _G.Auctionator
+  local s = freshSession({auctionator = false})
+  eq060(s.Prices.Available(), false, "aún sin precios")
+  local status = s.Engine.DbStatus(s.Core.Context(), "lazy")
+  eq060(status.text, "Aún no hay precios de la subasta: ábrela y pulsa «Escanear» (Auctionator es opcional).")
+  Stub.printed = {}
+  slash("tabla")
+  assert(printed("aún no hay precios guardados en este mercado: escanea la subasta con Oro de Hermandad."), "tabla")
+  houseRows()
+  Stub.ah.rows[#Stub.ah.rows + 1] = Stub.row(210777, 1, 777, {band = 2})
+  Stub.openAH()
+  Stub.runUntil(nil, 3)
+  assert(s.Scanner.Request(true), "se pide")
+  Stub.runUntil(function() return s.Scanner.State().state == "done" or s.Scanner.State().state == "done-refresh" end, 60)
+  Stub.runUntil(function() return s.History.Pending() == 0 end, 30)
+  Stub.closeAH()
+  eq060(s.Prices.Price(210777), 777, "un objeto no vigilado, de la caché propia")
+  eq060(s.Prices.Price(2772), 100)
+  local ctx = s.Core.Context()
+  eq060(ctx.hasPriceSource, true)
+  local result = s.Engine.Suggest(ctx)
+  local sell
+  for _, row in ipairs(result.sections.now or {}) do if row.kind == "sell" then sell = row end end
+  assert(sell and sell.value > 0 and has(sell.detail, "Ponlo al precio más bajo de la subasta."), sell and sell.detail)
+  for _, line in ipairs(Stub.printed) do assert(not has(line, "error") and not has(line, "Instálalo"), line) end
+  _G.Auctionator = savedAuctionator
+end)
+
+test("Ningún mensaje del escáner en el chat (H4): 5 visitas en automático; en proponer, con la ventana abierta, tampoco", function()
+  local s = freshSession()
+  slash("escanear auto")
+  assert(printed("escanear la subasta: automático cada vez que la abres."), "confirmación")
+  eq060(OroHermandadDB.scanner.auto, "auto")
+  houseRows()
+  Stub.printed, Stub.sounds = {}, {}
+  local calls = #Stub.ah.calls
+  for _ = 1, 5 do
+    Stub.openAH()
+    Stub.runUntil(function() local st = s.Scanner.State().state; return st == "done" or st == "done-refresh" end, 60)
+    Stub.runUntil(nil, 30)
+    Stub.closeAH()
+    Stub.advance(1000)
+  end
+  eq060(#Stub.ah.calls, calls + 5, "un escaneo por visita")
+  eq060(#Stub.ah.protectedCalls, 0, "nunca publica, compra, puja ni cancela")
+  eq060(#Stub.printed, 0, "nada en el chat: " .. table.concat(Stub.printed, " | "))
+  eq060(#Stub.sounds, 0, "ningún sonido")
+  -- Proponer con la ventana abierta: la propuesta va en la ventana, no en el chat.
+  slash("escanear proponer")
+  Stub.printed = {}
+  Stub.advance(2000)
+  Stub.openAH()
+  Stub.runUntil(nil, 5)
+  assert(s.UI.IsShown(), "la ventana se abre con la subasta")
+  local panel = s.UI.Panel()
+  assert(panel and has(panel.text, "¿Escanear ahora? (unos segundos)"), panel and panel.text)
+  assert(panel.check and panel.check.label == "Escanear siempre al abrir la subasta", "la casilla")
+  assert(panel.buttons[1].label == "Escanear", "el botón")
+  Stub.runUntil(nil, 70)
+  eq060(#Stub.printed, 0, "en proponer con la ventana abierta: nada en el chat: " .. table.concat(Stub.printed, " | "))
+  -- La casilla pasa a automático; el botón «Escanear» pide la subasta.
+  local frame = _G.OroHermandadFrame
+  frame.panel.check.__scripts.OnClick(frame.panel.check)
+  eq060(OroHermandadDB.scanner.auto, "auto", "la casilla")
+  Stub.closeAH()
+end)
+
+test("Fila del escáner en la ventana: [Escanear], [Parar] mientras lee, la hora del siguiente y «Escanear la lista»", function()
+  local s = freshSession()
+  houseRows()
+  Stub.advance(1000)
+  Stub.openAH()
+  Stub.runUntil(nil, 3)
+  local frame = _G.OroHermandadFrame
+  local panel = s.UI.Panel()
+  assert(panel and panel.buttons[1].label == "Escanear", panel and panel.text)
+  frame.panel.buttons[1].__scripts.OnClick(frame.panel.buttons[1])
+  Stub.runUntil(function() return s.Scanner.State().state == "reading" end, 30)
+  panel = s.UI.Panel()
+  if s.Scanner.State().state == "reading" then
+    assert(panel.buttons[1].label == "Parar" and has(panel.text, "Escaneando: "), panel.text)
+  end
+  Stub.runUntil(function() local st = s.Scanner.State().state; return st == "done" or st == "done-refresh" end, 60)
+  panel = s.UI.Panel()
+  assert(panel and has(panel.text, "Escaneo de las ") and has(panel.text, "guardado"), panel and panel.text)
+  -- Pasados unos minutos: la hora del siguiente y, como faltan más de 5 min, «Escanear la lista».
+  Stub.advance(240)
+  s.Core.UpdatePanel()
+  panel = s.UI.Panel()
+  local labels = {}
+  for _, b in ipairs(panel.buttons) do labels[#labels + 1] = b.label end
+  assert(has(panel.text, "Siguiente escaneo completo posible a las") or has(panel.text, "Escaneo de las"), panel.text)
+  assert(table.concat(labels, ","):find("Escanear la lista", 1, true), table.concat(labels, ","))
+  Stub.closeAH()
+  eq060(s.UI.Panel() == nil or not s.UI.IsShown(), true, "sin subasta, sin fila")
+end)
+
+test("Botones de abajo: «Cuándo vender» siempre; con todos a la vista caben sin pisarse (comprar se acorta)", function()
+  local s = freshSession()
+  local frame = _G.OroHermandadFrame
+  render(s)
+  assert(frame.cuandoButton.__shown, "«Cuándo vender»")
+  for _, b in ipairs({frame.shopButton, frame.tableButton, frame.saveButton}) do b:Show() end
+  s.UI.LayoutButtons()
+  local list = {}
+  for _, b in ipairs({frame.shopButton, frame.cuandoButton, frame.saveButton, frame.tableButton, frame.optionsButton}) do
+    list[#list + 1] = {x = b.x, w = b.width}
+  end
+  table.sort(list, function(a, b) return a.x < b.x end)
+  for i = 2, #list do assert(list[i].x >= list[i - 1].x + list[i - 1].w, "sin pisarse") end
+  assert(list[1].x >= 12 and list[#list].x + list[#list].w <= 440 - 12, "dentro de la ventana")
+  eq060(frame.shopButton:GetText(), "Comprar", "acortado")
+  frame.tableButton:Hide(); frame.saveButton:Hide()
+  s.UI.LayoutButtons()
+  eq060(frame.shopButton:GetText(), "Comprar lo que falta", "con sitio, entero")
+end)
+
+-- Aviso del subidor (C7): lo que dejaría en _G el archivo del aviso.
+local function marker(lua)
+  local env = {}
+  local chunk = assert(loadstring(lua))
+  setfenv(chunk, env)
+  chunk()
+  _G.OroHermandadSubidor = env.OroHermandadSubidor
+end
+
+test("Aviso v2 del subidor (C7): cada caso de marker-v2.json y los 4 archivos de ejemplo, campo a campo", function()
+  local V06 = "test-lua/fixtures/v06/"
+  eq060(Stub.sha256File(V06 .. "marker-v2.json"), Stub.V06_SHA256["marker-v2.json"], "copia exacta")
+  local fx = json060.decode(readFile(V06 .. "marker-v2.json"))
+  local Relay = ns.Relay
+  local function plain(v) if v == json060.null then return nil end return v end
+  for _, c in ipairs(fx.read) do
+    marker(c.lua)
+    local detected, info = Relay.MarkerInfo()
+    eq060(detected, c.detected, c.note .. ": detectado")
+    local want = plain(c.info)
+    if want == nil then
+      eq060(info, nil, c.note .. ": sin estado")
+    else
+      for _, k in ipairs({"escrito", "version", "suben", "aportan", "quedan", "dia"}) do eq060(info[k], plain(want[k]), c.note .. ": " .. k) end
+      local envio = plain(want.envio)
+      if envio == nil then eq060(info.envio, nil, c.note .. ": envio")
+      else eq060(info.envio.t, envio.t, c.note); eq060(info.envio.estado, envio.estado, c.note) end
+    end
+  end
+  for _, w in ipairs(fx.write) do
+    eq060(Stub.sha256File(V06 .. w.file), Stub.V06_SHA256[w.file], w.file)
+    marker(readFile(V06 .. w.file))
+    local detected, info = Relay.MarkerInfo()
+    eq060(detected, true, w.file)
+    eq060(info.escrito, w.state.escrito, w.file); eq060(info.version, w.state.version, w.file)
+    eq060(info.aportan, w.state.aportan, w.file); eq060(info.quedan, w.state.quedan, w.file); eq060(info.dia, w.state.dia, w.file)
+    if w.state.envio then eq060(info.envio.estado, w.state.envio.estado, w.file) else eq060(info.envio, nil, w.file) end
+  end
+  _G.OroHermandadSubidor = nil
+end)
+
+test("PC del subidor: el pie y /oro subidor cuentan el último envío, los avisos y si el subidor no parece abierto", function()
+  local s = freshSession()
+  local t = now()
+  marker(string.format("OroHermandadSubidor = {formato = 1, datos = 2, escrito = %d, version = \"0.6.0\", "
+    .. "envio = {t = %d, estado = \"ok\"}, suben = 2, aportan = 7, quedan = 21, dia = %d}", t - 60, t - 300, s.Spec.DayIndex(t)))
+  -- Sin modo subidor: nada.
+  slash("subidor off")
+  render(s)
+  assert(not has(_G.OroHermandadFrame.footer.__text, "Subidor del PC"), _G.OroHermandadFrame.footer.__text)
+  slash("subidor auto")
+  s.Relay.Login()
+  render(s)
+  local base = "Subidor del PC (0.6.0): último envío aceptado a las " .. hhmm(t - 300) .. " · 7 personas aportan precios (dato de las "
+    .. hhmm(t - 60) .. ")."
+  assert(has(_G.OroHermandadFrame.footer.__text, base), _G.OroHermandadFrame.footer.__text)
+  Stub.printed = {}
+  slash("subidor")
+  assert(printed(base), "/oro subidor")
+  -- El último intento falló por la clave.
+  marker(string.format("OroHermandadSubidor = {formato = 1, datos = 2, escrito = %d, version = \"0.6.0\", "
+    .. "envio = {t = 0, estado = \"clave\"}}", t - 60))
+  render(s)
+  assert(has(_G.OroHermandadFrame.footer.__text, "El subidor del PC avisa: el panel ha rechazado la clave."), _G.OroHermandadFrame.footer.__text)
+  for estado, text in pairs({red = "sin conexión con el panel", cuota = "el panel pide esperar", rechazado = "el panel no aceptó los datos"}) do
+    marker(string.format("OroHermandadSubidor = {formato = 1, datos = 2, escrito = %d, envio = {t = 0, estado = %q}}", t - 60, estado))
+    eq060(s.Relay.UploaderLines().warn, "El subidor del PC avisa: " .. text .. ".")
+  end
+  -- Último aviso de hace más de 2 h: no parece abierto.
+  marker(string.format("OroHermandadSubidor = {formato = 1, datos = 2, escrito = %d, version = \"0.6.0\"}", t - 7300))
+  render(s)
+  local stale = "El subidor del PC no parece abierto (último aviso a las " .. hhmm(t - 7300) .. "): ábrelo para que suba."
+  assert(has(_G.OroHermandadFrame.footer.__text, stale), _G.OroHermandadFrame.footer.__text)
+  Stub.printed = {}
+  slash("subidor")
+  assert(printed(stale) and printed("Subidor del PC (0.6.0): aún ningún envío aceptado."), table.concat(Stub.printed, " | "))
+  slash("sondeo")
+  assert(has(_G.OroHermandadTextFrame.text, "Aviso del subidor: datos 2, campos válidos escrito,version"), _G.OroHermandadTextFrame.text)
+  _G.OroHermandadSubidor = nil
+end)
+
+test("«Guardar y subir» (R12): solo en el PC del subidor con algo nuevo; desactivado mientras se guarda; confirmación; un ReloadUI", function()
+  local s = freshSession()
+  local frame = _G.OroHermandadFrame
+  local reloads = Stub.reloads or 0
+  local function save() return s.Core.SaveButton() end
+  -- /oro guardar en un PC que no sube.
+  slash("subidor off")
+  Stub.printed = {}
+  slash("guardar")
+  assert(printed("Este PC no sube precios: no hace falta (tus precios llegan al panel por la hermandad)."), "no sube")
+  eq060(save(), nil, "sin modo subidor: no se ve")
+  slash("subidor on")
+  eq060(save(), nil, "sin nada nuevo desde que entraste: no se ve")
+  render(s)
+  assert(not frame.saveButton.__shown, "oculto")
+  -- Un escaneo tuyo: mientras History lo escribe, desactivado; después, activo.
+  local agg = {[2772] = {lo = 100, qty = 10, qty5 = 5}, [2770] = {lo = 30, qty = 40, qty5 = 40}}
+  assert(s.History.RecordAggregate("full", agg, true, {t = now()}))
+  s.History.Flush() -- (escrito ya, para que el botón aparezca)
+  assert(s.History.RecordAggregate("full", {[2772] = {lo = 101, qty = 10, qty5 = 5}}, true, {t = now() + 2000}))
+  local busy = save()
+  assert(busy and busy.enabled == false and busy.tooltip == "Espera unos segundos: aún se están guardando los precios.", "History escribiendo")
+  Stub.runUntil(function() return s.History.Pending() == 0 end, 30)
+  assert(save().enabled, "activo")
+  render(s)
+  assert(frame.saveButton.__shown and frame.saveButton.enabled, "a la vista")
+  -- Relay aplicando un escaneo de un compañero, o el escáner leyendo: desactivado.
+  local idle = s.Relay.Idle
+  s.Relay.Idle = function() return false end
+  eq060(save().enabled, false, "Relay aplicando")
+  s.Relay.Idle = idle
+  local state = s.Scanner.State
+  s.Scanner.State = function() return {state = "reading"} end
+  eq060(save().enabled, false, "el escáner leyendo")
+  s.Scanner.State = state
+  -- 2 envíos de hoy en el panel: desactivado y lo dice; si el dato es de ayer, no cuenta.
+  local today = s.Spec.DayIndex(now())
+  marker(string.format("OroHermandadSubidor = {formato = 1, datos = 2, escrito = %d, quedan = 2, dia = %d}", now(), today))
+  eq060(save().enabled, false)
+  eq060(save().tooltip, "Hoy solo le quedan 2 envíos a tu clave en el panel: los precios se subirán al salir del juego.")
+  -- Sin envíos hoy, el de al salir también lo rechaza el panel: llegan mañana.
+  marker(string.format("OroHermandadSubidor = {formato = 1, datos = 2, escrito = %d, quedan = 0, dia = %d}", now(), today))
+  eq060(save().enabled, false)
+  eq060(save().tooltip, "Hoy ya no le quedan envíos a tu clave en el panel: los precios se subirán mañana.")
+  marker(string.format("OroHermandadSubidor = {formato = 1, datos = 2, escrito = %d, quedan = 2, dia = %d}", now(), today - 1))
+  eq060(save().enabled, true, "dato de ayer")
+  -- Clic: confirmación dentro de la ventana (sin StaticPopupDialogs); «Ahora no» la quita.
+  render(s)
+  frame.saveButton.__scripts.OnClick(frame.saveButton)
+  local panel = s.UI.Panel()
+  assert(panel and panel.text == "WoW solo guarda los precios en el disco al recargar la interfaz o al salir. ¿Recargar ahora para "
+    .. "que el subidor, si está abierto, los envíe? (Si tienes la subasta abierta, se cerrará.)", panel and panel.text)
+  eq060(panel.buttons[1].label, "Recargar"); eq060(panel.buttons[2].label, "Ahora no")
+  frame.panel.buttons[2].__scripts.OnClick(frame.panel.buttons[2])
+  eq060(s.UI.Panel(), nil, "«Ahora no»")
+  eq060(Stub.reloads or 0, reloads, "nada recargado")
+  -- En combate, no; fuera de combate, un ReloadUI y la hora apuntada.
+  frame.saveButton.__scripts.OnClick(frame.saveButton)
+  Stub.combat = true
+  frame.panel.buttons[1].__scripts.OnClick(frame.panel.buttons[1])
+  assert(has(s.UI.Panel().text, "Espera a salir de combate."), s.UI.Panel().text)
+  eq060(Stub.reloads or 0, reloads, "en combate no")
+  Stub.combat = false
+  frame.panel.buttons[1].__scripts.OnClick(frame.panel.buttons[1])
+  eq060(Stub.reloads, reloads + 1, "un ReloadUI")
+  eq060(OroHermandadDB.savedAt, now(), "hora apuntada")
+  -- La recarga: al volver, el pie lo dice (una vez) y savedAt se borra.
+  local savedAt = OroHermandadDB.savedAt
+  s = Stub.reload("addon/OroHermandad")
+  Stub.fire("PLAYER_LOGIN")
+  Stub.runUntil(nil, 30)
+  eq060(OroHermandadDB.savedAt, nil, "borrado")
+  render(s)
+  assert(has(_G.OroHermandadFrame.footer.__text, "Guardado a las " .. hhmm(savedAt) .. ": si el subidor está abierto, lo envía en "
+    .. "unos segundos (la confirmación sale en su ventana)."), _G.OroHermandadFrame.footer.__text)
+  -- /oro guardar: mismas comprobaciones y textos.
+  assert(s.History.RecordAggregate("full", {[2772] = {lo = 102, qty = 10, qty5 = 5}}, true, {t = now()}))
+  Stub.printed = {}
+  slash("guardar")
+  assert(printed("Espera unos segundos: aún se están guardando los precios."), "ocupado")
+  Stub.runUntil(function() return s.History.Pending() == 0 end, 30)
+  local before = Stub.reloads
+  slash("guardar")
+  eq060(Stub.reloads, before + 1, "/oro guardar recarga")
+  _G.OroHermandadSubidor = nil
+  for _, line in ipairs(Stub.printed) do assert(not has(line, "error"), line) end
+end)
+
+test("/oro escanear: sin la subasta abierta lo dice; auto, proponer y off lo confirman; lo demás, el uso", function()
+  local s = freshSession()
+  Stub.printed = {}
+  slash("escanear")
+  assert(printed("abre la subasta y vuelve a escribirlo."), "cerrada")
+  slash("escanear lista")
+  assert(printed("abre la subasta y vuelve a escribirlo."), "la lista, cerrada")
+  slash("escanear parar")
+  assert(printed("no hay ningún escaneo en marcha."), "parar")
+  for word, text in pairs({auto = "escanear la subasta: automático cada vez que la abres.",
+                           proponer = "escanear la subasta: te lo propone el addon.",
+                           off = "escanear la subasta: solo con el botón o /oro escanear."}) do
+    slash("escanear " .. word)
+    assert(printed(text), word)
+  end
+  slash("escanear patata")
+  assert(printed("uso: /oro escanear [lista|parar|auto|proponer|off]"), "uso")
+  slash("escanear proponer")
+  -- Con la subasta abierta y el turno libre: lo pide; otra vez enseguida, la hora del siguiente.
+  houseRows()
+  Stub.advance(1000)
+  Stub.openAH()
+  Stub.runUntil(nil, 3)
+  Stub.printed = {}
+  slash("escanear ahora")
+  Stub.runUntil(function() local st = s.Scanner.State().state; return st == "done" or st == "done-refresh" end, 60)
+  slash("escanear")
+  assert(printed("la subasta deja un escaneo completo cada 15 min por cuenta: el siguiente, a las "), table.concat(Stub.printed, " | "))
+  slash("sondeo")
+  local probe = _G.OroHermandadTextFrame.text
+  for _, want in ipairs({"Escáner: modo proponer", "Casa: facción", "Peticiones: tuya", "Cuándo vender: ", "Capas: ", "Aviso del subidor: "}) do
+    assert(has(probe, want), want .. "\n" .. probe)
+  end
+  Stub.closeAH()
+end)
+
+test("Opciones: sección «Escáner de la subasta» (desplegable y casilla) y la de precios compartidos habla de las ventas", function()
+  local registered, headers, saved = {}, {}, _G.Settings
+  local savedHeader = _G.CreateSettingsListSectionHeaderInitializer
+  _G.CreateSettingsListSectionHeaderInitializer = function(title, text) headers[#headers + 1] = {title = title, text = text}; return {} end
+  _G.Settings = {
+    VarType = {Boolean = "boolean", String = "string", Number = "number"},
+    RegisterVerticalLayoutCategory = function(name) return {name = name, GetID = function() return 42 end}, {AddInitializer = function() end} end,
+    RegisterAddOnSetting = function(_, variable, key, tbl, _, label, default)
+      local st = {key = key, tbl = tbl, label = label, default = default, SetValueChangedCallback = function(self, fn) self.onChange = fn end}
+      registered[variable] = st
+      return st
+    end,
+    RegisterProxySetting = function(_, variable, _, label, default, get, set)
+      local st = {label = label, default = default, get = get, set = set}
+      registered[variable] = st
+      return st
+    end,
+    CreateCheckbox = function(_, st, tooltip) st.kind, st.tooltip = "checkbox", tooltip end,
+    CreateControlTextContainer = function()
+      local data = {}
+      return {Add = function(_, value, label) data[#data + 1] = {value = value, label = label} end, GetData = function() return data end}
+    end,
+    CreateDropdown = function(_, st, options, tooltip) st.kind, st.options, st.tooltip = "dropdown", options(), tooltip end,
+    CreateSliderOptions = function(minValue, maxValue, rate) return {minValue = minValue, maxValue = maxValue, rate = rate} end,
+    CreateSlider = function(_, st, options) st.kind, st.options = "slider", options end,
+    RegisterAddOnCategory = function() end,
+  }
+  local ok, err = pcall(function()
+    local E = {Engine = ns.Engine}
+    assert(loadfile("addon/OroHermandad/Extras.lua"))("OroHermandad", E)
+    local db = {mode = "lazy", spec = {on = true}, minimap = {}}
+    local mode, sales = "propose", true
+    E.Extras.Init(db, function() end, function() end)
+    E.Extras.RegisterSettings({SetMode = function() end, Refresh = function() end, ScannerLoaded = function() return true end,
+      ScannerMode = function() return mode end, SetScannerMode = function(v) mode = v end,
+      ScannerSales = function() return sales end, SetScannerSales = function(v) sales = v end})
+    local scan = registered.OroHermandad_ScanMode
+    assert(scan and scan.kind == "dropdown" and scan.label == "Escanear la subasta", "desplegable")
+    local labels = {}
+    for i, o in ipairs(scan.options) do labels[i] = o.value .. "=" .. o.label end
+    eq060(table.concat(labels, ","), "propose=Proponerlo al abrir la subasta,auto=Escanear cada vez que abro la subasta,off=Solo con el botón")
+    eq060(scan.tooltip, "Un escaneo completo tarda unos segundos y no se nota en el juego. La subasta deja uno cada 15 minutos por "
+      .. "cuenta; si Auctionator ya escanea la subasta entera al abrirla, se usa el suyo.")
+    scan.set("auto"); eq060(mode, "auto"); eq060(scan.get(), "auto")
+    local salesSetting = registered.OroHermandad_ScanSales
+    assert(salesSetting.kind == "checkbox" and salesSetting.label == "Apuntar mis ventas para «Cuándo vender»", "casilla")
+    eq060(salesSetting.tooltip, "Solo en este PC: tus ventas no se comparten ni se suben.")
+    salesSetting.set(false); eq060(sales, false)
+    local titles = {}
+    for _, h in ipairs(headers) do titles[#titles + 1] = h.title end
+    eq060(table.concat(titles, ","), "Escáner de la subasta,Precios compartidos con la hermandad")
+    assert(has(headers[2].text, "Los escaneos llevan también una estimación de cuántas unidades se vendieron entre dos escaneos (sin nombres)."),
+      headers[2].text)
+  end)
+  _G.Settings, _G.CreateSettingsListSectionHeaderInitializer = saved, savedHeader
+  if not ok then error(err, 0) end
+end)
+
+test("Privacidad: ni vendedores, ni pujadores, ni el texto de los avisos de venta en nada guardado", function()
+  local s = freshSession()
+  houseRows()
+  Stub.ah.rows[3] = Stub.row(2772, 5, 99, {band = 3, owner = "Javi"})
+  Stub.ah.rows[4] = Stub.row(2770, 3, 29, {band = 3, shown = "Vendedor", bidder = "Pujador"})
+  Stub.advance(1000)
+  Stub.openAH()
+  Stub.runUntil(nil, 3)
+  assert(s.Scanner.Request(true))
+  Stub.runUntil(function() local st = s.Scanner.State().state; return st == "done" or st == "done-refresh" end, 60)
+  Stub.fire("AUCTION_HOUSE_SHOW_FORMATTED_NOTIFICATION", 4, "Comprador Secreto ha comprado Hierro", 12345)
+  Stub.closeAH()
+  Stub.fire("PLAYER_LOGOUT")
+  local function dumpAll(v, seen)
+    seen = seen or {}
+    if type(v) ~= "table" then return tostring(v) end
+    if seen[v] then return "" end
+    seen[v] = true
+    local out = {}
+    for k, x in pairs(v) do out[#out + 1] = dumpAll(k, seen) .. "=" .. dumpAll(x, seen) end
+    return table.concat(out, ",")
+  end
+  local db, cdb = OroHermandadDB, OroHermandadCharDB
+  local text = dumpAll({db.scanPrices, db.sales, db.timing, db.scanner, cdb.scanBase, cdb.auctions, cdb.scanner, OroHermandadHist})
+  for _, name in ipairs({"Javi", "Vendedor", "Pujador", "Comprador Secreto"}) do assert(not has(text, name), name .. " guardado") end
+  assert(db.sales["Forever-Alliance"] or true)
 end)
 
 test("Ningún error durante toda la sesión", function()

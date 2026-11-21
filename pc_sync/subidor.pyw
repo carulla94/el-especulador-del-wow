@@ -88,7 +88,7 @@ class Window:
         grid = ttk.Frame(frame)
         grid.pack(fill="x", pady=(8, 4))
         grid.columnconfigure(1, weight=1)
-        self.rows, self.wide = {}, []
+        self.rows, self.wide, self.change_buttons = {}, [], []
         for row, label in enumerate(c.ROWS):
             ttk.Label(grid, text=label, width=12).grid(row=row, column=0, sticky="nw")
             value = ttk.Label(grid, wraplength=360, justify="left")
@@ -96,8 +96,10 @@ class Window:
             if label in ("Panel", "Carpeta WoW"):
                 step = "url" if label == "Panel" else "folder"
                 value.grid(row=row, column=1, sticky="we")
-                ttk.Button(grid, text=c.CHANGE, style="Fila.TButton",
-                           command=lambda s=step: self.app.change((s,))).grid(row=row, column=2, sticky="ne")
+                button = ttk.Button(grid, text=c.CHANGE, style="Fila.TButton",
+                                    command=lambda s=step: self.app.change((s,)))
+                button.grid(row=row, column=2, sticky="ne")
+                self.change_buttons.append(button)
             else:
                 value.grid(row=row, column=1, columnspan=2, sticky="we")
                 self.wide.append(value)
@@ -112,11 +114,14 @@ class Window:
         self.more = ttk.Menubutton(buttons, text=c.MORE)
         menu = tk.Menu(self.more, tearoff=False)
         menu.add_command(label=c.CHANGE_KEY, command=lambda: self.app.change(("key",)))
+        self.config_entries = [menu.index("end")]
         if self.app.windows:
             menu.add_command(label=c.SHORTCUT, command=self.app.create_shortcut)
         menu.add_command(label=c.REMOVE_MARKER, command=self.app.remove_marker)
         menu.add_command(label=c.RESET, command=self.app.reset)
-        self.more["menu"] = menu
+        self.config_entries.append(menu.index("end"))
+        self.menu, self.more["menu"] = menu, menu
+        self.blocked = False
         self.more.pack(side="left", padx=4)
         self.autostart = tk.BooleanVar(value=False)
         if self.app.windows:
@@ -144,6 +149,13 @@ class Window:
         self.main.pack(fill="both", expand=True)
 
     def refresh(self, controller):
+        blocked = controller.state == "bloqueado"
+        if blocked != self.blocked:              # another uploader owns config.json: nothing here may change it
+            self.blocked = blocked
+            for button in self.change_buttons:
+                button.state(["disabled"] if blocked else ["!disabled"])
+            for index in self.config_entries:
+                self.menu.entryconfigure(index, state="disabled" if blocked else "normal")
         light, text = controller.status_line()
         self.light.itemconfigure(self.dot, fill=c.LIGHTS[light])
         self.status["text"] = text
@@ -327,6 +339,7 @@ class App:
         self.controller = c.Controller()
         self.session = None
         self.key = None
+        self.locked = False                    # True once this window holds subidor.lock (take_lock «ok»)
         self.polls = 0
         self.config = {}
         self.stack = contextlib.ExitStack()
@@ -360,13 +373,35 @@ class App:
         if outcome == "bloqueado":
             self.controller.blocked(text)
         else:
+            self.locked = True
             if text:
                 h.say(text)
             self.load()
         self.root.after(c.POLL_MS, self.poll)
         return True
 
+    def need_lock(self):
+        """True while this window holds subidor.lock. Without it (state «bloqueado») nothing may save config.json or
+        start a Session: another uploader owns them. It tries the lock again; once taken, config.json is loaded from
+        disk (the other uploader may have changed it) instead of going on with what was asked; if not, it stays
+        blocked. Returns False in both cases."""
+        if self.locked:
+            return True
+        outcome, text = c.take_lock(self.home, self.stack, self.window.ask,
+                                    task_installed=lambda: h.startup_task_installed(hidden=True))
+        self.window.show_main()
+        if outcome == "ok":
+            self.locked = True
+            if text:
+                h.say(text)
+            self.load()
+        else:
+            self.controller.blocked(text)
+        return False
+
     def load(self):
+        if not self.need_lock():
+            return
         self.config = h.load_config(self.home)
         missing = c.needed_steps(self.config, self.protector)
         if missing:
@@ -383,6 +418,8 @@ class App:
         self.begin()
 
     def begin(self, key=None):
+        if not self.need_lock():
+            return
         setup = c.Setup(self.config, self.protector, detect=lambda: [])
         key = key or setup.key or self.key
         if not (setup.url and setup.folder and key):
@@ -399,6 +436,8 @@ class App:
 
     def finish_setup(self, setup, shortcut=False):
         def apply():
+            if not self.need_lock():
+                return
             try:
                 _, _, key = setup.finish()
                 self.config["acceso_ofrecido"] = True         # the first run already offered the shortcut
@@ -435,14 +474,7 @@ class App:
         if state == "clave":
             self.change(("key",))
         elif state == "bloqueado":
-            outcome, text = c.take_lock(self.home, self.stack, self.window.ask,
-                                        task_installed=lambda: h.startup_task_installed(hidden=True))
-            if outcome == "ok":
-                if text:
-                    h.say(text)
-                self.load()
-            else:
-                self.controller.blocked(text)
+            self.need_lock()
         elif state == "detenido":
             self.after_session(self.begin)
 
@@ -464,6 +496,9 @@ class App:
             webbrowser.open(path.as_uri())
 
     def change(self, steps):
+        if not self.need_lock():
+            return
+
         def show():
             self.controller.configuring()
             self.window.show_wizard(c.Setup(self.config, self.protector, steps=steps), self.finish_setup,
@@ -499,7 +534,7 @@ class App:
             self.controller.marker = "removed"
 
     def reset(self):
-        if not self.window.ask(c.RESET_CONFIRM):
+        if not self.need_lock() or not self.window.ask(c.RESET_CONFIRM):
             return
 
         def apply():

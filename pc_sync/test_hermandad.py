@@ -8,6 +8,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -157,7 +159,9 @@ class Quiet(unittest.TestCase):
         self.addCleanup(redirect.__exit__, None, None, None)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        self.tmp = Path(folder.name)
+        # resolve(): en Windows la carpeta temporal puede venir con el nombre corto 8.3 (RUNNER~1) y el
+        # subidor guarda rutas resueltas (nombre largo); así las comparaciones de las pruebas coinciden.
+        self.tmp = Path(folder.name).resolve()
 
 
 # -----------------------------------------------------------------------------------------------------------
@@ -2537,7 +2541,21 @@ class LockHolderTests(Quiet):
         (home / h.LOCK_HOLDER).write_bytes(b"\xff\xfe")
         self.assertIsNone(h.lock_holder(home))
         (home / h.LOCK_HOLDER).write_text('{"pid": 7, "modo": "segundo-plano", "desde": 3, "x": 1}', encoding="utf-8")
-        self.assertEqual(h.lock_holder(home), {"pid": 7, "modo": "segundo-plano", "desde": 3})
+        self.assertEqual(h.lock_holder(home, alive=lambda pid, since: True), {"pid": 7, "modo": "segundo-plano", "desde": 3})
+        self.assertIsNone(h.lock_holder(home, alive=lambda pid, since: False), "a holder that is not running")
+
+    def test_a_holder_file_left_by_a_process_that_ended_is_ignored(self):
+        ended = subprocess.Popen([sys.executable, "-c", "pass"])
+        ended.wait()
+        since = int(time.time())
+        self.assertTrue(h.process_alive(os.getpid(), since), "this process")
+        self.assertFalse(h.process_alive(ended.pid, since), "a process that ended")
+        (self.tmp / h.LOCK_HOLDER).write_text(json.dumps({"pid": ended.pid, "modo": "ventana", "desde": since}),
+                                              encoding="utf-8")
+        self.assertIsNone(h.lock_holder(self.tmp))
+        (self.tmp / h.LOCK_HOLDER).write_text(json.dumps({"pid": os.getpid(), "modo": "ventana", "desde": since}),
+                                              encoding="utf-8")
+        self.assertEqual(h.lock_holder(self.tmp)["modo"], "ventana")
 
     def test_the_cli_and_the_startup_task_write_their_mode(self):
         modes = []

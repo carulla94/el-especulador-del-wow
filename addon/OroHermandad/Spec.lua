@@ -139,8 +139,11 @@ local function summerOf(y)
   return cached[1], cached[2]
 end
 
--- Hora unix -> wd (lunes 0 ... domingo 6), hora (0..23), franja de 4 horas (0 = 00-04 h ... 5 = 20-24 h) y celda
--- wd*6 + franja, en hora de España. nil si t no es un entero.
+-- Hora unix -> wd (lunes 0 ... domingo 6), hora (0..23), franja de 4 horas (0 = 00-04 h ... 5 = 20-24 h), celda
+-- wd*6 + franja y la fecha, en hora de España. La fecha va numerada como Spec.DayIndex (en invierno es la misma; en
+-- verano, de 00:00 a 01:00 es ya el día siguiente): así una franja de 7 celdas reparte los días sin contar uno dos veces.
+-- nil si t no es un entero.
+local LOCAL_DAY0 = (Spec.DAY0 + 3600) / 86400 -- 18262: el 1-1-2020 en días desde el 1-1-1970
 function Spec.MadridSlot(t)
   if not isInt(t, 0, Spec.TIME_MAX) then return nil end
   local from, to = summerOf(yearOfDays(floor(t / 86400)))
@@ -149,7 +152,7 @@ function Spec.MadridSlot(t)
   local hour = floor((localT % 86400) / 3600)
   local wd = (days + 3) % 7
   local block = floor(hour / 4)
-  return wd, hour, block, wd * 6 + block
+  return wd, hour, block, wd * 6 + block, days - LOCAL_DAY0
 end
 
 ---------------------------------------------------------------------------
