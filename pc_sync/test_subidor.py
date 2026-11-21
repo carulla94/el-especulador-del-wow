@@ -721,14 +721,46 @@ class StartWithWindowsTests(Quiet):
                 h.install_autostart(h.RunKey(api), command(folder))
             self.assertIn("demasiado larga para el inicio con Windows", str(raised.exception))
             self.assertFalse(h.autostart_installed(h.RunKey(api)), "the checkbox stays off")
-        # A value of another folder (or this one, written before) with this long folder: removed and said.
-        for current in (command("D:\\viejo"), command(long)):
-            api = FakeWinreg({"OroHermandadSubidor": (current, 1)})
-            self.assertTrue(h.repair_autostart(h.RunKey(api), command(long)))
-            self.assertFalse(h.autostart_installed(h.RunKey(api)))
-            self.assertIn("He quitado el inicio con Windows: la ruta de la carpeta del subidor es demasiado larga",
-                          self.lines[-1])
+        # With this long folder, a value that would open nothing or an old copy is removed and said: this folder's
+        # (written before), another long one, a folder that is gone, an older copy, one not written by the window.
+        everywhere = lambda path: True
+        for current, exists, older in ((command(long), everywhere, ()), (command(long + "2"), everywhere, ()),
+                                       (command("D:\\viejo"), lambda path: False, ()),
+                                       (command("D:\\viejo"), everywhere, ("d:\\VIEJO\\app\\subidor.pyw",)),
+                                       ("D:\\otro.exe", everywhere, ())):
+            with self.subTest(current=current, older=older):
+                api = FakeWinreg({"OroHermandadSubidor": (current, 1)})
+                self.assertTrue(h.repair_autostart(h.RunKey(api), command(long), older=older, exists=exists))
+                self.assertFalse(h.autostart_installed(h.RunKey(api)))
+                self.assertIn("He quitado el inicio con Windows: la ruta de la carpeta del subidor es demasiado larga",
+                              self.lines[-1])
         self.assertFalse(h.repair_autostart(h.RunKey(FakeWinreg()), command(long)), "never turned on by itself")
+
+    def test_a_long_folder_keeps_the_start_with_windows_of_another_copy_that_works(self):
+        """R3: the long folder was copied to C:\\OroHermandad as the window said, and the copy there starts with
+        Windows. Opening the long folder again removed that value, which Windows runs, and said it would not."""
+        def command(folder):
+            return h.autostart_command(folder + "\\app", exists={folder + "\\runtime\\pythonw.exe"}.__contains__)
+        long = "D:\\Users\\maria.fernandez\\OneDrive - Universidad Complutense de Madrid\\Documentos\\Subidor_Windows" \
+               "\\OroHermandad Subidor"
+        short = "C:\\OroHermandad"
+        self.assertEqual(h.autostart_script(command(short)), short + "\\app\\subidor.pyw")
+        self.assertEqual((h.copy_folder(short + "\\app\\subidor.pyw"), h.copy_folder("C:\\src\\pc_sync\\subidor.pyw")),
+                         (short, "C:\\src\\pc_sync"))
+        self.assertEqual([h.autostart_script(value) for value in (None, "", "C:\\otro.exe", 5)], [None] * 4)
+        seen = []
+        api = FakeWinreg({"OroHermandadSubidor": (command(short), 1)})
+        self.assertFalse(h.repair_autostart(h.RunKey(api), command(long), older=("C:\\viejo\\app\\subidor.pyw",),
+                                            exists=lambda path: seen.append(path) or True))
+        self.assertEqual(api.values["OroHermandadSubidor"], (command(short), 1), "kept: Windows opens it")
+        self.assertEqual(seen, [short + "\\app\\subidor.pyw"])
+        self.assertEqual(self.lines[-1].split("] ", 1)[-1],
+                         "La ruta de la carpeta del subidor es demasiado larga para el inicio con Windows: al iniciar "
+                         "Windows se sigue abriendo el subidor de C:\\OroHermandad.")
+        self.assertNotIn("He quitado", "".join(self.lines))
+        self.assertTrue(h.repair_autostart(h.RunKey(api), command(short + "2"), exists=lambda path: True),
+                        "a short folder still takes it")
+        self.assertEqual(api.values["OroHermandadSubidor"], (command(short + "2"), 1))
 
     def test_registry_errors_become_spanish_messages(self):
         class Broken(FakeWinreg):
@@ -831,6 +863,50 @@ class StartWithWindowsTests(Quiet):
             self.assertEqual(c.claim_copy({"subidor": broken}, old_script, old, "0.6.0", both), (True, False, ""), broken)
         odd = {"subidor": {"programa": new_script, "version": "0.7.0-beta"}}
         self.assertEqual(c.claim_copy(odd, old_script, old, "0.6.0", both), (True, True, ""), "no dotted version: no claim")
+
+    def test_a_same_version_copy_at_a_long_path_leaves_the_one_that_starts_with_windows(self):
+        """R3: both copies of the same version exist (the long folder was copied to a shorter path, as the window
+        said) and the short one starts with Windows. The long one, opened again, took the desktop shortcut and the
+        record of the newest copy; now it takes nothing while Windows opens the short one."""
+        def command(folder):
+            return h.autostart_command(folder + "\\app", exists={folder + "\\runtime\\pythonw.exe"}.__contains__)
+        long = "D:\\Users\\maria.fernandez\\OneDrive - Universidad Complutense de Madrid\\Documentos\\Subidor_Windows" \
+               "\\OroHermandad Subidor"
+        short = "C:\\OroHermandad"
+        long_script, short_script = long + "\\app\\subidor.pyw", short + "\\app\\subidor.pyw"
+        both, only_long = {long_script, short_script}.__contains__, {long_script}.__contains__
+        self.assertFalse(h.run_command_fits(command(long)))
+        recorded = {"programa": short_script, "carpeta": short, "version": "0.6.0"}
+        config = {"subidor": dict(recorded)}
+        self.assertEqual(c.claim_copy(config, long_script, long, "0.6.0", both, autostart=command(short),
+                                      command=command(long)),
+                         (False, False, "La ruta de esta carpeta es demasiado larga para el inicio con Windows, "
+                                        "y en C:\\OroHermandad está esta misma versión del subidor, que es la que se "
+                                        "abre al iniciar Windows. El inicio con Windows y el acceso directo del "
+                                        "escritorio no se cambian a esta carpeta."))
+        self.assertEqual(config, {"subidor": recorded}, "nothing changes")
+        self.assertEqual(c.claim_copy(config, long_script, long, "0.6.0", both, autostart=command(short.lower()),
+                                      command=command(long))[0], False, "Windows paths ignore case")
+        # Otherwise the long copy takes them as before: no start with Windows, or one of another folder, the short
+        # copy gone, a newer long copy (repair_autostart removes the old copy's value), or both short.
+        for autostart, exists, version in ((None, both, "0.6.0"), (command("E:\\otra"), both, "0.6.0"),
+                                           (command(short), only_long, "0.6.0"), (command(short), both, "0.6.1")):
+            with self.subTest(autostart=autostart, version=version):
+                config = {"subidor": dict(recorded)}
+                self.assertEqual(c.claim_copy(config, long_script, long, version, exists, autostart=autostart,
+                                              command=command(long)), (True, True, ""))
+                self.assertEqual(config["subidor"]["programa"], long_script)
+                self.assertEqual(c.older_copy(recorded, version), (short_script,) if version == "0.6.1" else ())
+        config = {"subidor": dict(recorded)}
+        self.assertEqual(c.claim_copy(config, "C:\\Otra\\app\\subidor.pyw", "C:\\Otra", "0.6.0", lambda path: True,
+                                      autostart=command(short), command=command("C:\\Otra")), (True, True, ""))
+        config = {"subidor": {"programa": long_script, "carpeta": long, "version": "0.6.0"}}
+        self.assertEqual(c.claim_copy(config, short_script, short, "0.6.0", both, autostart=None,
+                                      command=command(short)), (True, True, ""), "the short copy always takes them")
+        for broken in (None, "x", {"programa": 5, "version": "0.5.0"}, {"programa": short_script, "version": "0.6.0"},
+                       {"programa": short_script, "version": "0.7.0"}, {"programa": short_script}):
+            self.assertEqual(c.older_copy(broken, "0.6.0"), (), broken)
+        self.assertEqual(c.older_copy({"programa": short_script, "version": "0.5.9"}, "0.6.0"), (short_script,))
 
     def test_the_hidden_task_is_found_and_removed_without_flashing_a_console(self):
         run, calls = self.runner()
@@ -1320,6 +1396,49 @@ class AppWithoutTkTests(Quiet):
         app = self.start(old, "0.6.0")
         self.assertEqual((self.opens(), self.desktop), (old, old))
         self.assertEqual(self.said(app)[:2], [h.AUTOSTART_MOVED, c.SHORTCUT_MOVED])
+
+    def test_a_copy_at_a_long_path_leaves_the_start_with_windows_and_the_shortcut_of_the_same_version(self):
+        """R3: the folder's path was too long for the start with Windows, so the user copied it to a shorter one, as the
+        window said, and ticked the box there. Opening the long folder again removed that working value, said that
+        Windows would not open it and moved the desktop shortcut to the long folder."""
+        long = self.folder("Subidor en una ruta muy larga " + "x" * max(10, 110 - len(str(self.tmp))))
+        short = self.folder("corta")
+        self.copy = long
+        self.assertFalse(h.run_command_fits(h.autostart_command()), str(long))
+        self.desktop = long                                          # the first run made its shortcut
+        app = self.start(long, "0.6.0")
+        with self.assertRaises(h.SyncError):                         # ticking the box there: refused
+            h.install_autostart()
+        app = self.start(short, "0.6.0")                             # the copy at the short path
+        self.assertEqual(self.said(app), [c.SHORTCUT_MOVED])
+        h.install_autostart()                                        # the box ticked there
+        working = self.api.values[h.RUN_VALUE]
+        self.assertEqual(h.autostart_script(working[0]), str(short / "app" / "subidor.pyw"))
+        for _ in range(2):                                           # the long folder opened again, from its .cmd
+            app = self.start(long, "0.6.0")
+            self.assertEqual(self.said(app), [c.LONG_COPY.format(carpeta=str(short))])
+            self.assertEqual((self.api.values.get(h.RUN_VALUE), self.desktop), (working, short))
+            self.assertEqual(h.load_config(self.home)["subidor"]["programa"], str(short / "app" / "subidor.pyw"))
+            self.assertTrue(app.window.autostart.get())
+        app = self.start(short, "0.6.0")
+        self.assertEqual((self.said(app), self.api.values.get(h.RUN_VALUE), self.desktop), ([], working, short))
+        shutil.rmtree(short)                                         # the short copy deleted: the long one is the only
+        app = self.start(long, "0.6.0")
+        self.assertEqual((h.autostart_installed(), self.desktop), (False, long))
+        self.assertEqual(self.said(app)[:2], [h.AUTOSTART_TOO_LONG_REMOVED, c.SHORTCUT_MOVED])
+
+    def test_a_newer_copy_at_a_long_path_removes_the_start_with_windows_of_the_old_one(self):
+        """The old version at a short path starts with Windows and the new one was extracted at a long path: the Run
+        value of the old copy is removed and said (it would keep opening the old version), as before R3."""
+        long = self.folder("Subidor en una ruta muy larga " + "x" * max(10, 110 - len(str(self.tmp))))
+        short = self.folder("corta")
+        self.copy = short
+        h.install_autostart()
+        self.start(short, "0.6.0")
+        app = self.start(long, "0.6.1")
+        self.assertFalse(h.autostart_installed())
+        self.assertEqual(self.said(app)[0], h.AUTOSTART_TOO_LONG_REMOVED)
+        self.assertEqual(h.load_config(self.home)["subidor"]["version"], "0.6.1")
 
     def test_after_removing_the_old_hidden_start_the_window_offers_to_start_with_windows(self):
         """R2-12: that user had chosen to start the uploader with Windows; after «Sí» to removing the hidden start,

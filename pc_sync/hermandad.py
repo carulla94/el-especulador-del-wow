@@ -1203,8 +1203,9 @@ MARKER_DEFAULT_INTERFACE = "16001"
 MARKER_INTERFACE = re.compile(r"[0-9]{5,6}(?: *, *[0-9]{5,6})*")
 _TOC_INTERFACE = re.compile(r"##[ \t]*Interface[ \t]*:(.*)")
 MARKER_READ_BYTES = 64 * 1024
-MARKER_POLLS = 120           # the watch loop checks the marker again every 120 polls of 15 s (half an hour): with
-                             # MARKER_REFRESH, escrito stays under 1.5 h old plus the time the cycles take
+MARKER_POLLS = 120           # the watch loop checks the marker again every 120 polls of 15 s (half an hour), counted
+                             # by the clock, also during a long wait after an error: with MARKER_REFRESH, escrito
+                             # stays under 1.5 h old plus a poll and the time a cycle takes
 MARKER_LINES = {
     "created": f"He creado el aviso {MARKER_SHOWN} para que Oro de Hermandad 0.4 sepa que este PC sube los precios de "
                "la hermandad y pida a tus compañeros los que te perdiste. Si el juego está abierto, sal del todo y "
@@ -2000,47 +2001,66 @@ def say_event(event):
         say(event.notice)
 
 
-def run(uploader, once=False, sleep=time.sleep, marker=None, *, stop=None, wake=None, on_result=None, on_error=None):
+def run(uploader, once=False, sleep=time.sleep, marker=None, *, stop=None, wake=None, on_result=None, on_error=None,
+        clock=time.monotonic):
     """Watch loop: checks every 15 s; on errors waits 60 s doubling up to 5 min (or what the panel asks).
-    marker: called at the start and then every MARKER_POLLS polls (ensure_marker of the WoW folder); its line, if
-    any, is said (a problem only once per run). With on_result or on_error (callers that keep an UploaderStatus: the
-    marker v2 carries it) it is called after the first cycle instead of before it, right after a cycle or an error
-    that can change that status, and again on the next poll while it answers «later». Returns 0 when stopped
-    normally, 1 after an error in --once and 2 if the key was refused.
+    marker: called at the start and then every MARKER_POLLS * POLL_SECONDS seconds of clock (ensure_marker of the WoW
+    folder), also in the middle of a wait longer than a poll (a 429 can ask for an hour); its line, if any, is said (a
+    problem only once per run). With on_result or on_error (callers that keep an UploaderStatus: the marker v2 carries
+    it) it is called after the first cycle instead of before it, right after a cycle or an error that can change that
+    status, and again on the next poll while it answers «later». Returns 0 when stopped normally, 1 after an error in
+    --once and 2 if the key was refused.
     The window runs it in a thread: stop and wake are threading.Events. Every wait then lasts up to its time and ends
     early when stop is set, or when wake is set (wake is cleared then), except the wait the panel asked for (HTTP 429);
     whoever sets stop also sets wake. Stopped, it returns 0. on_result(result) is called after each cycle,
     on_error(error, delay) before each wait after an error (delay None when the key was refused: the loop ends).
-    Without stop the texts are the console's (Ctrl+C...)."""
+    Without stop the texts are the console's (Ctrl+C...). clock: the seconds that the waits and the marker checks
+    count (time.monotonic); the tests pass one that their sleep or their wake moves on."""
     backoff, last_status, pending, problems, tries, polls, told = 60, None, set(), False, 0, 0, set()
     tracked = on_result is not None or on_error is not None
     console = stop is None
-    marker_due, marker_later = MARKER_POLLS, False
+    marker_every = MARKER_POLLS * POLL_SECONDS
+    marker_next, marker_later = clock() + marker_every, False
 
     def stopped():
         return stop is not None and stop.is_set()
 
-    def pause(seconds, wakeable=True):
-        if stop is None and wake is None:
-            sleep(seconds)
-            return
+    def wait(seconds):
+        """Waits up to seconds; True when wake ended it early (wake is cleared then)."""
         if wake is None:
-            stop.wait(seconds)
-            return
-        deadline = time.monotonic() + seconds
-        while not stopped():
-            left = deadline - time.monotonic()
-            if left <= 0 or not wake.wait(left):
-                return
-            wake.clear()
-            if wakeable:
-                return
+            if stop is None:
+                sleep(seconds)
+            else:
+                stop.wait(seconds)
+            return False
+        if not wake.wait(seconds):
+            return False
+        wake.clear()
+        return True
+
+    def pause(seconds, wakeable=True):
+        """A wait longer than a poll is cut at each marker check that falls due in it (every poll while the marker
+        answers «later»): counted in polls, an hour of 429 delayed the check and the game said «no parece abierto»
+        with the uploader open."""
+        end, left = clock() + seconds, seconds
+        while left > 0 and not stopped():
+            step = left
+            if marker is not None and seconds > POLL_SECONDS:
+                step = min(left, max(0, POLL_SECONDS if marker_later else marker_next - clock()))
+            if step and wait(step):
+                if wakeable:
+                    return
+                left = end - clock()
+                continue
+            left -= step
+            if left > 0 and not stopped():
+                check_marker()
 
     def check_marker():
-        nonlocal marker_due, marker_later
+        nonlocal marker_next, marker_later
         if marker is None:
             return
-        marker_due = polls + MARKER_POLLS
+        marker_next = clock() + marker_every
         try:
             status = marker()
         except Exception:
@@ -2056,7 +2076,7 @@ def run(uploader, once=False, sleep=time.sleep, marker=None, *, stop=None, wake=
     while True:
         if stopped():
             return 0
-        if polls and (polls >= marker_due or marker_later):
+        if polls and (marker_later or clock() >= marker_next):
             check_marker()
         polls += 1
         try:
@@ -2593,6 +2613,9 @@ AUTOSTART_TOO_LONG = ("La ruta de la carpeta del subidor es demasiado larga para
 AUTOSTART_TOO_LONG_REMOVED = ("He quitado el inicio con Windows: la ruta de la carpeta del subidor es demasiado larga y "
                               "Windows no lo abriría. Mueve la carpeta a una ruta más corta (por ejemplo C:\\OroHermandad) "
                               "y vuelve a marcar «Abrir el subidor al iniciar Windows».")
+AUTOSTART_TOO_LONG_KEPT = ("La ruta de la carpeta del subidor es demasiado larga para el inicio con Windows: al "
+                           "iniciar Windows se sigue abriendo el subidor de {carpeta}.")
+_AUTOSTART_PARTS = re.compile(r'"([^"]+)" -E -s "([^"]+)" --minimizado')
 SHORTCUT_ABSENT = 3          # exit code of _SHORTCUT_SCRIPT when only an existing shortcut is rewritten and there is none
 _SHORTCUT_SCRIPT = ("$ErrorActionPreference = 'Stop'; "
                     "$d = [Environment]::GetFolderPath('Desktop'); "
@@ -2627,6 +2650,19 @@ def autostart_command(app_dir=None, executable=None, exists=os.path.isfile):
     no PYTHON* variables or user packages; never -I, which would drop the app folder from the import path)."""
     program, script, _ = launch_parts(app_dir, executable, exists)
     return f'"{program}" -E -s "{script}" --minimizado'
+
+
+def autostart_script(value):
+    """The subidor.pyw that a Run value written by autostart_command opens, or None (no value, or another one)."""
+    match = _AUTOSTART_PARTS.fullmatch(value) if isinstance(value, str) else None
+    return match.group(2) if match else None
+
+
+def copy_folder(script):
+    """The folder of the copy whose subidor.pyw is script: <dir> for <dir>\\app\\subidor.pyw (the portable folder),
+    otherwise the folder of subidor.pyw. Windows paths (ntpath)."""
+    app_dir = ntpath.dirname(script)
+    return ntpath.dirname(app_dir) if ntpath.basename(app_dir).lower() == "app" else app_dir
 
 
 class RunKey:
@@ -2673,11 +2709,16 @@ def _run_key(registry):
     return RunKey()
 
 
-def autostart_installed(registry=None):
+def autostart_value(registry=None):
+    """The Run value as it is now: None without one (or when it cannot be read)."""
     try:
-        return _run_key(registry).get(RUN_VALUE) is not None
+        return _run_key(registry).get(RUN_VALUE)
     except (OSError, SyncError):
-        return False
+        return None
+
+
+def autostart_installed(registry=None):
+    return autostart_value(registry) is not None
 
 
 def run_command_fits(command):
@@ -2705,22 +2746,30 @@ def uninstall_autostart(registry=None):
         raise SyncError("Windows no ha dejado quitar el inicio con Windows.") from None
 
 
-def repair_autostart(registry=None, command=None):
+def repair_autostart(registry=None, command=None, older=(), exists=os.path.isfile):
     """At every start of the window: a Run value that opens another folder (the folder was moved, or a new version
     was extracted elsewhere) is pointed at this one; the user already chose to start with Windows. When this folder's
-    command is longer than Windows runs, the value is removed instead (it would open nothing, or an old copy) and the
-    window says why. True when the value changed (and it was said)."""
+    command is longer than Windows runs, the value is removed and the window says why only when it would open nothing
+    or an old copy: this folder's value, any value longer than Windows runs, one not written by autostart_command, or
+    one whose subidor.pyw is gone or is in older (copies of an older version: subidor_control.older_copy). The value
+    of another copy that works stays, and the window says that the start with Windows still opens that folder. True
+    when the value changed (and it was said)."""
     try:
         registry = _run_key(registry)
         current, wanted = registry.get(RUN_VALUE), command or autostart_command()
         if current is None or (current == wanted and run_command_fits(wanted)):
             return False
-        if not run_command_fits(wanted):
-            registry.delete(RUN_VALUE)
-            said = AUTOSTART_TOO_LONG_REMOVED
-        else:
+        if run_command_fits(wanted):
             registry.set(RUN_VALUE, wanted)
             said = AUTOSTART_MOVED
+        else:
+            script = autostart_script(current)          # this folder's value does not fit either: never kept
+            if (script and run_command_fits(current) and exists(script)
+                    and ntpath.normcase(script) not in {ntpath.normcase(old) for old in older}):
+                say(AUTOSTART_TOO_LONG_KEPT.format(carpeta=copy_folder(script)))
+                return False
+            registry.delete(RUN_VALUE)
+            said = AUTOSTART_TOO_LONG_REMOVED
     except (OSError, SyncError):
         return False
     say(said)

@@ -54,6 +54,7 @@ SI ALGO FALLA
 - Si ya usabas el subidor antiguo que arrancaba oculto con Windows, la ventana te ofrece quitarlo y
   abrirse ella al iniciar Windows.
 - Si la ruta de esta carpeta es muy larga (más de unos 100 caracteres), Windows no puede abrir el
-  subidor al iniciar sesión: muévela a una ruta más corta, por ejemplo C:\OroHermandad.
+  subidor al iniciar sesión: muévela a una ruta más corta, por ejemplo C:\OroHermandad. Si la copias
+  en vez de moverla, marca el inicio con Windows en la copia corta; la larga ya no se lo quita.
 - «Más…» → «Borrar mis datos de este PC» borra la dirección, la carpeta, la clave cifrada y el
   inicio con Windows. Para quitar el subidor del todo, haz eso y borra esta carpeta.

@@ -1188,10 +1188,15 @@ class CliTests(Quiet):
                     raise h.AuthenticationError("parar")
                 return {"status": "ok", "events": []}
         self.assertEqual(h.MARKER_POLLS * h.POLL_SECONDS, 1800)
-        # Revisado cada media hora y reescrito a la hora: el aviso nunca llega a las 2 h con el subidor abierto.
+        # Revisado cada media hora y reescrito a la hora: el aviso nunca llega a las 2 h con el subidor abierto
+        # (también con una espera larga por medio: RunForTheWindowTests, test_a_long_429_...).
         self.assertLessEqual(h.MARKER_REFRESH + h.MARKER_POLLS * h.POLL_SECONDS, 5400)
+        now = [0]
+
+        def sleep(seconds):
+            now[0] += seconds
         with patch.object(h, "MARKER_POLLS", 2):
-            self.assertEqual(h.run(Uploader(), sleep=lambda s: None, marker=marker), 2)
+            self.assertEqual(h.run(Uploader(), sleep=sleep, marker=marker, clock=lambda: now[0]), 2)
         self.assertEqual(asked, [0, 2, 4, 6])
         out = self.output.getvalue()
         self.assertEqual((out.count(h.MARKER_LINES["denied"]), out.count(h.MARKER_LINES["created"])), (1, 1))
@@ -2606,6 +2611,100 @@ class RunForTheWindowTests(Quiet):
         code = h.run(self.uploader([h.RetryableSyncError("sin red")]), once=True,
                      on_error=lambda error, delay: errors.append(delay))
         self.assertEqual((code, errors), (1, [None]))
+
+    def ticking(self, window):
+        """(clock list from V06_NOW, run's arguments that move it on): the console's sleep, or the window's stop and
+        wake (each wait of wake lasts its whole time)."""
+        now = [V06_NOW]
+        if not window:
+            return now, {"sleep": lambda seconds: now.__setitem__(0, now[0] + seconds), "clock": lambda: now[0]}
+
+        class Ticking(FakeEvent):
+            def wait(inner, timeout=None):
+                now[0] += timeout
+                return super().wait(timeout)
+        return now, {"stop": FakeEvent(), "wake": Ticking(), "clock": lambda: now[0]}
+
+    def marker_file(self, now, status):
+        """A marker of the real UploaderStatus and _marker_lua_for, in memory: (marker(), writes as (seconds since
+        V06_NOW, bytes), ages, age()). ages: the age of escrito just before every check (the oldest it gets: only a
+        check changes it) and at every call of age() (the tests call it at every cycle)."""
+        writes, ages = [], []
+
+        def age():
+            if writes:
+                ages.append(now[0] - h.marker_written(writes[-1][1]))
+
+        def marker():
+            age()
+            data, _ = h._marker_lua_for(writes[-1][1] if writes else None, status.marker_state(), int(now[0]))
+            if data is None:
+                return "later"
+            if writes and data == writes[-1][1]:
+                return "ok"
+            writes.append((now[0] - V06_NOW, data))
+            return "refreshed"
+        return marker, writes, ages, age
+
+    def test_a_long_429_then_a_fishing_retry_never_lets_the_marker_get_two_hours_old(self):
+        """R3: the marker check was counted in polls. A 429 of an hour (the guild's daily write budget, sent at 23:01
+        UTC for Forever Fishing) was not counted, and the accepted retry after 00:00 UTC («fishing») does not check
+        it: escrito reached 2.5 h and the game said «El subidor del PC no parece abierto» with the uploader open."""
+        source = h.Source("CUENTA", Path("OroHermandad.lua"))
+        fishing = h.Source("CUENTA", Path("ForeverFishing.lua"))
+        for window in (False, True):
+            with self.subTest(window=window):
+                now, arguments = self.ticking(window)
+                status = h.UploaderStatus({"aceptado": V06_NOW - 86400, "ultimo": "ok"})
+                marker, writes, ages, age = self.marker_file(now, status)
+                seen = {}
+
+                def cycle():
+                    age()
+                    elapsed = now[0] - V06_NOW
+                    if elapsed > 12000:
+                        seen["ultimo"] = status.ultimo
+                        return h.AuthenticationError("fin de la prueba")
+                    if elapsed >= 3495 and "429" not in seen:                 # escrito is 58 min old
+                        seen["429"] = elapsed
+                        limited = h.RetryableSyncError("El panel pide esperar (HTTP 429).")
+                        limited.retry_after, limited.cuota, limited.fishing = 3600, True, True
+                        limited.events = [h.Event(source, "unchanged")]
+                        return limited
+                    if "429" in seen and "pesca" not in seen:
+                        seen["pesca"] = elapsed
+                        return {"status": "ok", "events": [h.Event(source, "unchanged"),
+                                                           h.Event(fishing, "fishing", result={"accepted": True})]}
+                    return {"status": "ok", "events": [h.Event(source, "unchanged")]}
+                code = h.run(self.uploader([cycle] * 2000), marker=marker,
+                             on_result=lambda result: status.record_result(result, now[0]),
+                             on_error=lambda error, delay: status.record_error(error, now[0]), **arguments)
+                self.assertEqual(code, 2)
+                self.assertEqual((seen["429"], seen["pesca"], seen["ultimo"]), (3495, 3495 + 3600, "ok"))
+                self.assertTrue(any(seen["429"] < t < seen["pesca"] for t, _ in writes), "rewritten during the hour")
+                self.assertGreater(len(ages), 500)
+                self.assertLessEqual(max(ages), 5400 + h.POLL_SECONDS)
+
+    def test_a_status_change_that_has_to_wait_is_written_during_a_long_wait(self):
+        """A 429 of the panel (cuota) half a minute after an accepted upload: the marker answers «later» (never twice
+        within a minute). It was asked again only after the hour of the wait; now on the next poll inside it."""
+        source = h.Source("CUENTA", Path("OroHermandad.lua"))
+        uploaded = h.Event(source, "uploaded", result={"accepted": True, "duplicate": False}, upload={"markets": []})
+        for window in (False, True):
+            with self.subTest(window=window):
+                now, arguments = self.ticking(window)
+                status = h.UploaderStatus({"aceptado": V06_NOW - 86400, "ultimo": "ok"})
+                marker, writes, _, _ = self.marker_file(now, status)
+                limited = h.RetryableSyncError("El panel pide esperar (HTTP 429).")
+                limited.retry_after, limited.cuota = 3600, True
+                script = [{"status": "ok", "events": [uploaded]}, {"status": "ok", "events": []},
+                          {"status": "ok", "events": []}, limited, h.AuthenticationError("fin de la prueba")]
+                code = h.run(self.uploader(script), marker=marker,
+                             on_result=lambda result: status.record_result(result, now[0]),
+                             on_error=lambda error, delay: status.record_error(error, now[0]), **arguments)
+                self.assertEqual(code, 2)
+                self.assertEqual(writes[1][0], 45 + h.POLL_SECONDS, "cuota written 15 s into the hour")
+                self.assertIn(b'estado = "cuota"', writes[1][1])
 
 
 class OutputSinkTests(unittest.TestCase):

@@ -435,15 +435,16 @@ class App:
 
     def claim_copy(self):
         """The Run value and the desktop shortcut follow this copy when its folder was moved or a new version was
-        extracted elsewhere, and never go back to an older copy opened again from its old folder (c.claim_copy). The
-        copy is kept in config.json (a first run keeps it at «Empezar»)."""
+        extracted elsewhere, and never go back to an older copy opened again from its old folder, nor leave a copy
+        of the same version that starts with Windows for this one when its path is too long for that (c.claim_copy).
+        The copy is kept in config.json (a first run keeps it at «Empezar»)."""
         _, script, folder = h.launch_parts()
-        before = self.config.get("subidor")
-        mine, moved, text = c.claim_copy(self.config, script, folder)
+        before, command = self.config.get("subidor"), h.autostart_command()
+        mine, moved, text = c.claim_copy(self.config, script, folder, autostart=h.autostart_value(), command=command)
         if not mine:
             h.say(text)
             return
-        h.repair_autostart()
+        h.repair_autostart(command=command, older=c.older_copy(before))
         if self.config.get("schema") != 1:
             return
         if self.config.get("subidor") != before:

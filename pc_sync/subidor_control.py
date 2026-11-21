@@ -61,6 +61,9 @@ MIGRATED_AUTOSTART = "El subidor antiguo arrancaba con Windows. ¿Abrir esta ven
 # Two copies of the window (a new version extracted in another folder): config["subidor"] says which one is the newest.
 OLD_COPY = ("Esta carpeta tiene la versión {esta} del subidor, pero en {carpeta} está la {otra}: cierra esta ventana y "
             "abre aquella. El inicio con Windows y el acceso directo del escritorio no se cambian a esta carpeta.")
+LONG_COPY = ("La ruta de esta carpeta es demasiado larga para el inicio con Windows, y en {carpeta} está esta misma "
+             "versión del subidor, que es la que se abre al iniciar Windows. El inicio con Windows y el acceso directo "
+             "del escritorio no se cambian a esta carpeta.")
 SHORTCUT_MOVED = "El acceso directo del escritorio abría otra carpeta: ahora abre esta."
 
 # First run.
@@ -204,24 +207,41 @@ def take_lock(home, stack, ask, *, task_installed=h.startup_task_installed, remo
     return "bloqueado", BLOCKED_HIDDEN
 
 
-def claim_copy(config, script, folder, version=None, exists=os.path.isfile):
+def claim_copy(config, script, folder, version=None, exists=os.path.isfile, autostart=None, command=None):
     """Whether this copy of the window may point the start with Windows and the desktop shortcut at its folder. script
     and folder: this copy's subidor.pyw and folder (hermandad.launch_parts). config["subidor"] = {"programa",
     "carpeta", "version"} remembers the newest copy opened (config.json is shared by every copy).
     (True, moved, ""): this copy is recorded in config; moved says that another folder was recorded: the folder was
     moved, or a newer or the same version was extracted elsewhere (with none recorded, False).
     (False, False, text): another folder that still has its subidor.pyw holds a newer version. This is then the old
-    copy (opened from its old folder or an old shortcut) and must not take them back; config stays as it was."""
+    copy (opened from its old folder or an old shortcut) and must not take them back; config stays as it was. The same
+    when that folder holds this same version and the start with Windows opens it (autostart: the Run value now) while
+    this copy's Run value (command) would be longer than Windows runs: the start with Windows that works stays, and
+    the shortcut is not moved to the folder that the window told the user to leave for a shorter one."""
     version = version or h.VERSION
     known = config.get("subidor") if isinstance(config.get("subidor"), dict) else {}
     other, theirs, mine = known.get("programa"), h.dotted_version(known.get("version")), h.dotted_version(version)
     other = other if isinstance(other, str) and other else None
     same = other is not None and ntpath.normcase(other) == ntpath.normcase(script)
-    if other is not None and not same and theirs and mine and theirs > mine and exists(other):
+    if other is not None and not same and theirs and mine and theirs >= mine and exists(other):
         place = known.get("carpeta") if isinstance(known.get("carpeta"), str) else ntpath.dirname(other)
-        return False, False, OLD_COPY.format(esta=version, otra=known["version"], carpeta=place)
+        if theirs > mine:
+            return False, False, OLD_COPY.format(esta=version, otra=known["version"], carpeta=place)
+        opens = h.autostart_script(autostart)
+        if (command is not None and not h.run_command_fits(command) and opens and h.run_command_fits(autostart)
+                and ntpath.normcase(opens) == ntpath.normcase(other)):
+            return False, False, LONG_COPY.format(carpeta=place)
     config["subidor"] = {"programa": script, "carpeta": folder, "version": version}
     return True, other is not None and not same, ""
+
+
+def older_copy(known, version=None):
+    """(subidor.pyw,) of the copy recorded in known (config["subidor"] before claim_copy) when it holds an older
+    version than this one, otherwise (): hermandad.repair_autostart then removes a Run value that opens it."""
+    known = known if isinstance(known, dict) else {}
+    other, theirs = known.get("programa"), h.dotted_version(known.get("version"))
+    mine = h.dotted_version(version or h.VERSION)
+    return (other,) if isinstance(other, str) and other and theirs and mine and theirs < mine else ()
 
 
 def scan_accounts(folder):
