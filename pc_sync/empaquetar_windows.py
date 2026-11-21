@@ -6,8 +6,8 @@ Runs on the GitHub Actions Windows runner (.github/workflows/subidor-windows.yml
     python pc_sync/empaquetar_windows.py --salida "$RUNNER_TEMP/Subidor_Windows.zip"
 
 1. Copies sys.base_prefix into runtime/ without Lib/test, Lib/idlelib, Lib/turtledemo, Lib/ensurepip, what is in
-   Lib/site-packages, Scripts, include, libs, Doc, Tools and every __pycache__ (LICENSE.txt and the Tcl/Tk license
-   files stay); the app files into app/; writes «Abrir subidor.cmd» and LEEME.txt (CRLF).
+   Lib/site-packages, Scripts, include, libs, Doc, Tools, tcl/nmake and every __pycache__ (LICENSE.txt and the
+   Tcl/Tk license files stay); the app files into app/; writes «Abrir subidor.cmd» and LEEME.txt (CRLF).
 2. Writes the zip in sorted order with fixed timestamps and deflate level 9: the same sources give the same bytes.
 3. Extracts it into a fresh folder and runs the smoke tests there, all with -B and PYTHONDONTWRITEBYTECODE=1 (no .pyc
    in what players get): the runtime imports ssl, ctypes, tkinter and json; the whole pc_sync suite runs with that
@@ -36,7 +36,9 @@ ROOT = "OroHermandad Subidor"
 ZIP_NAME = "Subidor_Windows.zip"
 APP_FILES = ("hermandad.py", "sincronizar.py", "subidor_control.py", "subidor.pyw")
 README = "LEEME_WINDOWS.txt"
-TRIMMED = ("Lib/test", "Lib/idlelib", "Lib/turtledemo", "Lib/ensurepip", "Scripts", "include", "libs", "Doc", "Tools")
+# tcl/nmake: archivos de Tcl para compilar extensiones con nmake (incluye un .exe sin firmar); no se usan al ejecutar.
+TRIMMED = ("Lib/test", "Lib/idlelib", "Lib/turtledemo", "Lib/ensurepip", "Scripts", "include", "libs", "Doc", "Tools",
+           "tcl/nmake")
 EMPTIED = ("Lib/site-packages",)      # the folder stays (site.py expects it), its contents go
 SIGNED = (".exe", ".dll", ".pyd")
 STAMP = (2026, 11, 4, 0, 0, 0)
