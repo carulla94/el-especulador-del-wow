@@ -1,0 +1,167 @@
+{
+ "about": "Marker v2: Interface\\AddOns\\OroHermandad_Subidor\\OroHermandad_Subidor.lua written by the 0.6.0 uploader (ASCII, LF, exactly the golden files for those states). formato = 1 stays (0.4.x/0.5.x addons only check it). datos = 2; escrito = unix time of this write; version = uploader version ([0-9][0-9.]{0,15}); envio = {t = last accepted upload (0 = none yet), estado = ok|clave|red|cuota|rechazado (the latest attempt)}, present once an attempt has an outcome; suben/aportan = the panel's counts (0..100000) from the latest sync answer, present only when the panel sent them; quedan/dia (revision 2) = uploadsLeft (0..1000) and day (0..100000, the panel's day index, same as Spec.DayIndex) of the latest accepted, non-duplicate answer that carried both, written together or not at all (the addon keeps them only as a valid pair and uses quedan only when dia is today). Field order and spacing are fixed. The TOC stays the 0.5.x one. read: what the addon must make of a marker table (info = validated fields, null = field dropped; info null = no status shown).",
+ "estados": [
+  "ok",
+  "clave",
+  "red",
+  "cuota",
+  "rechazado"
+ ],
+ "write": [
+  {
+   "file": "marker-v2/full.lua",
+   "note": "after an accepted upload, with the panel counts",
+   "state": {
+    "escrito": 1796479200,
+    "version": "0.6.0",
+    "envio": {
+     "t": 1796478900,
+     "estado": "ok"
+    },
+    "suben": 2,
+    "aportan": 7,
+    "quedan": 21,
+    "dia": 2530
+   }
+  },
+  {
+   "file": "marker-v2/first-run.lua",
+   "note": "before any upload attempt (no envio, no counts)",
+   "state": {
+    "escrito": 1796479200,
+    "version": "0.6.0"
+   }
+  },
+  {
+   "file": "marker-v2/key-refused.lua",
+   "note": "the latest attempt was refused for the key; one accepted upload earlier; old server (no counts)",
+   "state": {
+    "escrito": 1796479260,
+    "version": "0.6.0",
+    "envio": {
+     "t": 1796400000,
+     "estado": "clave"
+    }
+   }
+  },
+  {
+   "file": "marker-v2/never-accepted.lua",
+   "note": "network errors and no accepted upload yet (t = 0)",
+   "state": {
+    "escrito": 1796479320,
+    "version": "0.6.0",
+    "envio": {
+     "t": 0,
+     "estado": "red"
+    }
+   }
+  }
+ ],
+ "read": [
+  {
+   "note": "0.5.x marker (v1): uploader mode only, no status",
+   "lua": "OroHermandadSubidor = {formato = 1}\n",
+   "detected": true,
+   "info": null
+  },
+  {
+   "note": "full v2",
+   "lua": "-- Lo crea el subidor de precios de Oro de Hermandad (hermandad.py) y lo vuelve a escribir si cambia. No lo edites.\nOroHermandadSubidor = {\n  formato = 1,\n  datos = 2,\n  escrito = 1796479200,\n  version = \"0.6.0\",\n  envio = {t = 1796478900, estado = \"ok\"},\n  suben = 2,\n  aportan = 7,\n  quedan = 21,\n  dia = 2530,\n}\n",
+   "detected": true,
+   "info": {
+    "escrito": 1796479200,
+    "version": "0.6.0",
+    "envio": {
+     "t": 1796478900,
+     "estado": "ok"
+    },
+    "suben": 2,
+    "aportan": 7,
+    "quedan": 21,
+    "dia": 2530
+   }
+  },
+  {
+   "note": "wrong types are dropped one by one",
+   "lua": "OroHermandadSubidor = {formato = 1, datos = 2, escrito = \"ayer\", version = \"0.6.0\", envio = {t = 1796478900, estado = \"boom\"}, suben = -1, aportan = 7, quedan = -3, dia = 2530}\n",
+   "detected": true,
+   "info": {
+    "escrito": null,
+    "version": "0.6.0",
+    "envio": null,
+    "suben": null,
+    "aportan": 7,
+    "quedan": null,
+    "dia": null
+   }
+  },
+  {
+   "note": "version with letters or too long is dropped",
+   "lua": "OroHermandadSubidor = {formato = 1, datos = 2, escrito = 1796479200, version = \"0.6.0|cff\"}\n",
+   "detected": true,
+   "info": {
+    "escrito": 1796479200,
+    "version": null,
+    "envio": null,
+    "suben": null,
+    "aportan": null,
+    "quedan": null,
+    "dia": null
+   }
+  },
+  {
+   "note": "datos other than 2: only formato counts",
+   "lua": "OroHermandadSubidor = {formato = 1, datos = 3, escrito = 1796479200, version = \"0.7.0\"}\n",
+   "detected": true,
+   "info": null
+  },
+  {
+   "note": "formato other than 1: not a marker (as in 0.4.0)",
+   "lua": "OroHermandadSubidor = {formato = 2, datos = 2}\n",
+   "detected": false,
+   "info": null
+  },
+  {
+   "note": "huge counts are dropped",
+   "lua": "OroHermandadSubidor = {formato = 1, datos = 2, escrito = 1796479200, version = \"0.6.0\", suben = 100001, aportan = 3}\n",
+   "detected": true,
+   "info": {
+    "escrito": 1796479200,
+    "version": "0.6.0",
+    "envio": null,
+    "suben": null,
+    "aportan": 3,
+    "quedan": null,
+    "dia": null
+   }
+  },
+  {
+   "note": "quedan without dia (or dia without quedan) is dropped as a pair",
+   "lua": "OroHermandadSubidor = {formato = 1, datos = 2, escrito = 1796479200, version = \"0.6.0\", quedan = 5}\n",
+   "detected": true,
+   "info": {
+    "escrito": 1796479200,
+    "version": "0.6.0",
+    "envio": null,
+    "suben": null,
+    "aportan": null,
+    "quedan": null,
+    "dia": null
+   }
+  },
+  {
+   "note": "quedan above 1000 is dropped as a pair",
+   "lua": "OroHermandadSubidor = {formato = 1, datos = 2, escrito = 1796479200, version = \"0.6.0\", quedan = 1001, dia = 2530}\n",
+   "detected": true,
+   "info": {
+    "escrito": 1796479200,
+    "version": "0.6.0",
+    "envio": null,
+    "suben": null,
+    "aportan": null,
+    "quedan": null,
+    "dia": null
+   }
+  }
+ ]
+}

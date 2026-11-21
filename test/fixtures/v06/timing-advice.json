@@ -1,0 +1,1055 @@
+{
+ "about": "Timing.Advice(blocks) (addon) = the panel's advice (public/hermandad.js), contract C11. blocks: the six Spanish 4-hour blocks 00-04 .. 20-24 (index 0..5) of one item or of a group. priceOK and p (mean price index in basis points) come from each side's own price thresholds (game: decayed w >= 2.5, p = sbp / w; panel: TIMING_MIN blockPoints/blockDays). Sales fields: n = samples (game: decayed sum; panel: count), days = distinct days with a sample (game: 0..2 from the two newest days kept; panel: sum of soldDays of the block's cells), sec and u = seconds and units measured, mu and msec = the block's largest sample (units, its seconds). Rule: trimmed u' = max(0, u - mu), sec' = sec - msec; salesOK = n >= 2.5 and days >= 2 and sec' >= 3600; sales pattern = at least 3 salesOK blocks and the sum of u' over them >= 10; then rateIdx = (u'/sec') / (sum u' / sum sec') over salesOK blocks, best = argmax over salesOK blocks of (10000 + (priceOK and p or 0)) * rateIdx (ties: the lower index), reason 'ventas' if rateIdx[best] >= 1.2 else 'precio'. Without a sales pattern: price pattern = at least 3 priceOK blocks and max p - min p >= 300: best = argmax p (ties: lower index), reason 'precio-alto'. Else best = null, reason 'pocos'. hint = [(4*best + 23) % 24, 4*best] (the hours of «pon o iguala el precio hacia las h1-h2 h»), null without best. rateIdx is rounded to 4 decimals here: compare with a tolerance of 1e-4; best, reason, salesOK and hint must match exactly.",
+ "sales": {
+  "minN": 2.5,
+  "minDays": 2,
+  "minSec": 3600,
+  "minBlocks": 3,
+  "minUnits": 10,
+  "faster": 1.2
+ },
+ "price": {
+  "minBlocks": 3,
+  "spreadBp": 300
+ },
+ "cases": [
+  {
+   "note": "sales pattern: the evening sells most",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 200,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 8,
+     "mu": 2,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": 100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 10,
+     "mu": 2,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 16,
+     "mu": 4,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -300,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 40,
+     "mu": 10,
+     "msec": 2700
+    }
+   ],
+   "salesOK": [
+    false,
+    false,
+    true,
+    true,
+    true,
+    true
+   ],
+   "rateIdx": [
+    null,
+    null,
+    0.4286,
+    0.5714,
+    0.8571,
+    2.1429
+   ],
+   "best": 5,
+   "reason": "ventas",
+   "hint": [
+    19,
+    20
+   ]
+  },
+  {
+   "note": "a whale sample is left out: one buyer of 400 units does not move the advice",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 200,
+     "n": 3,
+     "days": 2,
+     "sec": 8100,
+     "u": 410,
+     "mu": 400,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": 100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 10,
+     "mu": 2,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 16,
+     "mu": 4,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -300,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 40,
+     "mu": 10,
+     "msec": 2700
+    }
+   ],
+   "salesOK": [
+    false,
+    false,
+    true,
+    true,
+    true,
+    true
+   ],
+   "rateIdx": [
+    null,
+    null,
+    0.9167,
+    0.4889,
+    0.7333,
+    1.8333
+   ],
+   "best": 5,
+   "reason": "ventas",
+   "hint": [
+    19,
+    20
+   ]
+  },
+  {
+   "note": "a whale alone in a block: one sample is not enough",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 200,
+     "n": 1,
+     "days": 1,
+     "sec": 2700,
+     "u": 400,
+     "mu": 400,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": 100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 10,
+     "mu": 2,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 16,
+     "mu": 4,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -300,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 40,
+     "mu": 10,
+     "msec": 2700
+    }
+   ],
+   "salesOK": [
+    false,
+    false,
+    false,
+    true,
+    true,
+    true
+   ],
+   "rateIdx": [
+    null,
+    null,
+    null,
+    0.48,
+    0.72,
+    1.8
+   ],
+   "best": 5,
+   "reason": "ventas",
+   "hint": [
+    19,
+    20
+   ]
+  },
+  {
+   "note": "two samples are not enough (n < 2.5)",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 0,
+     "n": 2,
+     "days": 2,
+     "sec": 7200,
+     "u": 60,
+     "mu": 30,
+     "msec": 3600
+    },
+    {
+     "priceOK": true,
+     "p": 100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 10,
+     "mu": 2,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 16,
+     "mu": 4,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -300,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 40,
+     "mu": 10,
+     "msec": 2700
+    }
+   ],
+   "salesOK": [
+    false,
+    false,
+    false,
+    true,
+    true,
+    true
+   ],
+   "rateIdx": [
+    null,
+    null,
+    null,
+    0.48,
+    0.72,
+    1.8
+   ],
+   "best": 5,
+   "reason": "ventas",
+   "hint": [
+    19,
+    20
+   ]
+  },
+  {
+   "note": "one day only is not enough",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 0,
+     "n": 5,
+     "days": 1,
+     "sec": 13500,
+     "u": 90,
+     "mu": 20,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": 100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 10,
+     "mu": 2,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 16,
+     "mu": 4,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -300,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 40,
+     "mu": 10,
+     "msec": 2700
+    }
+   ],
+   "salesOK": [
+    false,
+    false,
+    false,
+    true,
+    true,
+    true
+   ],
+   "rateIdx": [
+    null,
+    null,
+    null,
+    0.48,
+    0.72,
+    1.8
+   ],
+   "best": 5,
+   "reason": "ventas",
+   "hint": [
+    19,
+    20
+   ]
+  },
+  {
+   "note": "decayed values from the game (non-integers)",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 2.6,
+     "days": 2,
+     "sec": 7300.5,
+     "u": 6.4,
+     "mu": 3.1,
+     "msec": 1800.2
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 150,
+     "n": 3.4,
+     "days": 2,
+     "sec": 9000.0,
+     "u": 12.2,
+     "mu": 4.0,
+     "msec": 2700.0
+    },
+    {
+     "priceOK": true,
+     "p": 50,
+     "n": 2.9,
+     "days": 2,
+     "sec": 8100.7,
+     "u": 9.9,
+     "mu": 3.3,
+     "msec": 2400.4
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": -200,
+     "n": 5.5,
+     "days": 2,
+     "sec": 16000.0,
+     "u": 44.0,
+     "mu": 9.5,
+     "msec": 3000.0
+    }
+   ],
+   "salesOK": [
+    true,
+    false,
+    true,
+    true,
+    false,
+    true
+   ],
+   "rateIdx": [
+    0.3479,
+    null,
+    0.7547,
+    0.6714,
+    null,
+    1.5389
+   ],
+   "best": 5,
+   "reason": "ventas",
+   "hint": [
+    19,
+    20
+   ]
+  },
+  {
+   "note": "sales in only two blocks: the price pattern decides",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 400,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 10,
+     "mu": 2,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -150,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 30,
+     "mu": 7,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -100,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    }
+   ],
+   "salesOK": [
+    false,
+    false,
+    false,
+    true,
+    true,
+    false
+   ],
+   "rateIdx": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ],
+   "best": 2,
+   "reason": "precio-alto",
+   "hint": [
+    7,
+    8
+   ]
+  },
+  {
+   "note": "too few units overall: the price pattern decides",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 300,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 3,
+     "mu": 1,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": 50,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 3,
+     "mu": 1,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 3,
+     "mu": 1,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -50,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 3,
+     "mu": 1,
+     "msec": 2700
+    }
+   ],
+   "salesOK": [
+    false,
+    false,
+    true,
+    true,
+    true,
+    true
+   ],
+   "rateIdx": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ],
+   "best": 2,
+   "reason": "precio-alto",
+   "hint": [
+    7,
+    8
+   ]
+  },
+  {
+   "note": "flat sales: the better price wins inside the sales pattern",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 400,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 12,
+     "mu": 3,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": 0,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 12,
+     "mu": 3,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -100,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 12,
+     "mu": 3,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": -200,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 12,
+     "mu": 3,
+     "msec": 2700
+    }
+   ],
+   "salesOK": [
+    false,
+    false,
+    true,
+    true,
+    true,
+    true
+   ],
+   "rateIdx": [
+    null,
+    null,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "best": 2,
+   "reason": "precio",
+   "hint": [
+    7,
+    8
+   ]
+  },
+  {
+   "note": "price spread below 300 bp and no sales: few data",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 100,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 0,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": -150,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    }
+   ],
+   "salesOK": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+   ],
+   "rateIdx": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ],
+   "best": null,
+   "reason": "pocos",
+   "hint": null
+  },
+  {
+   "note": "nothing at all",
+   "blocks": [
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    }
+   ],
+   "salesOK": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+   ],
+   "rateIdx": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ],
+   "best": null,
+   "reason": "pocos",
+   "hint": null
+  },
+  {
+   "note": "best block 00-04: the hint wraps to 23-0 h",
+   "blocks": [
+    {
+     "priceOK": true,
+     "p": 0,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 60,
+     "mu": 15,
+     "msec": 2700
+    },
+    {
+     "priceOK": false,
+     "p": null,
+     "n": 0,
+     "days": 0,
+     "sec": 0,
+     "u": 0,
+     "mu": 0,
+     "msec": 0
+    },
+    {
+     "priceOK": true,
+     "p": 0,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 8,
+     "mu": 2,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": 0,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 10,
+     "mu": 2,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": 0,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 12,
+     "mu": 3,
+     "msec": 2700
+    },
+    {
+     "priceOK": true,
+     "p": 0,
+     "n": 4,
+     "days": 3,
+     "sec": 10800,
+     "u": 14,
+     "mu": 3,
+     "msec": 2700
+    }
+   ],
+   "salesOK": [
+    true,
+    false,
+    true,
+    true,
+    true,
+    true
+   ],
+   "rateIdx": [
+    2.8481,
+    null,
+    0.3797,
+    0.5063,
+    0.5696,
+    0.6962
+   ],
+   "best": 0,
+   "reason": "ventas",
+   "hint": [
+    23,
+    0
+   ]
+  }
+ ]
+}

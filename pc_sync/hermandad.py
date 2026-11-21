@@ -23,9 +23,15 @@ Privacy and safety:
 - The key is stored with Windows DPAPI (CryptProtectData), never as plain text, an argument or an environment
   variable. Without DPAPI (other systems) it is only kept in memory.
 - HTTPS only, no redirects, bounded responses; a file is only sent again when its content changes (sha256).
-- The only thing ever written in the WoW folder is the marker addon Interface/AddOns/OroHermandad_Subidor (two fixed
+- The only thing ever written in the WoW folder is the marker addon Interface/AddOns/OroHermandad_Subidor (two
   files, and only when Oro de Hermandad is installed there): it tells the addon that this PC uploads, so it asks guild
-  mates for the scans it missed. --quitar-aviso and --reset remove it.
+  mates for the scans it missed. From 0.6.0 its Lua file also carries the uploader's status (marker v2: when it was
+  written, the last accepted upload, the panel's counts), only numbers and fixed words. --quitar-aviso and --reset
+  remove it.
+
+From 0.6.0 the same engine also runs inside the window «Oro de Hermandad · Subidor» (subidor.pyw, through
+subidor_control.py): run() can be stopped and woken from another thread, the output can go to a sink as well, and the
+window's start with Windows (Run key), desktop shortcut and lock owner live here. The command line is unchanged.
 """
 from __future__ import annotations
 
@@ -34,6 +40,12 @@ import sys
 if sys.version_info < (3, 10):
     print("Necesitas Python 3.10 o superior. Descárgalo de https://www.python.org/downloads/ y vuelve a abrir HERMANDAD.cmd.")
     sys.exit(1)
+
+if __name__ == "__main__":
+    # HERMANDAD.cmd: sin __pycache__ junto al programa. Todas las entradas del zip de descarga tienen la misma hora, y
+    # al extraer una versión nueva encima, un sincronizar.py del mismo tamaño seguiría usando el .pyc de la anterior.
+    # Importado (la ventana, las pruebas), no cambia nada: subidor.pyw ya lo hace por su cuenta.
+    sys.dont_write_bytecode = True
 
 import argparse
 import base64
@@ -44,11 +56,13 @@ import getpass
 import hashlib
 import json
 import math
+import ntpath
 import os
 import re
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,7 +75,7 @@ from xml.sax.saxutils import escape as xml_text
 import sincronizar as sync
 from sincronizar import AuthenticationError, ReadPendingError, RetryableSyncError, SyncError
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 SOURCE_NAME = "OroHermandad.lua"
 ALLOWED = frozenset({SOURCE_NAME})
 HIST_GLOBAL = "OroHermandadHist"
@@ -86,6 +100,8 @@ TIME_MAX = 9_999_999_999
 KEEP_DAYS = 120
 MAX_POINTS = 120
 POINT_MERGE_SECONDS = 1800
+SAMPLE_DT_MIN, SAMPLE_DT_MAX = 600, 7200   # contract points-v2: a sell-through sample t,lo,qty,qty5,dt,sold
+SALES_ADDON = (0, 6, 0)      # the first addon that measures sales: older ones get a notice
 POINT_SECONDS = 14 * 86400
 RESEND_DAYS = 2              # an item the panel already has: its days from the newest accepted day minus 2 go again
 CATEGORIES = ("metal", "piedra", "gema", "hierba", "piel", "tela", "pocion", "elixir", "frasco", "comida",
@@ -143,23 +159,33 @@ class KeyStoreError(SyncError):
 # Output: the console, or a small log file when the startup task runs without a window.
 # ---------------------------------------------------------------------------------------------------------------
 class _Output:
+    """Every line goes to the console, or to the log file when one is set; and also to the sink when one is set (the
+    window's log, from the uploader's thread: the sink must be thread-safe)."""
+
     def __init__(self):
         self.file = None
+        self.sink = None
         self.limit = 256 * 1024
+        self.lock = threading.Lock()
 
     def say(self, message, stamp=True):
         line = (datetime.now().strftime("[%H:%M:%S] ") if stamp else "") + message
+        sink = self.sink
+        if sink is not None:
+            with contextlib.suppress(Exception):
+                sink(line)
         if self.file is None:
             if sys.stdout is not None:
                 print(line, flush=True)
             return
-        try:
-            if self.file.exists() and self.file.stat().st_size > self.limit:
-                os.replace(self.file, self.file.with_name("registro.anterior.txt"))
-            with self.file.open("a", encoding="utf-8") as stream:
-                stream.write(datetime.now().strftime("%Y-%m-%d ") + line + "\n")
-        except OSError:
-            pass
+        with self.lock:
+            try:
+                if self.file.exists() and self.file.stat().st_size > self.limit:
+                    os.replace(self.file, self.file.with_name("registro.anterior.txt"))
+                with self.file.open("a", encoding="utf-8") as stream:
+                    stream.write(datetime.now().strftime("%Y-%m-%d ") + line + "\n")
+            except OSError:
+                pass
 
 
 _out = _Output()
@@ -167,6 +193,17 @@ _out = _Output()
 
 def say(message, stamp=True):
     _out.say(message, stamp)
+
+
+def set_output_sink(sink):
+    """sink(line) also receives every line said from now on (None: no sink). Returns the previous sink."""
+    previous, _out.sink = _out.sink, sink
+    return previous
+
+
+def set_log_file(path):
+    """Lines go to this file (registro.txt, rotated at 256 KB) instead of the console; None: back to the console."""
+    _out.file = Path(path) if path is not None else None
 
 
 def plural(n, one, many):
@@ -605,9 +642,12 @@ def decode_days(text):
     return [by_day[d] for d in sorted(by_day)][-KEEP_DAYS:]
 
 
-def decode_points(text):
-    """'t,lo,qty,qty5;...' -> ascending [(t, lo, qty, qty5)]: points less than 30 min after the first of a group are
-    merged into it (lo = min, qty = max, qty5 of the cheaper point, ties: the larger), newest 120."""
+def _point_records(text):
+    """'t,lo,qty,qty5[,dt,sold];...' -> ascending [[t, lo, qty, qty5, dt, sold]] (contract points-v2, Spec.DecodePoints
+    of the 0.6.0 addon): dt and sold are a sell-through sample only when both are valid (dt 600..7200 s, sold
+    0..1000000), else None. Points less than 30 min after the first of a group are merged into it: lo = min, qty = max,
+    qty5 of the cheaper point (ties: the larger), the sample with the larger dt (ties: the larger sold; a point without
+    sample never removes one). Newest 120."""
     if not isinstance(text, str):
         return []
     points = []
@@ -615,20 +655,38 @@ def decode_points(text):
         if not entry:
             continue
         fields = entry.split(",")
-        point = (_parse_int(_field(fields, 0), 1, TIME_MAX), _parse_int(_field(fields, 1), 1, PRICE_MAX),
-                 _parse_int(_field(fields, 2), 0, QTY_MAX), _parse_int(_field(fields, 3), 0, QTY_MAX))
-        if None not in point:
-            points.append(point)
+        point = [_parse_int(_field(fields, 0), 1, TIME_MAX), _parse_int(_field(fields, 1), 1, PRICE_MAX),
+                 _parse_int(_field(fields, 2), 0, QTY_MAX), _parse_int(_field(fields, 3), 0, QTY_MAX)]
+        if None in point:
+            continue
+        dt, sold = _parse_int(_field(fields, 4), SAMPLE_DT_MIN, SAMPLE_DT_MAX), _parse_int(_field(fields, 5), 0, QTY_MAX)
+        points.append(point + ([dt, sold] if dt is not None and sold is not None else [None, None]))
     points.sort(key=lambda p: p[0])
     merged = []
-    for t, lo, qty, qty5 in points:
+    for t, lo, qty, qty5, dt, sold in points:
         if merged and t - merged[-1][0] < POINT_MERGE_SECONDS:
             first = merged[-1]
             cheaper = qty5 if lo < first[1] else max(first[3], qty5) if lo == first[1] else first[3]
-            merged[-1] = [first[0], min(first[1], lo), max(first[2], qty), cheaper]
+            sample = first[4:]
+            if dt is not None and (first[4] is None or dt > first[4] or (dt == first[4] and sold > first[5])):
+                sample = [dt, sold]
+            merged[-1] = [first[0], min(first[1], lo), max(first[2], qty), cheaper] + sample
         else:
-            merged.append([t, lo, qty, qty5])
-    return [tuple(p) for p in merged[-MAX_POINTS:]]
+            merged.append([t, lo, qty, qty5, dt, sold])
+    return merged[-MAX_POINTS:]
+
+
+def decode_points(text):
+    """'t,lo,qty,qty5;...' -> ascending [(t, lo, qty, qty5)]: points less than 30 min after the first of a group are
+    merged into it (lo = min, qty = max, qty5 of the cheaper point, ties: the larger), newest 120. A sell-through
+    sample (fields 5 and 6, addon 0.6.0) is left out: decode_point_samples reads it."""
+    return [tuple(p[:4]) for p in _point_records(text)]
+
+
+def decode_point_samples(text):
+    """The sell-through samples of the same points, [[t, dt, sold], ...] ascending (t of the merged point), after the
+    same merge as decode_points: the upload's "sold" list of a series (contract points-v2)."""
+    return [[p[0], p[4], p[5]] for p in _point_records(text) if p[4] is not None]
 
 
 def decode_deposits(text):
@@ -687,16 +745,23 @@ def _progress(sent, key, observer=None):
     return _progress_entry(entry)
 
 
-def _series(item_id, days, points, progress):
-    """{"id", "days", "points"} of one observer and item, or None when nothing is left. An item the panel already has
-    from this observer only sends its days from the newest accepted day minus RESEND_DAYS and its points newer than
-    the newest accepted time minus 30 min (a later scan can still merge into them)."""
+def _series(item_id, days, points, progress, samples=()):
+    """{"id", "days", "points"[, "sold"]} of one observer and item, or None when nothing is left. An item the panel
+    already has from this observer only sends its days from the newest accepted day minus RESEND_DAYS and its points
+    newer than the newest accepted time minus 30 min (a later scan can still merge into them). samples: the item's
+    [[t, dt, sold]] (decode_point_samples); "sold" only holds those of the points sent, and only when there is one
+    (contract points-v2: a 0.5.x panel ignores it, and a file without samples gives exactly the 0.5.x upload)."""
     if progress and item_id in progress[2]:
         days = [r for r in days if r[0] >= progress[0] - RESEND_DAYS]
         points = [p for p in points if p[0] > progress[1] - POINT_MERGE_SECONDS]
     if not days and not points:
         return None
-    return {"id": item_id, "days": days, "points": points}
+    series = {"id": item_id, "days": days, "points": points}
+    sent = {p[0] for p in points}
+    sold = [list(s) for s in samples if s[0] in sent]
+    if sold:
+        series["sold"] = sold
+    return series
 
 
 def self_hashes(market):
@@ -751,8 +816,9 @@ def build_upload(hist, now, sent=None):
                              "cat": item.get("c") if item.get("c") in CATEGORIES else "otro",
                              "vendor": item.get("v") if _is_int(item.get("v"), 0, PRICE_MAX) else 0}
             days = [list(r) for r in decode_days(item.get("d")) if r[0] <= max_day][-SELF_DAYS:]
-            points = [list(p) for p in decode_points(item.get("p")) if oldest_point <= p[0] <= newest_point][-SELF_POINTS:]
-            series = _series(item_id, days, points, progress)
+            records = _point_records(item.get("p"))
+            points = [p[:4] for p in records if oldest_point <= p[0] <= newest_point][-SELF_POINTS:]
+            series = _series(item_id, days, points, progress, [[p[0], p[4], p[5]] for p in records if p[4] is not None])
             if series:
                 own.append(series)
         if bad:
@@ -773,9 +839,9 @@ def build_upload(hist, now, sent=None):
                     continue
                 days = [list(r) for r in decode_days(item.get("d"))
                         if today - RELAY_DAYS <= r[0] <= max_day and r[6] == "o"][-RELAY_MAX_DAYS:]
-                points = [list(p) for p in decode_points(item.get("p"))
-                          if oldest_point <= p[0] <= newest_point][-RELAY_MAX_POINTS:]
-                one = _series(item_id, days, points, mate)
+                records = _point_records(item.get("p"))
+                points = [p[:4] for p in records if oldest_point <= p[0] <= newest_point][-RELAY_MAX_POINTS:]
+                one = _series(item_id, days, points, mate, [[p[0], p[4], p[5]] for p in records if p[4] is not None])
                 if one:
                     series.append(one)
             if series:
@@ -896,21 +962,25 @@ def accepted_progress(sent, posted, result):
 
 
 def _without_points(observer):
-    """The observer with its scan points left out (series left with nothing are dropped)."""
-    series = [{**s, "points": []} for s in observer["items"]]
+    """The observer with its scan points left out, and with them their sell-through samples (series left with nothing
+    are dropped)."""
+    series = [{"id": s["id"], "days": s["days"], "points": []} for s in observer["items"]]
     return {**observer, "items": [s for s in series if s["days"]]}
 
 
 def encode_payload(upload, seen=None):
     """(payload, notes): compact UTF-8 JSON of at most 2 MiB and MAX_SERIES series. What does not fit is left for a
     later upload, and then notes is not empty (GuildUploader.handle does not record the file as sent, so the next
-    cycle sends the rest): guild mates beyond MAX_SERIES first; over 2 MiB the mates' scan points, then this
-    account's points (as before 0.4.0), then whole mates. Mates go in the order of seen ({(market, hash): newest scan
-    time}, observer_seen): the oldest scans are left out first."""
+    cycle sends the rest): guild mates beyond MAX_SERIES first; over 2 MiB the scan points of one mate after another
+    (their days still go) until it fits, then this account's points (as before 0.4.0), then whole mates. Mates go in
+    the order of seen ({(market, hash): newest scan time}, observer_seen): the oldest scans are left out first. Only
+    the mates whose points went move forward (accepted_progress), so the next upload (the same file again) carries
+    the points of the next ones until every mate's have gone. Leaving out every mate's points at once kept them all
+    at the same place, so they never fitted and never went."""
     seen = seen or {}
     mates = sorted(((seen.get((m["market"], o["obs"]), 0), o["obs"], m["market"], o)
                     for m in upload["markets"] for o in m["observers"] if not o["self"]), key=lambda x: x[:3])
-    deferred, relayed_points, own_points = set(), True, True
+    deferred, stripped, own_points = set(), set(), True
 
     def lighter():
         markets = []
@@ -920,7 +990,7 @@ def encode_payload(upload, seen=None):
                 if o["self"]:
                     observers.append(o if own_points else _without_points(o))
                 elif (m["market"], o["obs"]) not in deferred:
-                    o = o if relayed_points else _without_points(o)
+                    o = _without_points(o) if (m["market"], o["obs"]) in stripped else o
                     if o["items"]:
                         observers.append(o)
             markets.append({**m, "observers": observers})
@@ -933,8 +1003,17 @@ def encode_payload(upload, seen=None):
         deferred.add((market, code))
         total -= len(observer["items"])
     payload = encode_json(lighter())
-    if len(payload) > MAX_BODY_BYTES:
-        relayed_points = False
+    # Over 2 MiB: the points of the mate with the oldest scans wait, then the next one's, until it fits. The bytes each
+    # one saves are estimated (one encode per round, not per mate) and the result is measured again.
+    waiting = [(market, code, observer) for _, code, market, observer in mates
+               if (market, code) not in deferred and any(s["points"] for s in observer["items"])]
+    while len(payload) > MAX_BODY_BYTES and waiting:
+        excess = len(payload) - MAX_BODY_BYTES
+        while waiting and excess > 0:
+            market, code, observer = waiting.pop(0)
+            stripped.add((market, code))
+            bare = _without_points(observer)
+            excess -= len(encode_json(observer)) - (len(encode_json(bare)) if bare["items"] else -1)
         payload = encode_json(lighter())
     if len(payload) > MAX_BODY_BYTES:
         own_points = False
@@ -956,8 +1035,9 @@ def encode_payload(upload, seen=None):
     notes = []
     if not own_points:
         notes.append("el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo")
-    elif not relayed_points:
-        notes.append("el envío pasaba de 2 MiB: esta vez van sin los puntos de los compañeros")
+    elif stripped - deferred:
+        notes.append("el envío pasaba de 2 MiB: los puntos de escaneo de "
+                     f"{plural(len(stripped - deferred), 'compañero', 'compañeros')} irán en el siguiente")
     if deferred:
         notes.append(f"{plural(len(deferred), 'compañero no cabe', 'compañeros no caben')} en este envío: irán en el siguiente")
     return payload, notes
@@ -1108,14 +1188,24 @@ MARKER_TOC_TEMPLATE = ("## Interface: {interface}\n"
                        "## Version: 1\n"
                        "## OptionalDeps: OroHermandad\n"
                        "OroHermandad_Subidor.lua\n")
-MARKER_LUA_TEXT = ("-- Lo crea el subidor de precios de Oro de Hermandad (hermandad.py) y lo vuelve a escribir si cambia. "
-                   "No lo edites.\n"
-                   "OroHermandadSubidor = {formato = 1}\n")
+MARKER_HEAD = ("-- Lo crea el subidor de precios de Oro de Hermandad (hermandad.py) y lo vuelve a escribir si cambia. "
+               "No lo edites.\n")
+MARKER_LUA_TEXT = MARKER_HEAD + "OroHermandadSubidor = {formato = 1}\n"     # marker v1 (0.4.0 and 0.5.0 uploaders)
+MARKER_ESTADOS = ("ok", "clave", "red", "cuota", "rechazado")
+MARKER_VERSION = re.compile(r"[0-9][0-9.]{0,15}")
+MARKER_COUNT_MAX = 100_000   # suben, aportan and dia
+MARKER_LEFT_MAX = 1000       # quedan
+MARKER_REFRESH = 3600        # escrito older than this: written again. The game reads the marker only at login or
+                             # /reload and says «no parece abierto» if escrito was over 2 h old then
+MARKER_MIN_GAP = 60          # never written twice within a minute; a change waits («later») until then
+_MARKER_WRITTEN = re.compile(rb"\nOroHermandadSubidor = \{\n  formato = 1,\n  datos = 2,\n  escrito = ([0-9]{1,12}),\n")
 MARKER_DEFAULT_INTERFACE = "16001"
 MARKER_INTERFACE = re.compile(r"[0-9]{5,6}(?: *, *[0-9]{5,6})*")
 _TOC_INTERFACE = re.compile(r"##[ \t]*Interface[ \t]*:(.*)")
 MARKER_READ_BYTES = 64 * 1024
-MARKER_POLLS = 240           # the watch loop checks the marker again every 240 polls of 15 s (one hour)
+MARKER_POLLS = 120           # the watch loop checks the marker again every 120 polls of 15 s (half an hour), counted
+                             # by the clock, also during a long wait after an error: with MARKER_REFRESH, escrito
+                             # stays under 1.5 h old plus a poll and the time a cycle takes
 MARKER_LINES = {
     "created": f"He creado el aviso {MARKER_SHOWN} para que Oro de Hermandad 0.4 sepa que este PC sube los precios de "
                "la hermandad y pida a tus compañeros los que te perdiste. Si el juego está abierto, sal del todo y "
@@ -1166,12 +1256,46 @@ def marker_interface(addon_toc):
     return MARKER_DEFAULT_INTERFACE
 
 
-def marker_files(interface=MARKER_DEFAULT_INTERFACE):
-    """{file name: exact bytes} of the marker addon (ASCII, LF)."""
+def marker_lua(status):
+    """The Lua file of marker v2 (contract marker-v2, ASCII, LF, fixed field order and spacing) for status = {"escrito",
+    "version", "envio": {"t", "estado"}, "suben", "aportan", "quedan", "dia"}. Only numbers in range and words of fixed
+    sets are written (the game runs this file): anything else is left out, quedan and dia only together."""
+    def number(value, high):
+        return value if _is_int(value, 0, high) else None
+    escrito = number(status.get("escrito"), TIME_MAX) or 0
+    version = status.get("version")
+    if not isinstance(version, str) or not MARKER_VERSION.fullmatch(version):
+        version = VERSION
+    lines = [MARKER_HEAD, "OroHermandadSubidor = {\n", "  formato = 1,\n", "  datos = 2,\n", f"  escrito = {escrito},\n",
+             f'  version = "{version}",\n']
+    envio = status.get("envio")
+    if isinstance(envio, dict) and number(envio.get("t"), TIME_MAX) is not None and envio.get("estado") in MARKER_ESTADOS:
+        lines.append(f'  envio = {{t = {envio["t"]}, estado = "{envio["estado"]}"}},\n')
+    for name in ("suben", "aportan"):
+        if number(status.get(name), MARKER_COUNT_MAX) is not None:
+            lines.append(f"  {name} = {status[name]},\n")
+    quedan, dia = number(status.get("quedan"), MARKER_LEFT_MAX), number(status.get("dia"), MARKER_COUNT_MAX)
+    if quedan is not None and dia is not None:
+        lines.append(f"  quedan = {quedan},\n  dia = {dia},\n")
+    lines.append("}\n")
+    return "".join(lines).encode("ascii")
+
+
+def marker_files(interface=MARKER_DEFAULT_INTERFACE, status=None):
+    """{file name: exact bytes} of the marker addon (ASCII, LF): the fixed TOC, and the Lua file of marker v2 for a
+    status (marker_lua), or the v1 one ({formato = 1}) without one."""
     if not MARKER_INTERFACE.fullmatch(interface):
         interface = MARKER_DEFAULT_INTERFACE
     return {MARKER_TOC: MARKER_TOC_TEMPLATE.format(interface=interface).encode("ascii"),
-            MARKER_LUA: MARKER_LUA_TEXT.encode("ascii")}
+            MARKER_LUA: MARKER_LUA_TEXT.encode("ascii") if status is None else marker_lua(status)}
+
+
+def marker_written(data):
+    """escrito of a marker v2 Lua file (bytes) written by this uploader, or None (v1, another content or nothing)."""
+    if not isinstance(data, bytes) or not data.startswith(MARKER_HEAD.encode("ascii")):
+        return None
+    match = _MARKER_WRITTEN.match(data, len(MARKER_HEAD) - 1)
+    return int(match.group(1)) if match else None
 
 
 def _same_path(path, expected):
@@ -1210,11 +1334,29 @@ def _replace_file(path, data):
         raise
 
 
-def ensure_marker(folder):
+def _marker_lua_for(existing, status, now):
+    """(bytes to write, status-only change) of the marker v2 Lua file, or (None, False) to wait: rewritten when the
+    content other than escrito changed, or when escrito is an hour old; never twice within MARKER_MIN_GAP seconds."""
+    written = marker_written(existing)
+    if written is None:
+        return marker_lua({**status, "escrito": now}), False
+    age = now - written
+    if existing == marker_lua({**status, "escrito": written}) and 0 <= age < MARKER_REFRESH:
+        return existing, False
+    if 0 <= age < MARKER_MIN_GAP:
+        return None, False
+    return marker_lua({**status, "escrito": now}), True
+
+
+def ensure_marker(folder, status=None, now=None):
     """Writes the marker addon when Oro de Hermandad is installed in the client of folder, only if its bytes differ.
-    Returns created (a new addon for the game: it needs a full restart of the client), updated, ok (already right),
-    no-addon (Oro de Hermandad is not in that client's AddOns: nothing is written), unknown (no _forever_ folder),
-    unsafe (the marker folder or a file of it resolves outside AddOns), denied or error (it could not be written)."""
+    status: the uploader's status for marker v2 (UploaderStatus.marker_state(), without escrito); None writes the v1
+    file. now: the unix time written as escrito (time.time()).
+    Returns created (a new addon for the game: it needs a full restart of the client), updated, refreshed (only the
+    status of a v2 marker changed: nothing to say), later (a status change waits a few seconds: call again), ok
+    (already right), no-addon (Oro de Hermandad is not in that client's AddOns: nothing is written), unknown (no
+    _forever_ folder), unsafe (the marker folder or a file of it resolves outside AddOns), denied or error (it could
+    not be written)."""
     forever = forever_folder(folder)
     if forever is None:
         return "unknown"
@@ -1228,19 +1370,30 @@ def ensure_marker(folder):
                                                       for name in files):
             return "unsafe"
         created = not (target / MARKER_TOC).is_file()
+        refreshed = False
+        if status is not None:
+            now = int(time.time() if now is None else now)
+            lua, refreshed = _marker_lua_for(_read_small(target / MARKER_LUA), status, now)
+            if lua is None and not created:
+                return "later"
+            files[MARKER_LUA] = lua if lua is not None else marker_lua({**status, "escrito": now})
         target.mkdir(exist_ok=True)
         if not _same_path(target, real_target):
             return "unsafe"
-        changed = False
+        changed = []
         for name, data in files.items():
             if _read_small(target / name) != data:
                 _replace_file(target / name, data)
-                changed = True
+                changed.append(name)
     except PermissionError:
         return "denied"
     except OSError:
         return "error"
-    return "created" if created else "updated" if changed else "ok"
+    if created:
+        return "created"
+    if changed == [MARKER_LUA] and refreshed:
+        return "refreshed"
+    return "updated" if changed else "ok"
 
 
 def remove_marker(folder):
@@ -1355,6 +1508,7 @@ def post_guild(url, key, payload, timeout=REQUEST_TIMEOUT, route="/api/guild/syn
                 pass
             limited = RetryableSyncError(f"El panel pide esperar antes del siguiente envío (HTTP 429).{said}")
             limited.retry_after = max(60, min(3600, wait))
+            limited.cuota = True            # the window keeps this wait: «Subir ahora» does not cut it short
             raise limited from None
         if error.code == 503:
             raise RetryableSyncError("El panel todavía no tiene activada la hermandad (HTTP 503). Avisa a quien lo "
@@ -1393,6 +1547,23 @@ class Event:
     partial: bool = False   # something did not fit (encode_payload, or mates the panel left for another upload:
                             # ENVIO): the file is read again next cycle
     retry: int | None = None  # mates waiting for the panel's next daily quota (CUOTA): sent again from this time
+    addon: str | None = None  # the addon version that wrote OroHermandadHist (when the file was read)
+    notice: str = ""          # said once per account file and addon version: the addon is too old to measure sales
+
+
+def dotted_version(value):
+    """(0, 6, 0) of '0.6.0' (1 to 4 numbers), or None for anything else ('0.6.0-beta', '', None)."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,6}(?:\.[0-9]{1,6}){0,3}", value):
+        return None
+    return tuple(int(part) for part in value.split("."))
+
+
+def addon_notice(account, version):
+    """The notice for an account whose addon cannot measure sales yet (older than 0.6.0), or ""."""
+    parsed = dotted_version(version)
+    if parsed is None or parsed >= SALES_ADDON:
+        return ""
+    return f"La cuenta {account} tiene el addon {version}: actualízalo a la 0.6.0 para que el panel reciba las ventas."
 
 
 class GuildUploader:
@@ -1416,6 +1587,7 @@ class GuildUploader:
         self.clock = clock
         self.ignored = {}   # path -> sha256 of a file that was invalid, empty or rejected (until it changes)
         self.settled = {}   # path -> stat signature already handled in this run: not read again until it changes
+        self.addons = {}    # path -> addon version of the last OroHermandadHist read (its notice is said once)
 
     def remember(self, path, file_sha, payload_sha, now, markets=None, retry=None):
         self.state[str(path)] = {"file": file_sha, "payload": payload_sha, "at": int(now)}
@@ -1453,6 +1625,7 @@ class GuildUploader:
                 event = self.check_fishing(fishing, now)
             except (AuthenticationError, RetryableSyncError) as error:
                 error.events = events
+                error.fishing = True        # not a price upload: the status of the prices stays (UploaderStatus)
                 raise
             if event is not None:
                 events.append(event)
@@ -1502,6 +1675,9 @@ class GuildUploader:
         except RejectedUploadError as error:
             self.ignored[key] = observation.sha256
             return Event(source, "rejected", str(error))
+        except (AuthenticationError, RetryableSyncError):
+            self.settled.pop(key, None)     # not sent: the same file is read and sent again at the next attempt
+            raise
         self.remember(key, observation.sha256, digest, now)
         return Event(source, "fishing", result=result, upload={"sessions": len(sessions)})
 
@@ -1530,24 +1706,39 @@ class GuildUploader:
         return event
 
     def handle(self, source, observation, now):
+        key = str(source.path)
+        if observation.sha256 == self.ignored.get(key) or (observation.sha256 == (self.state.get(key) or {}).get("file")
+                                                           and not self.retry_due(key, now)):
+            return Event(source, "unchanged")
+        found = {}
+        event = self._handle(source, observation, now, found)
+        version = found.get("addon")
+        if isinstance(version, str) and ADDON_PATTERN.fullmatch(version):
+            event.addon = version
+            if self.addons.get(key) != version:
+                self.addons[key] = version
+                event.notice = addon_notice(source.account, version)
+        return event
+
+    def _handle(self, source, observation, now, found):
         path, key = source.path, str(source.path)
         saved = self.state.get(key) or {}
         due = self.retry_due(key, now)
         keep = None if due else saved.get("retry")
-        if observation.sha256 == self.ignored.get(key) or (observation.sha256 == saved.get("file") and not due):
-            return Event(source, "unchanged")
         try:
             hist = extract_hist(observation.text)
             if hist is None:
                 self.ignored[key] = observation.sha256
                 return Event(source, "empty", f"{SOURCE_NAME} todavía no tiene el historial de precios ({HIST_GLOBAL}). "
                              "Instala Oro de Hermandad 0.4.0, entra en el juego y sal (o usa /reload).")
+            if isinstance(hist, dict):
+                found["addon"] = hist.get("addon")
             complete, notes = build_upload(hist, now)
             if not complete["markets"]:
                 self.ignored[key] = observation.sha256
-                return Event(source, "empty", "todavía no hay precios para enviar. Abre la casa de subastas con "
-                             "Auctionator y haz un escaneo completo (o juega mientras lo hace un compañero con el addon), "
-                             "y sal del juego (o usa /reload).")
+                return Event(source, "empty", "todavía no hay precios para enviar. Abre la subasta y pulsa «Escanear» en "
+                             "Oro de Hermandad (o juega mientras lo hace un compañero con el addon), y sal del juego (o "
+                             "usa /reload).")
             digest = hashlib.sha256(encode_json(complete)).hexdigest()
             sent = saved.get("markets")
             if digest == saved.get("payload") and not due:
@@ -1588,6 +1779,116 @@ class GuildUploader:
 
 
 QUOTA_MARGIN = 300   # after the panel's daily write quota resets (00:00 UTC), mates left as CUOTA go 5 min later
+
+
+def marker_from(result):
+    """What the uploader keeps from a /api/guild/sync answer (contract C4, sync-response-v060.json markerFrom):
+    suben and aportan of the market with the most aportan (ties: the first by name), nueva = subidor.ultima when it
+    is a newer version than this uploader, and quedan/dia = uploadsLeft/day of an accepted, non-duplicate answer that
+    has both. Anything missing or out of range is None (a None quedan/dia keeps the previous pair)."""
+    out = {"suben": None, "aportan": None, "nueva": None, "quedan": None, "dia": None}
+    if not isinstance(result, dict):
+        return out
+    estado = result.get("estado") if isinstance(result.get("estado"), dict) else {}
+    markets = estado.get("mercados") if isinstance(estado.get("mercados"), list) else []
+    best = None
+    for entry in markets:
+        if not isinstance(entry, dict) or not isinstance(entry.get("market"), str):
+            continue
+        if not _is_int(entry.get("aportan"), 0, MARKER_COUNT_MAX):
+            continue
+        if best is None or entry["aportan"] > best["aportan"] or (entry["aportan"] == best["aportan"]
+                                                                 and entry["market"] < best["market"]):
+            best = entry
+    if best is not None:
+        out["aportan"] = best["aportan"]
+        out["suben"] = best["suben"] if _is_int(best.get("suben"), 0, MARKER_COUNT_MAX) else None
+    subidor = result.get("subidor") if isinstance(result.get("subidor"), dict) else {}
+    latest = subidor.get("ultima")
+    if dotted_version(latest) is not None and dotted_version(latest) > dotted_version(VERSION):
+        out["nueva"] = latest
+    if result.get("accepted") is True and result.get("duplicate") is not True:
+        left, day = result.get("uploadsLeft"), result.get("day")
+        if _is_int(left, 0, MARKER_LEFT_MAX) and _is_int(day, 0, MARKER_COUNT_MAX):
+            out["quedan"], out["dia"] = left, day
+    return out
+
+
+def error_estado(error):
+    """The marker's estado of an error that stopped a cycle: clave (key refused), cuota (the panel asked to wait,
+    HTTP 429) or red (no connection or the panel failed: tried again later)."""
+    if isinstance(error, AuthenticationError):
+        return "clave"
+    if getattr(error, "cuota", False):
+        return "cuota"
+    return "red"
+
+
+class UploaderStatus:
+    """What the marker v2 (and the window) tell about the uploads: the last accepted upload, the latest attempt's
+    outcome and the panel's counts. It survives restarts in config.json under "estado" = {"aceptado": t, "ultimo":
+    "ok|clave|red|cuota|rechazado", "suben": n, "aportan": n, "nueva": "x.y.z", "quedan": n, "dia": d}; a malformed
+    field is ignored."""
+    FIELDS = ("aceptado", "ultimo", "suben", "aportan", "nueva", "quedan", "dia")
+
+    def __init__(self, stored=None):
+        stored = stored if isinstance(stored, dict) else {}
+        def number(name, high):
+            return stored.get(name) if _is_int(stored.get(name), 0, high) else None
+        self.aceptado = number("aceptado", TIME_MAX) or 0
+        self.ultimo = stored.get("ultimo") if stored.get("ultimo") in MARKER_ESTADOS else None
+        self.suben, self.aportan = number("suben", MARKER_COUNT_MAX), number("aportan", MARKER_COUNT_MAX)
+        nueva = stored.get("nueva")
+        self.nueva = nueva if dotted_version(nueva) is not None and dotted_version(nueva) > dotted_version(VERSION) else None
+        self.quedan, self.dia = number("quedan", MARKER_LEFT_MAX), number("dia", MARKER_COUNT_MAX)
+        if self.quedan is None or self.dia is None:
+            self.quedan = self.dia = None
+
+    def to_config(self):
+        values = {"aceptado": self.aceptado or None, "ultimo": self.ultimo, "suben": self.suben, "aportan": self.aportan,
+                  "nueva": self.nueva, "quedan": self.quedan, "dia": self.dia}
+        return {k: v for k, v in values.items() if v is not None}
+
+    def answer(self, result, now):
+        """An accepted answer of the panel (also a duplicate one)."""
+        info = marker_from(result)
+        self.ultimo, self.aceptado = "ok", int(now)
+        self.suben, self.aportan, self.nueva = info["suben"], info["aportan"], info["nueva"]
+        if info["quedan"] is not None and info["dia"] is not None:
+            self.quedan, self.dia = info["quedan"], info["dia"]
+
+    def record_result(self, result, now):
+        """A cycle's result (run's on_result). True when something changed."""
+        before = self.to_config()
+        for event in result.get("events", ()) if isinstance(result, dict) else ():
+            if event.source.path.name != SOURCE_NAME:          # Forever Fishing: not a price upload
+                continue
+            if event.kind in ("uploaded", "duplicate"):
+                self.answer(event.result, now)
+            elif event.kind == "rejected":
+                self.ultimo = "rechazado"
+        return self.to_config() != before
+
+    def record_error(self, error, now):
+        """An error that stopped a cycle (run's on_error), after the events handled before it. True when something
+        changed. A network error or wait of the Forever Fishing upload (error.fishing) is not a price upload, as in
+        record_result: the latest price attempt stays (an accepted fishing upload later would not clear it). A refused
+        key is the same for both."""
+        before = self.to_config()
+        self.record_result({"events": getattr(error, "events", ())}, now)
+        if not getattr(error, "fishing", False) or isinstance(error, AuthenticationError):
+            self.ultimo = error_estado(error)
+        return self.to_config() != before
+
+    def marker_state(self):
+        """The marker v2 fields (marker_lua, without escrito)."""
+        state = {"version": VERSION}
+        if self.ultimo:
+            state["envio"] = {"t": self.aceptado, "estado": self.ultimo}
+        for name in ("suben", "aportan", "quedan", "dia"):
+            if getattr(self, name) is not None:
+                state[name] = getattr(self, name)
+        return state
 
 
 def skipped_reasons(result):
@@ -1692,48 +1993,120 @@ def describe(event):
     return []
 
 
-def run(uploader, once=False, sleep=time.sleep, marker=None):
+def say_event(event):
+    """describe(event), then the notice about an old addon (said once per account file and version)."""
+    for line in describe(event):
+        say(line)
+    if event.notice:
+        say(event.notice)
+
+
+def run(uploader, once=False, sleep=time.sleep, marker=None, *, stop=None, wake=None, on_result=None, on_error=None,
+        clock=time.monotonic):
     """Watch loop: checks every 15 s; on errors waits 60 s doubling up to 5 min (or what the panel asks).
-    marker: called at the start and then every MARKER_POLLS polls (ensure_marker of the WoW folder); its line, if
-    any, is said (a problem only once per run). Returns 0 when stopped normally, 1 after an error in --once and 2 if
-    the key was refused."""
+    marker: called at the start and then every MARKER_POLLS * POLL_SECONDS seconds of clock (ensure_marker of the WoW
+    folder), also in the middle of a wait longer than a poll (a 429 can ask for an hour); its line, if any, is said (a
+    problem only once per run). With on_result or on_error (callers that keep an UploaderStatus: the marker v2 carries
+    it) it is called after the first cycle instead of before it, right after a cycle or an error that can change that
+    status, and again on the next poll while it answers «later». Returns 0 when stopped normally, 1 after an error in
+    --once and 2 if the key was refused.
+    The window runs it in a thread: stop and wake are threading.Events. Every wait then lasts up to its time and ends
+    early when stop is set, or when wake is set (wake is cleared then), except the wait the panel asked for (HTTP 429);
+    whoever sets stop also sets wake. Stopped, it returns 0. on_result(result) is called after each cycle,
+    on_error(error, delay) before each wait after an error (delay None when the key was refused: the loop ends).
+    Without stop the texts are the console's (Ctrl+C...). clock: the seconds that the waits and the marker checks
+    count (time.monotonic); the tests pass one that their sleep or their wake moves on."""
     backoff, last_status, pending, problems, tries, polls, told = 60, None, set(), False, 0, 0, set()
+    tracked = on_result is not None or on_error is not None
+    console = stop is None
+    marker_every = MARKER_POLLS * POLL_SECONDS
+    marker_next, marker_later = clock() + marker_every, False
+
+    def stopped():
+        return stop is not None and stop.is_set()
+
+    def wait(seconds):
+        """Waits up to seconds; True when wake ended it early (wake is cleared then)."""
+        if wake is None:
+            if stop is None:
+                sleep(seconds)
+            else:
+                stop.wait(seconds)
+            return False
+        if not wake.wait(seconds):
+            return False
+        wake.clear()
+        return True
+
+    def pause(seconds, wakeable=True):
+        """A wait longer than a poll is cut at each marker check that falls due in it (every poll while the marker
+        answers «later»): counted in polls, an hour of 429 delayed the check and the game said «no parece abierto»
+        with the uploader open."""
+        end, left = clock() + seconds, seconds
+        while left > 0 and not stopped():
+            step = left
+            if marker is not None and seconds > POLL_SECONDS:
+                step = min(left, max(0, POLL_SECONDS if marker_later else marker_next - clock()))
+            if step and wait(step):
+                if wakeable:
+                    return
+                left = end - clock()
+                continue
+            left -= step
+            if left > 0 and not stopped():
+                check_marker()
 
     def check_marker():
+        nonlocal marker_next, marker_later
         if marker is None:
             return
+        marker_next = clock() + marker_every
         try:
             status = marker()
         except Exception:
             status = "error"
+        marker_later = status == "later"
         line = MARKER_LINES.get(status)
         if line and (status in ("created", "updated") or status not in told):
             told.add(status)
             say(line)
 
-    check_marker()
+    if not tracked:
+        check_marker()
     while True:
-        if polls and polls % MARKER_POLLS == 0:
+        if stopped():
+            return 0
+        if polls and (marker_later or clock() >= marker_next):
             check_marker()
         polls += 1
         try:
             result = uploader.cycle()
         except AuthenticationError as error:
             for event in getattr(error, "events", []):
-                for line in describe(event):
-                    say(line)
+                say_event(event)
             say(str(error))
+            if on_error is not None:
+                on_error(error, None)
+            if tracked:
+                check_marker()
             return 2
         except SyncError as error:
             for event in getattr(error, "events", []):
-                for line in describe(event):
-                    say(line)
+                say_event(event)
             say(str(error))
             if once:
+                if on_error is not None:
+                    on_error(error, None)
+                if tracked:
+                    check_marker()
                 return 1
             delay = max(backoff, getattr(error, "retry_after", 60))
-            say(f"Nuevo intento dentro de {delay} segundos. Ctrl+C para cerrar.")
-            sleep(delay)
+            say(f"Nuevo intento dentro de {delay} segundos." + (" Ctrl+C para cerrar." if console else ""))
+            if on_error is not None:
+                on_error(error, delay)
+            if tracked:
+                check_marker()
+            pause(delay, wakeable=not getattr(error, "cuota", False))
             backoff, last_status = min(300, backoff * 2), None
             continue
         backoff = 60
@@ -1744,8 +2117,7 @@ def run(uploader, once=False, sleep=time.sleep, marker=None):
                 if str(event.source.path) in pending:
                     continue
             problems = problems or event.kind in ("invalid", "rejected")
-            for line in describe(event):
-                say(line)
+            say_event(event)
         pending = now_pending
         status = result["status"]
         quiet = all(e.kind == "unchanged" for e in result["events"])
@@ -1755,13 +2127,17 @@ def run(uploader, once=False, sleep=time.sleep, marker=None):
         elif status == "ok" and quiet and last_status != "quiet":
             say("Sin cambios pendientes.")
         last_status = "quiet" if status == "ok" and quiet else status
+        if on_result is not None:
+            on_result(result)
+        if tracked and (polls == 1 or any(e.kind in ("uploaded", "duplicate", "rejected") for e in result["events"])):
+            check_marker()
         if once:
             if (pending or any(e.partial for e in result["events"])) and tries < 10:
                 tries += 1
-                sleep(SETTLE_SECONDS)
+                pause(SETTLE_SECONDS)
                 continue
             return 1 if problems else 0
-        sleep(POLL_SECONDS)
+        pause(POLL_SECONDS)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1886,6 +2262,8 @@ def load_config(directory):
         return {}
     if not isinstance(data.get("sources"), dict):
         data["sources"] = {}
+    if "estado" in data and not isinstance(data["estado"], dict):
+        del data["estado"]                      # the uploader's status (UploaderStatus): optional, rebuilt when broken
     return data
 
 
@@ -1902,9 +2280,69 @@ def save_config(directory, data):
     os.replace(temporary, directory / "config.json")
 
 
+LOCK_HOLDER = "subidor.quien.json"
+LOCK_MODES = ("ventana", "segundo-plano", "consola")
+
+
+class _FILETIME(ctypes.Structure):
+    _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
+
+
+def process_alive(pid, since):
+    """False when pid is not a running process, or (Windows) is a newer process that reused the pid: started more than
+    2 s after `since`. When it cannot be told, True. Never os.kill on Windows: it would end the process."""
+    try:
+        if not _windows():
+            os.kill(pid, 0)
+            return True
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        kernel32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(_FILETIME)] * 4
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.OpenProcess(0x1000, 0, pid)            # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() != 87                   # ERROR_INVALID_PARAMETER: no such process
+        try:
+            code = ctypes.c_uint32()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value != 259:     # STILL_ACTIVE
+                return False
+            times = [_FILETIME() for _ in range(4)]
+            if kernel32.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
+                started = ((times[0].high << 32) | times[0].low) / 1e7 - 11644473600
+                return started <= since + 2
+            return True
+        finally:
+            kernel32.CloseHandle(handle)
+    except ProcessLookupError:
+        return False
+    except Exception:                                               # PermissionError (alive) and anything unexpected
+        return True
+
+
+def lock_holder(directory, alive=None):
+    """{"pid", "modo", "desde"} of the uploader holding subidor.lock (the file it writes next to it), or None: no file
+    (a 0.5.0 uploader writes none), a malformed one, or a stale one left by a holder that ended without removing it
+    (Task Manager, Windows logoff, the console's X): its pid is not running (alive(pid, desde), process_alive)."""
+    try:
+        with open(Path(directory) / LOCK_HOLDER, "rb") as stream:
+            data = json.loads(stream.read(4096).decode("utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if (not isinstance(data, dict) or not _is_int(data.get("pid"), 1, 2**32) or data.get("modo") not in LOCK_MODES
+            or not _is_int(data.get("desde"), 0, TIME_MAX)):
+        return None
+    if not (alive or process_alive)(data["pid"], data["desde"]):
+        return None
+    return {"pid": data["pid"], "modo": data["modo"], "desde": data["desde"]}
+
+
 @contextlib.contextmanager
-def instance_lock(directory):
-    """Only one uploader per Windows user (the startup task and a double click would otherwise both upload)."""
+def instance_lock(directory, modo="consola"):
+    """Only one uploader per Windows user (the startup task and a double click would otherwise both upload). The
+    holder also writes subidor.quien.json = {"pid", "modo": ventana|segundo-plano|consola, "desde"} next to the lock
+    and removes it on release, so another start can say who has it (lock_holder)."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     stream = open(directory / "subidor.lock", "a+")
@@ -1923,9 +2361,15 @@ def instance_lock(directory):
             locked = True
         except OSError:
             locked = False
+        if locked:
+            holder = {"pid": os.getpid(), "modo": modo if modo in LOCK_MODES else "consola", "desde": int(time.time())}
+            with contextlib.suppress(OSError):
+                _replace_file(directory / LOCK_HOLDER, json.dumps(holder).encode("ascii"))
         yield locked
     finally:
         if locked:
+            with contextlib.suppress(OSError):
+                os.unlink(directory / LOCK_HOLDER)
             with contextlib.suppress(Exception):
                 if _windows():
                     import msvcrt
@@ -2084,9 +2528,30 @@ def startup_task_xml(executable, arguments, user=None, folder=None):
 """
 
 
-def _schtasks(arguments, runner):
-    return runner(["schtasks", *arguments], capture_output=True, stdin=subprocess.DEVNULL, timeout=60,
-                  encoding="oem" if _windows() else None, errors="replace")
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+
+def _hidden(options, hidden):
+    """Subprocesses started from the window never flash a console window (the command line keeps its behaviour)."""
+    if hidden and _windows():
+        options["creationflags"] = CREATE_NO_WINDOW
+    return options
+
+
+def _schtasks(arguments, runner, hidden=False):
+    return runner(["schtasks", *arguments], **_hidden(dict(capture_output=True, stdin=subprocess.DEVNULL, timeout=60,
+                                                          encoding="oem" if _windows() else None, errors="replace"),
+                                                     hidden))
+
+
+def startup_task_installed(runner=subprocess.run, hidden=True):
+    """True when the hidden start with Windows of --instalar-inicio (Task Scheduler) exists for this user."""
+    if not _windows():
+        return False
+    try:
+        return _schtasks(["/Query", "/TN", TASK_NAME], runner, hidden).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def install_startup(runner=subprocess.run, env=None, executable=None, script=None, home=None):
@@ -2118,14 +2583,227 @@ def install_startup(runner=subprocess.run, env=None, executable=None, script=Non
         "Para quitarlo: HERMANDAD.cmd --quitar-inicio", stamp=False)
 
 
-def uninstall_startup(runner=subprocess.run):
+def uninstall_startup(runner=subprocess.run, end=False, hidden=False, quiet=False):
+    """Removes the start with Windows of --instalar-inicio. end: also stops the copy it started (the window does it
+    before taking over). Returns True when a task was removed."""
     if not _windows():
         raise SyncError("El inicio con Windows solo existe en Windows.")
-    result = _schtasks(["/Delete", "/TN", TASK_NAME, "/F"], runner)
-    if result.returncode != 0:
+    if end:
+        _schtasks(["/End", "/TN", TASK_NAME], runner, hidden)
+    result = _schtasks(["/Delete", "/TN", TASK_NAME, "/F"], runner, hidden)
+    if quiet:
+        pass
+    elif result.returncode != 0:
         say("No había ninguna tarea de inicio del subidor (o ya se había quitado).", stamp=False)
     else:
         say("Quitado: el subidor ya no arrancará con Windows.", stamp=False)
+    return result.returncode == 0
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# The window's start with Windows (Run key, visible and minimized) and its desktop shortcut
+# ---------------------------------------------------------------------------------------------------------------
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE = "OroHermandadSubidor"
+SHORTCUT_NAME = "Oro de Hermandad · Subidor.lnk"
+AUTOSTART_MOVED = "El inicio con Windows apuntaba a otra carpeta: ahora abre esta."
+RUN_COMMAND_MAX = 260         # Windows only runs a Run value «no longer than 260 characters» (Run and RunOnce keys)
+AUTOSTART_TOO_LONG = ("La ruta de la carpeta del subidor es demasiado larga para el inicio con Windows. Mueve la "
+                      "carpeta a una ruta más corta (por ejemplo C:\\OroHermandad) y vuelve a intentarlo.")
+AUTOSTART_TOO_LONG_REMOVED = ("He quitado el inicio con Windows: la ruta de la carpeta del subidor es demasiado larga y "
+                              "Windows no lo abriría. Mueve la carpeta a una ruta más corta (por ejemplo C:\\OroHermandad) "
+                              "y vuelve a marcar «Abrir el subidor al iniciar Windows».")
+AUTOSTART_TOO_LONG_KEPT = ("La ruta de la carpeta del subidor es demasiado larga para el inicio con Windows: al "
+                           "iniciar Windows se sigue abriendo el subidor de {carpeta}.")
+_AUTOSTART_PARTS = re.compile(r'"([^"]+)" -E -s "([^"]+)" --minimizado')
+SHORTCUT_ABSENT = 3          # exit code of _SHORTCUT_SCRIPT when only an existing shortcut is rewritten and there is none
+_SHORTCUT_SCRIPT = ("$ErrorActionPreference = 'Stop'; "
+                    "$d = [Environment]::GetFolderPath('Desktop'); "
+                    "$p = Join-Path $d $env:OROHERMANDAD_ACCESO; "
+                    "if ($env:OROHERMANDAD_SOLO_SI_EXISTE -and -not (Test-Path -LiteralPath $p)) { exit 3 }; "
+                    "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p); "
+                    "$s.TargetPath = $env:OROHERMANDAD_PROGRAMA; "
+                    "$s.Arguments = $env:OROHERMANDAD_ARGUMENTOS; "
+                    "$s.WorkingDirectory = $env:OROHERMANDAD_CARPETA; "
+                    "$s.IconLocation = $env:OROHERMANDAD_PROGRAMA + ',0'; "
+                    "$s.Description = 'Oro de Hermandad - subidor de precios'; "
+                    "$s.Save()")
+
+
+def launch_parts(app_dir=None, executable=None, exists=os.path.isfile):
+    """(pythonw.exe, subidor.pyw, working folder) that open the window. In the portable folder (<dir>\\app next to
+    <dir>\\runtime\\pythonw.exe) its own runtime and <dir>; otherwise pythonw.exe next to this Python (python.exe
+    when there is none) and the folder of subidor.pyw. Windows paths (ntpath)."""
+    app_dir = str(app_dir or Path(__file__).resolve().parent).rstrip("\\/")
+    root = ntpath.dirname(app_dir)
+    script = ntpath.join(app_dir, "subidor.pyw")
+    packaged = ntpath.join(root, "runtime", "pythonw.exe")
+    if exists(packaged):
+        return packaged, script, root
+    executable = str(executable or sys.executable)
+    windowless = ntpath.join(ntpath.dirname(executable), "pythonw.exe")
+    return (windowless if exists(windowless) else executable), script, app_dir
+
+
+def autostart_command(app_dir=None, executable=None, exists=os.path.isfile):
+    """The Run value that opens the window minimized: "<pythonw.exe>" -E -s "<subidor.pyw>" --minimizado (-E -s:
+    no PYTHON* variables or user packages; never -I, which would drop the app folder from the import path)."""
+    program, script, _ = launch_parts(app_dir, executable, exists)
+    return f'"{program}" -E -s "{script}" --minimizado'
+
+
+def autostart_script(value):
+    """The subidor.pyw that a Run value written by autostart_command opens, or None (no value, or another one)."""
+    match = _AUTOSTART_PARTS.fullmatch(value) if isinstance(value, str) else None
+    return match.group(2) if match else None
+
+
+def copy_folder(script):
+    """The folder of the copy whose subidor.pyw is script: <dir> for <dir>\\app\\subidor.pyw (the portable folder),
+    otherwise the folder of subidor.pyw. Windows paths (ntpath)."""
+    app_dir = ntpath.dirname(script)
+    return ntpath.dirname(app_dir) if ntpath.basename(app_dir).lower() == "app" else app_dir
+
+
+class RunKey:
+    """HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run through winreg (no subprocess). The tests pass a
+    fake winreg module."""
+
+    def __init__(self, api=None):
+        self.api = api
+
+    def _winreg(self):
+        if self.api is None:
+            import winreg
+            self.api = winreg
+        return self.api
+
+    def get(self, name):
+        api = self._winreg()
+        try:
+            with api.OpenKey(api.HKEY_CURRENT_USER, RUN_KEY, 0, api.KEY_READ) as key:
+                value, kind = api.QueryValueEx(key, name)
+        except FileNotFoundError:
+            return None
+        return value if kind in (api.REG_SZ, api.REG_EXPAND_SZ) and isinstance(value, str) else None
+
+    def set(self, name, value):
+        api = self._winreg()
+        with api.CreateKeyEx(api.HKEY_CURRENT_USER, RUN_KEY, 0, api.KEY_SET_VALUE) as key:
+            api.SetValueEx(key, name, 0, api.REG_SZ, value)
+
+    def delete(self, name):
+        api = self._winreg()
+        try:
+            with api.OpenKey(api.HKEY_CURRENT_USER, RUN_KEY, 0, api.KEY_SET_VALUE) as key:
+                api.DeleteValue(key, name)
+        except FileNotFoundError:
+            pass
+
+
+def _run_key(registry):
+    if registry is not None:
+        return registry
+    if not _windows():
+        raise SyncError("El inicio con Windows solo existe en Windows.")
+    return RunKey()
+
+
+def autostart_value(registry=None):
+    """The Run value as it is now: None without one (or when it cannot be read)."""
+    try:
+        return _run_key(registry).get(RUN_VALUE)
+    except (OSError, SyncError):
+        return None
+
+
+def autostart_installed(registry=None):
+    return autostart_value(registry) is not None
+
+
+def run_command_fits(command):
+    """True when Windows runs this Run value: at most RUN_COMMAND_MAX characters (UTF-16 units, as Windows counts)."""
+    return len(command.encode("utf-16-le")) // 2 <= RUN_COMMAND_MAX
+
+
+def install_autostart(registry=None, command=None):
+    """Opens the window minimized when this Windows user logs on (visible on the taskbar; Task Manager lists it). A
+    command longer than Windows runs is refused (the checkbox would say on and nothing would open)."""
+    try:
+        registry = _run_key(registry)
+        command = command or autostart_command()
+        if not run_command_fits(command):
+            raise SyncError(AUTOSTART_TOO_LONG)
+        registry.set(RUN_VALUE, command)
+    except OSError:
+        raise SyncError("Windows no ha dejado activar el inicio con Windows.") from None
+
+
+def uninstall_autostart(registry=None):
+    try:
+        _run_key(registry).delete(RUN_VALUE)
+    except OSError:
+        raise SyncError("Windows no ha dejado quitar el inicio con Windows.") from None
+
+
+def repair_autostart(registry=None, command=None, older=(), exists=os.path.isfile):
+    """At every start of the window: a Run value that opens another folder (the folder was moved, or a new version
+    was extracted elsewhere) is pointed at this one; the user already chose to start with Windows. When this folder's
+    command is longer than Windows runs, the value is removed and the window says why only when it would open nothing
+    or an old copy: this folder's value, any value longer than Windows runs, one not written by autostart_command, or
+    one whose subidor.pyw is gone or is in older (copies of an older version: subidor_control.older_copy). The value
+    of another copy that works stays, and the window says that the start with Windows still opens that folder. True
+    when the value changed (and it was said)."""
+    try:
+        registry = _run_key(registry)
+        current, wanted = registry.get(RUN_VALUE), command or autostart_command()
+        if current is None or (current == wanted and run_command_fits(wanted)):
+            return False
+        if run_command_fits(wanted):
+            registry.set(RUN_VALUE, wanted)
+            said = AUTOSTART_MOVED
+        else:
+            script = autostart_script(current)          # this folder's value does not fit either: never kept
+            if (script and run_command_fits(current) and exists(script)
+                    and ntpath.normcase(script) not in {ntpath.normcase(old) for old in older}):
+                say(AUTOSTART_TOO_LONG_KEPT.format(carpeta=copy_folder(script)))
+                return False
+            registry.delete(RUN_VALUE)
+            said = AUTOSTART_TOO_LONG_REMOVED
+    except (OSError, SyncError):
+        return False
+    say(said)
+    return True
+
+
+def create_shortcut(app_dir=None, executable=None, runner=subprocess.run, env=None, exists=os.path.isfile,
+                    only_existing=False):
+    """«Oro de Hermandad · Subidor.lnk» on this user's desktop, written here (so it carries no Mark of the Web): it
+    opens the window with the same pythonw.exe and arguments as the Run value, without --minimizado. PowerShell
+    gets the paths only through environment variables, never inside the command, and never shows a window.
+    only_existing: only rewrite the shortcut that is already there (it opened another folder); returns False when
+    there is none."""
+    if not _windows():
+        raise SyncError("El acceso directo solo existe en Windows.")
+    program, script, folder = launch_parts(app_dir, executable, exists)
+    environment = dict(os.environ if env is None else env)
+    environment.update({"OROHERMANDAD_ACCESO": SHORTCUT_NAME, "OROHERMANDAD_PROGRAMA": program,
+                        "OROHERMANDAD_ARGUMENTOS": f'-E -s "{script}"', "OROHERMANDAD_CARPETA": folder})
+    environment.pop("OROHERMANDAD_SOLO_SI_EXISTE", None)
+    if only_existing:
+        environment["OROHERMANDAD_SOLO_SI_EXISTE"] = "1"
+    shell = ntpath.join(environment.get("SystemRoot") or "C:\\Windows", "System32", "WindowsPowerShell", "v1.0",
+                        "powershell.exe")
+    try:
+        result = runner([shell, "-NoProfile", "-NonInteractive", "-Command", _SHORTCUT_SCRIPT],
+                        **_hidden(dict(env=environment, capture_output=True, stdin=subprocess.DEVNULL, timeout=60), True))
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if only_existing and result is not None and result.returncode == SHORTCUT_ABSENT:
+        return False
+    if result is None or result.returncode != 0:
+        raise SyncError("No se pudo crear el acceso directo: abre «Abrir subidor.cmd».")
+    return True
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -2205,7 +2883,8 @@ def main(argv=None, *, protector=_DEFAULT, home=None, ask=input, ask_secret=getp
         if args.instalar_inicio and not _windows():
             raise SyncError("El inicio con Windows solo existe en Windows.")
         # The lock comes first: a running uploader owns config.json (its upload hashes) until it stops.
-        with contextlib.nullcontext(True) if args.instalar_inicio else instance_lock(home) as locked:
+        modo = "segundo-plano" if args.segundo_plano else "consola"
+        with contextlib.nullcontext(True) if args.instalar_inicio else instance_lock(home, modo) as locked:
             if not locked:
                 say("Ya hay otro subidor de la hermandad funcionando en este PC (quizá el que arranca con Windows). "
                     "No hace falta abrir otro.")
@@ -2224,12 +2903,22 @@ def main(argv=None, *, protector=_DEFAULT, home=None, ask=input, ask_secret=getp
                 return 0
             uploader = GuildUploader(url, key, folder, state=config["sources"], save=lambda: save_config(home, config),
                                      poster=poster, fishing_poster=fishing_poster, clock=clock)
+            status = UploaderStatus(config.get("estado"))
+
+            def keep(changed):
+                if changed:
+                    config["estado"] = status.to_config()
+                    with contextlib.suppress(OSError):
+                        save_config(home, config)
             if args.segundo_plano:
                 say(f"Subidor {VERSION} iniciado sin ventana. Vigilando {folder}.")
             elif not args.once:
                 say(f"Vigilando {folder}. Mantén esta ventana abierta mientras juegas: WoW guarda {SOURCE_NAME} al usar "
                     "/reload o al salir. Ctrl+C para cerrar.", stamp=False)
-            return run(uploader, once=args.once, sleep=sleep, marker=lambda: ensure_marker(folder))
+            return run(uploader, once=args.once, sleep=sleep,
+                       marker=lambda: ensure_marker(folder, status.marker_state(), now=clock()),
+                       on_result=lambda result: keep(status.record_result(result, clock())),
+                       on_error=lambda error, delay: keep(status.record_error(error, clock())))
     except (SyncError, EOFError) as error:
         say(str(error) if isinstance(error, SyncError) else "Entrada cancelada. No se ha guardado nada nuevo.")
         return 1

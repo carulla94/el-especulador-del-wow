@@ -1,0 +1,1612 @@
+"""Tests of the window «Oro de Hermandad · Subidor»: the controller (subidor_control.py) without Tk, the uploader in
+its worker thread, the lock owner, the first run, the start with Windows and the desktop shortcut through injected
+fakes (no Windows, registry, PowerShell or network needed), and the Tk view (subidor.pyw), which is skipped unless a
+Tk window can really be created here (Windows, or a display on Linux)."""
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import hermandad as h
+import subidor_control as c
+from test_hermandad import KEY, NOW, URL, ff_saved, ff_session, sample_hist, saved_variables, write
+
+HERE = Path(__file__).resolve().parent
+V06 = HERE / "fixtures" / "v06"
+SYNC = json.loads((V06 / "sync-response-v060.json").read_text(encoding="utf-8"))
+def SPAIN(t):
+    """The window shows the PC's time: the tests pin it to a PC in Spain in November (CET, UTC+1)."""
+    return time.gmtime(t + 3600)
+
+
+def tk_available():
+    """True on Windows, or when a Tk root can really be created (tkinter present and a display)."""
+    try:
+        import tkinter
+    except ImportError:
+        return False
+    if os.name == "nt":
+        return True
+    try:
+        root = tkinter.Tk()
+    except tkinter.TclError:
+        return False
+    root.destroy()
+    return True
+
+
+TK = tk_available()
+
+
+def event(kind, account="JUSEP", result=None, name=h.SOURCE_NAME, addon=None, message=""):
+    return h.Event(h.Source(account, Path("WoW") / account / name), kind, message=message, result=result,
+                   upload={"markets": []}, addon=addon)
+
+
+def accepted(rows=412, left=21, day=None, **extra):
+    return {"accepted": True, "duplicate": False, "rowsChanged": rows, "uploadsLeft": left,
+            "day": h.day_index(NOW) if day is None else day, **extra}
+
+
+class Quiet(unittest.TestCase):
+    def setUp(self):
+        self.lines = []
+        previous = h.set_output_sink(self.lines.append)
+        self.addCleanup(h.set_output_sink, previous)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.tmp = Path(folder.name).resolve()   # nombre largo también en Windows (no RUNNER~1)
+        h.set_log_file(self.tmp / "registro.txt")
+        self.addCleanup(h.set_log_file, None)
+
+
+# -----------------------------------------------------------------------------------------------------------
+# The controller: every state of the status line
+# -----------------------------------------------------------------------------------------------------------
+class ControllerTests(unittest.TestCase):
+    def controller(self, now=NOW):
+        controller = c.Controller(clock=lambda: now, local=SPAIN)
+        controller.started(URL, Path("C:/WoW"), KEY)
+        return controller
+
+    def status(self, **values):
+        return {"aceptado": 0, "ultimo": None, "suben": None, "aportan": None, "nueva": None, "quedan": None,
+                "dia": None, **values}
+
+    def test_ok_after_an_accepted_upload_with_the_detail_line(self):
+        controller = self.controller(NOW + 180)
+        controller.handle(("enviando",))
+        self.assertEqual(controller.status_line(), ("azul", "Enviando…"))
+        controller.handle(("resultado", {"status": "ok", "events": [event("uploaded", result=accepted())]},
+                           self.status(aceptado=NOW, ultimo="ok", quedan=21, dia=h.day_index(NOW))))
+        self.assertEqual(controller.status_line(), ("verde", "Todo enviado"))
+        self.assertEqual(controller.detail_line(),
+                         "Último envío aceptado: hoy a las 12:00 (hace 3 min) · 412 cambios. Te quedan 21 envíos hoy.")
+        controller.handle(("resultado", {"status": "ok", "events": [event("unchanged")]},
+                           self.status(aceptado=NOW, ultimo="ok", quedan=1, dia=h.day_index(NOW))))
+        self.assertEqual(controller.state, "ok")
+        self.assertTrue(controller.detail_line().endswith("· 412 cambios. Te queda 1 envío hoy."))
+        later = c.Controller(clock=lambda: NOW + 86400, local=SPAIN)
+        later.status = self.status(aceptado=NOW, quedan=21, dia=h.day_index(NOW))
+        self.assertEqual(later.detail_line(), "Último envío aceptado: ayer a las 12:00 (hace 24 h).",
+                         "uploads left of another day are not shown")
+        later.clock = lambda: NOW + 5 * 86400
+        self.assertEqual(later.detail_line(), "Último envío aceptado: el 09/11 a las 12:00 (hace 5 días).")
+
+    def test_waiting_saving_and_nothing_sent_yet(self):
+        controller = self.controller()
+        self.assertEqual(controller.status_line(),
+                         ("gris", "Esperando a WoW: guarda los precios al usar /reload o al salir del juego."))
+        self.assertEqual(controller.detail_line(), "Todavía no hay ningún envío aceptado desde este PC.")
+        controller.handle(("resultado", {"status": "missing", "events": []}, self.status()))
+        self.assertEqual(controller.state, "esperando")
+        controller.handle(("resultado", {"status": "ok", "events": [event("pending")]}, self.status()))
+        self.assertEqual(controller.status_line(), ("gris", "WoW está guardando el archivo; se leerá en cuanto termine."))
+        controller.handle(("resultado", {"status": "ok", "events": [event("unchanged"), event("empty")]}, self.status()))
+        self.assertEqual(controller.state, "esperando")
+
+    def test_network_quota_rejected_and_refused_key(self):
+        controller = self.controller()
+        controller.handle(("error", h.RetryableSyncError("sin red"), 120, self.status(ultimo="red")))
+        self.assertEqual(controller.status_line(),
+                         ("ámbar", "Sin conexión con el panel. Se volverá a intentar a las 12:02."))
+        limited = h.RetryableSyncError("429")
+        limited.cuota = True
+        controller.handle(("error", limited, 900, self.status(ultimo="cuota")))
+        self.assertEqual(controller.status_line(), ("ámbar", "El panel pide esperar: siguiente intento a las 12:15."))
+        refused = event("rejected", message="El panel no ha aceptado estos datos (HTTP 400).")
+        controller.handle(("resultado", {"status": "ok", "events": [refused]}, self.status(ultimo="rechazado")))
+        self.assertEqual(controller.status_line(), ("ámbar", h.describe(refused)[0]))
+        controller.handle(("resultado", {"status": "ok", "events": [event("unchanged")]}, self.status()))
+        self.assertEqual(controller.state, "rechazado", "it stays until something is accepted")
+        broken = event("invalid", message="OroHermandad.lua no se puede leer: falta un valor (línea 3).")
+        controller.handle(("resultado", {"status": "ok", "events": [broken]}, self.status()))
+        self.assertEqual(controller.status_line()[1], "Cuenta JUSEP: OroHermandad.lua no se puede leer: falta un valor (línea 3).")
+        controller.handle(("resultado", {"status": "ok", "events": [event("uploaded", result=accepted())]},
+                           self.status(aceptado=NOW, ultimo="ok")))
+        self.assertEqual(controller.state, "ok")
+        controller.handle(("error", h.AuthenticationError("clave"), None, self.status(aceptado=NOW, ultimo="clave")))
+        self.assertEqual(controller.status_line(), ("rojo", "El panel ha rechazado tu clave. Pide una nueva a quien "
+                                                            "administra la hermandad."))
+        self.assertEqual(controller.action(), "Cambiar clave")
+        controller.handle(("fin", 2))
+        self.assertEqual((controller.state, controller.running), ("clave", False))
+
+    def test_fishing_events_never_change_the_price_state(self):
+        controller = self.controller()
+        controller.handle(("resultado", {"status": "ok", "events": [event("rejected", name=h.FISHING_NAME),
+                                                                     event("fishing", name=h.FISHING_NAME)]}, {}))
+        self.assertEqual(controller.state, "esperando")
+
+    def test_blocked_stopped_and_setup_states(self):
+        controller = self.controller()
+        controller.blocked(c.BLOCKED_CONSOLE)
+        self.assertEqual(controller.status_line(), ("ámbar", "Ya hay otro subidor funcionando en este PC (una ventana de "
+                                                             "consola): ciérralo y vuelve a abrir este."))
+        self.assertEqual((controller.action(), controller.detail_line()), ("Reintentar", ""))
+        other = self.controller()
+        other.handle(("fin", 1))
+        self.assertEqual((other.status_line()[0], other.action()), ("rojo", "Reintentar"))
+        other.configuring()
+        self.assertEqual(other.status_line(), ("gris", "Falta configurar el subidor: sigue los pasos."))
+        self.assertEqual(set(c.STATES) >= {"ok", "esperando", "enviando", "red", "cuota", "guardando", "rechazado",
+                                           "clave", "bloqueado"}, True)
+        for light, _ in c.STATES.values():
+            self.assertIn(light, c.LIGHTS)
+
+    def test_upload_now_wakes_except_while_the_panel_asks_to_wait(self):
+        controller = self.controller()
+        self.assertTrue(controller.upload_now())
+        limited = h.RetryableSyncError("429")
+        limited.cuota = True
+        controller.handle(("error", limited, 900, {}))
+        self.assertFalse(controller.upload_now())
+        self.assertEqual(controller.take_lines()[-1], "El panel pide esperar: siguiente intento a las 12:15.")
+        controller.handle(("error", h.RetryableSyncError("sin red"), 60, {}))
+        self.assertTrue(controller.upload_now(), "a network wait can be cut short")
+        controller.handle(("error", h.AuthenticationError("clave"), None, {}))
+        self.assertFalse(controller.upload_now())
+        self.assertEqual(controller.take_lines()[-1], c.NOT_RUNNING)
+
+    def test_rows_guild_counts_marker_and_notices(self):
+        controller = self.controller(NOW + 300)
+        controller.accounts = (2, NOW)
+        controller.handle(("resultado", {"status": "ok", "events": [event("uploaded", result=accepted(), addon="0.5.1"),
+                                                                     event("unchanged", account="OTRA", addon="0.6.0")]},
+                           {"aceptado": NOW, "ultimo": "ok", "suben": 2, "aportan": 7, "nueva": "0.6.1"}))
+        controller.handle(("aviso", "refreshed"))
+        rows = dict(controller.rows())
+        self.assertEqual(list(dict(controller.rows())), list(c.ROWS))
+        self.assertEqual(rows["Panel"], URL)
+        self.assertEqual(rows["Cuentas"], "2 con Oro de Hermandad · WoW guardó hace 5 min · JUSEP tiene el addon "
+                                          "0.5.1: actualízalo para que el panel reciba las ventas")
+        self.assertEqual(rows["Hermandad"], "2 personas suben y 7 aportan precios (14 días)")
+        self.assertEqual(rows["Aviso addon"], "al día · el addon lo lee al entrar o con /reload")
+        self.assertEqual(controller.version_notice(),
+                         "Hay una versión nueva del subidor (0.6.1). Para actualizar: cierra el subidor, descarga "
+                         "«Subidor para Windows» en el panel (Descargas), desbloquea el zip y extrae su carpeta encima "
+                         "de la anterior (Reemplazar). Tu clave y tu configuración se conservan.")
+        controller.status = {"suben": 1, "aportan": 1}
+        self.assertEqual(controller.guild_text(), "1 persona sube y 1 aporta precios (14 días)")
+        controller.status = {"aportan": 3}
+        self.assertEqual(controller.guild_text(), "3 personas aportan precios (14 días)")
+        controller.status = {}
+        self.assertEqual((controller.guild_text(), controller.version_notice()), ("el panel lo dirá tras el próximo envío", ""))
+        controller.accounts = (0, None)
+        self.assertIn("ninguna todavía", controller.accounts_text())
+        for status in ("created", "no-addon", "denied", "unsafe", "unknown", "removed", None):
+            controller.marker = status
+            self.assertTrue(controller.marker_text(), status)
+        controller.marker = "created"
+        self.assertIn("un /reload no basta", controller.marker_text())
+        self.assertEqual(c.FOOTER, "Versión 0.6.0 · Basta con 1 o 2 personas de la hermandad.")
+
+    def test_log_lines_are_short_and_never_hold_the_key(self):
+        controller = self.controller()
+        controller.handle(("linea", "[21:14:05] Cuenta JUSEP: envío aceptado (1 mercado, 2 objetos): 412 cambios."))
+        controller.handle(("linea", f"algo raro con {KEY} dentro"))
+        controller.handle(("linea", "gld_" + "x" * 43))
+        self.assertEqual(controller.take_lines(), ["21:14 Cuenta JUSEP: envío aceptado (1 mercado, 2 objetos): 412 cambios.",
+                                                   "algo raro con [clave] dentro", "[clave]"])
+        self.assertEqual(controller.take_lines(), [])
+        for _ in range(c.LOG_LINES + 10):
+            controller.handle(("linea", "x"))
+        self.assertEqual(len(controller.log), c.LOG_LINES)
+
+    def test_drain_applies_the_queue_in_order(self):
+        messages, controller = queue.Queue(), self.controller()
+        for item in (("enviando",), ("aviso", "ok"), ("linea", "uno")):
+            messages.put(item)
+        self.assertEqual(c.drain(messages, controller), 3)
+        self.assertEqual((controller.state, controller.marker, list(controller.log)), ("enviando", "ok", ["uno"]))
+        self.assertEqual(c.drain(messages, controller), 0)
+
+    def test_window_texts(self):
+        self.assertEqual(c.TITLE, "Oro de Hermandad · Subidor")
+        self.assertEqual(c.CLOSE_WARNING, "Si cierras el subidor, los precios dejarán de subirse hasta que lo vuelvas a abrir.")
+        self.assertEqual(c.UPLOAD_TIP, "WoW solo escribe los precios en el archivo al usar /reload o al salir. Después "
+                                       "de escanear, pulsa «Guardar y subir» en el addon o usa /reload, y el subidor los "
+                                       "enviará en segundos.")
+        self.assertEqual(c.AUTOSTART, "Abrir el subidor al iniciar Windows (minimizado)")
+        self.assertEqual(c.SHORTCUT, "Crear acceso directo en el escritorio")
+        self.assertEqual(c.MIGRATE, "He encontrado el subidor antiguo que arranca oculto con Windows. ¿Quitarlo y usar "
+                                    "esta ventana?")
+        self.assertEqual(c.ALREADY_OPEN, "El subidor ya está abierto (mira la barra de tareas).")
+        for text in (c.WELCOME, c.READY, c.KEY_SAFE, c.NEW_VERSION, c.CLOSE_WARNING, c.UPLOAD_TIP):
+            self.assertNotIn("Auctionator", text)
+
+
+# -----------------------------------------------------------------------------------------------------------
+# Lock held at start
+# -----------------------------------------------------------------------------------------------------------
+class LockTests(Quiet):
+    def test_decision_by_holder_and_hidden_task(self):
+        for holder, task, expected in (({"modo": "ventana"}, True, "abierto"), ({"modo": "segundo-plano"}, False, "migrar"),
+                                       (None, True, "migrar"), (None, False, "bloqueado"),
+                                       ({"modo": "consola"}, True, "bloqueado")):
+            self.assertEqual(c.lock_decision(holder, task), expected, (holder, task))
+
+    def hold(self, modo):
+        """Another uploader holding the lock (same process: flock is per open file)."""
+        stack = contextlib.ExitStack()
+        self.assertTrue(stack.enter_context(h.instance_lock(self.tmp, modo)))
+        return stack
+
+    def ask(self, answer):
+        asked = []
+
+        def ask(question):
+            asked.append(question)
+            return answer
+        return ask, asked
+
+    def test_free_lock_and_another_window(self):
+        with contextlib.ExitStack() as stack:
+            self.assertEqual(c.take_lock(self.tmp, stack, None, task_installed=None), ("ok", ""))
+            self.assertEqual(h.lock_holder(self.tmp)["modo"], "ventana")
+            with contextlib.ExitStack() as second:
+                ask, asked = self.ask(True)
+                self.assertEqual(c.take_lock(self.tmp, second, ask, task_installed=lambda: True),
+                                 ("abierto", "El subidor ya está abierto (mira la barra de tareas)."))
+                self.assertEqual(asked, [])
+        self.assertIsNone(h.lock_holder(self.tmp), "released with the window")
+
+    def test_a_console_blocks_and_nothing_is_asked(self):
+        holder = self.hold("consola")
+        ask, asked = self.ask(True)
+        with contextlib.ExitStack() as stack:
+            self.assertEqual(c.take_lock(self.tmp, stack, ask, task_installed=lambda: True), ("bloqueado", c.BLOCKED_CONSOLE))
+        self.assertEqual(asked, [])
+        holder.close()
+
+    def test_the_old_hidden_start_is_offered_and_removed(self):
+        for holder_mode, task in (("segundo-plano", False), (None, True)):
+            with self.subTest(holder=holder_mode):
+                holder = self.hold("segundo-plano")
+                if holder_mode is None:
+                    (self.tmp / h.LOCK_HOLDER).unlink()        # a 0.5.0 copy writes no holder file
+                removed = []
+                ask, asked = self.ask(True)
+                with contextlib.ExitStack() as stack:
+                    outcome = c.take_lock(self.tmp, stack, ask, task_installed=lambda: task,
+                                          remove_task=lambda: removed.append(1) or holder.close(), pause=lambda s: None)
+                    self.assertEqual(outcome, ("ok", c.MIGRATED))
+                    self.assertEqual((asked, removed), ([c.MIGRATE], [1]))
+                    self.assertEqual(h.lock_holder(self.tmp)["modo"], "ventana")
+
+    def test_a_stale_holder_file_does_not_hide_the_old_hidden_start(self):
+        """The window ended without removing subidor.quien.json (Windows logoff, Task Manager); now the 0.5.0 hidden
+        task holds the lock and writes no holder file: the old start is offered, not «ya está abierto»."""
+        ended = subprocess.Popen([sys.executable, "-c", "pass"])
+        ended.wait()
+        for modo in ("ventana", "consola"):
+            for task, expected in ((True, ("ok", c.MIGRATED)), (False, ("bloqueado", c.BLOCKED_CONSOLE))):
+                with self.subTest(modo=modo, task=task):
+                    holder = self.hold("segundo-plano")
+                    (self.tmp / h.LOCK_HOLDER).write_text(
+                        json.dumps({"pid": ended.pid, "modo": modo, "desde": int(time.time()) - 3600}), encoding="utf-8")
+                    ask, asked = self.ask(True)
+                    with contextlib.ExitStack() as stack:
+                        outcome = c.take_lock(self.tmp, stack, ask, task_installed=lambda: task,
+                                              remove_task=holder.close, tries=2, pause=lambda s: None)
+                        self.assertEqual(outcome, expected)
+                        self.assertEqual(asked, [c.MIGRATE] if task else [])
+                    holder.close()
+
+    def test_declined_or_still_running_stays_blocked(self):
+        holder = self.hold("segundo-plano")
+        ask, _ = self.ask(False)
+        with contextlib.ExitStack() as stack:
+            self.assertEqual(c.take_lock(self.tmp, stack, ask, task_installed=lambda: True), ("bloqueado", c.BLOCKED_HIDDEN))
+        ask, _ = self.ask(True)
+        pauses = []
+        with contextlib.ExitStack() as stack:
+            self.assertEqual(c.take_lock(self.tmp, stack, ask, task_installed=lambda: True, remove_task=lambda: None,
+                                         tries=3, pause=pauses.append), ("bloqueado", c.BLOCKED_HIDDEN))
+        self.assertEqual(pauses, [0.5, 0.5, 0.5])
+        holder.close()
+
+
+# -----------------------------------------------------------------------------------------------------------
+# The uploader in its worker thread (real threads, files and events; fake panel)
+# -----------------------------------------------------------------------------------------------------------
+class SessionTests(Quiet):
+    def setUp(self):
+        super().setUp()
+        self.wow = self.tmp / "World of Warcraft"
+        self.file = self.wow / "_forever_" / "WTF" / "Account" / "JUSEP" / "SavedVariables" / "OroHermandad.lua"
+        self.hist = sample_hist()
+        self.hist["addon"] = "0.5.1"
+        write(self.file, saved_variables(self.hist))
+        addons = self.wow / "_forever_" / "Interface" / "AddOns"
+        (addons / "OroHermandad").mkdir(parents=True)
+        (addons / "OroHermandad" / "OroHermandad.toc").write_bytes(b"## Interface: 16001\n")
+        self.marker = addons / h.MARKER_FOLDER / h.MARKER_LUA
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.config = {"schema": 1, "url": URL, "wow": str(self.wow), "sources": {},
+                       "key": h.seal_key(KEY, h.TestOnlyProtector())}
+        self.messages = queue.Queue()
+        self.posts = []
+        self.answers = []
+
+    def poster(self, url, key, payload, timeout):
+        self.posts.append(payload)
+        answer = self.answers.pop(0) if self.answers else accepted(**{"estado": SYNC["accepted"]["estado"]})
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def session(self):
+        session = c.Session(URL, KEY, self.wow, self.config, self.home, self.messages, poster=self.poster,
+                            fishing_poster=self.poster, clock=lambda: NOW)
+        self.addCleanup(self.finish, session)
+        return session
+
+    def finish(self, session):
+        session.request_stop()
+        if session.thread is not None:
+            session.thread.join(10)
+
+    def wait_for(self, kind, timeout=10):
+        """Every message until one of kind arrives (fails after timeout seconds)."""
+        seen, deadline = [], time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                message = self.messages.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            seen.append(message)
+            if message[0] == kind:
+                return seen
+        self.fail(f"no llegó «{kind}»: {[m[0] for m in seen]}")
+
+    def test_uploads_tells_the_window_and_writes_the_status_and_marker_v2(self):
+        session = self.session()
+        controller = c.Controller(clock=lambda: NOW, local=SPAIN)
+        controller.started(URL, self.wow, KEY, session.snapshot())
+        session.start()
+        messages = self.wait_for("resultado")
+        for message in messages:
+            controller.handle(message)
+        self.assertEqual([m[0] for m in messages if m[0] != "linea"], ["enviando", "resultado"])
+        self.assertEqual(controller.state, "ok")
+        self.assertEqual(controller.status["aportan"], 7)
+        controller.accounts = c.scan_accounts(self.wow)               # the view does it every 5 s
+        self.assertEqual(controller.accounts_text(), "1 con Oro de Hermandad · WoW guardó hace 1 min · JUSEP tiene el "
+                                                     "addon 0.5.1: actualízalo para que el panel reciba las ventas")
+        for message in self.wait_for("aviso"):
+            controller.handle(message)
+        self.assertEqual(controller.marker, "created")
+        self.assertEqual(self.marker.read_bytes(), h.marker_lua(
+            {"escrito": NOW, "version": "0.6.0", "envio": {"t": NOW, "estado": "ok"}, "suben": 2, "aportan": 7,
+             "quedan": 21, "dia": h.day_index(NOW)}))
+        saved = json.loads((self.home / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["estado"]["ultimo"], "ok")
+        self.assertIn(str(self.file), saved["sources"])
+        self.assertTrue(any("La cuenta JUSEP tiene el addon 0.5.1" in line for line in self.lines))
+        self.assertFalse(any(KEY in line for line in self.lines))
+        self.assertNotIn(KEY, (self.home / "config.json").read_text(encoding="utf-8"))
+        self.assertNotIn(KEY, (self.tmp / "registro.txt").read_text(encoding="utf-8"))
+        session.request_stop()
+        self.assertEqual(self.wait_for("fin")[-1], ("fin", 0))
+        session.thread.join(5)
+        self.assertFalse(session.alive())
+
+    def test_upload_now_wakes_the_wait(self):
+        session = self.session()
+        session.start()
+        self.wait_for("resultado")
+        self.hist["markets"]["Mirage Raceway-Alliance"]["items"][2589]["p"] += f";{NOW - 60},81,300,30"
+        write(self.file, saved_variables(self.hist), age=30)
+        started = time.monotonic()
+        session.upload_now()
+        self.wait_for("resultado", timeout=5)
+        self.assertLess(time.monotonic() - started, h.POLL_SECONDS - 5, "woken, not after the 15 s poll")
+        self.assertEqual(len(self.posts), 2)
+
+    def test_a_refused_key_stops_until_a_new_key(self):
+        self.answers = [h.AuthenticationError("El panel ha rechazado tu clave de la hermandad.")]
+        session = self.session()
+        controller = c.Controller(clock=lambda: NOW, local=SPAIN)
+        controller.started(URL, self.wow, KEY)
+        session.start()
+        for message in self.wait_for("fin"):
+            controller.handle(message)
+        self.assertEqual((controller.state, controller.running, controller.action()), ("clave", False, "Cambiar clave"))
+        self.assertEqual(json.loads((self.home / "config.json").read_text(encoding="utf-8"))["estado"]["ultimo"], "clave")
+        self.assertIn(b'estado = "clave"', self.marker.read_bytes())
+        self.assertFalse(controller.upload_now())
+        session.thread.join(5)
+        second = self.session()                                    # «Cambiar clave»: a new session with the new key
+        controller.started(URL, self.wow, KEY, second.snapshot())
+        second.start()
+        for message in self.wait_for("resultado"):
+            controller.handle(message)
+        self.assertEqual(controller.state, "ok")
+
+    def test_network_errors_are_retried_and_the_quota_wait_is_kept(self):
+        limited = h.RetryableSyncError("El panel pide esperar antes del siguiente envío (HTTP 429).")
+        limited.retry_after, limited.cuota = 900, True
+        self.answers = [limited]
+        session = self.session()
+        controller = c.Controller(clock=lambda: NOW, local=SPAIN)
+        controller.started(URL, self.wow, KEY)
+        session.start()
+        for message in self.wait_for("error"):
+            controller.handle(message)
+        self.assertEqual(controller.status_line(), ("ámbar", "El panel pide esperar: siguiente intento a las 12:15."))
+        self.assertFalse(controller.upload_now())
+        session.upload_now()                                          # even a wake does not cut the panel's wait
+        time.sleep(0.3)
+        self.assertEqual(len(self.posts), 1)
+
+    def test_a_failed_fishing_upload_never_leaves_the_status_of_the_prices_red(self):
+        """R2-13: the prices went and then the Forever Fishing upload hit a network error. The retry sends the same
+        fishing file and the window, config.json and marker v2 say «Todo enviado» / ok, not «red» until the next price
+        upload."""
+        write(self.file.with_name(h.FISHING_NAME), ff_saved(ff_session(NOW - 7200)))
+        fishing = []
+
+        def fishing_poster(url, key, payload, timeout):
+            fishing.append(payload)
+            if len(fishing) == 1:
+                raise h.RetryableSyncError("No se ha podido conectar con el panel. Tus archivos no se han tocado; se "
+                                           "volverá a intentar.")
+            return {"accepted": True, "sessions": 1, "changed": 1}
+        session = c.Session(URL, KEY, self.wow, self.config, self.home, self.messages, poster=self.poster,
+                            fishing_poster=fishing_poster, clock=lambda: NOW)
+        self.addCleanup(self.finish, session)
+        controller = c.Controller(clock=lambda: NOW, local=SPAIN)
+        controller.started(URL, self.wow, KEY, session.snapshot())
+        session.start()
+        for message in self.wait_for("error"):
+            controller.handle(message)
+        self.assertEqual(controller.state, "red", "while it waits for the next attempt")
+        session.upload_now()
+        for message in self.wait_for("resultado"):
+            controller.handle(message)
+        self.assertEqual(len(fishing), 2, "the same fishing file went again")
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(controller.status_line(), ("verde", "Todo enviado"))
+        saved = json.loads((self.home / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["estado"]["ultimo"], "ok")
+        self.assertIn(b'estado = "ok"', self.marker.read_bytes())
+
+    def test_the_marker_is_not_written_again_after_the_user_removed_it(self):
+        session = self.session()
+        session.marker_removed.set()
+        session.start()
+        self.wait_for("resultado")
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(session.marker(), "removed")
+
+    def test_an_unexpected_error_ends_with_1(self):
+        session = self.session()
+        session.uploader.cycle = lambda: 1 / 0
+        session.start()
+        self.assertEqual(self.wait_for("fin")[-1], ("fin", 1))
+        self.assertTrue(any("Error inesperado (ZeroDivisionError)" in line for line in self.lines))
+
+
+# -----------------------------------------------------------------------------------------------------------
+# First run
+# -----------------------------------------------------------------------------------------------------------
+class SetupTests(Quiet):
+    def wow(self):
+        root = self.tmp / "World of Warcraft"
+        (root / "_forever_" / "WTF" / "Account" / "JUSEP" / "SavedVariables").mkdir(parents=True)
+        (root / "_forever_" / "WTF" / "Account" / "OTRA").mkdir(parents=True)
+        return root
+
+    def test_validation_errors_and_a_complete_first_run(self):
+        config = {}
+        setup = c.Setup(config, h.TestOnlyProtector(), detect=lambda: [self.tmp / "nada"])
+        self.assertEqual(setup.steps, ("url", "folder", "key"))
+        self.assertIn("HTTPS", setup.check_url("http://panel.example.com"))
+        self.assertEqual(setup.check_url(URL + "/hermandad"), "")
+        self.assertEqual(setup.url, URL)
+        self.assertEqual(setup.check_folder(str(self.tmp / "no-existe")), "No se encuentra esa carpeta.")
+        self.assertIn("_forever_", setup.check_folder(str(self.tmp)))
+        self.assertEqual(setup.check_folder("\\\\servidor\\juegos"), "Elige una carpeta de este PC, no una ubicación de red.")
+        root = self.wow()
+        self.assertEqual(setup.check_folder(str(root)), "")
+        self.assertEqual(c.folder_summary(root), "Cuentas encontradas: 2 · Oro de Hermandad instalado: no")
+        (root / "_forever_" / "Interface" / "AddOns" / "OroHermandad").mkdir(parents=True)
+        (root / "_forever_" / "Interface" / "AddOns" / "OroHermandad" / "OroHermandad.toc").write_text("x")
+        self.assertEqual(c.folder_summary(root), "Cuentas encontradas: 2 · Oro de Hermandad instalado: sí")
+        wrong = "gld_corta-" + KEY[-6:]
+        problem = setup.check_key(wrong)
+        self.assertIn("gld_ y 43", problem)
+        self.assertNotIn(wrong, problem)
+        with self.assertRaises(h.SyncError):
+            setup.finish()
+        self.assertEqual(setup.check_key("  " + KEY + "\n"), "")
+        self.assertEqual(setup.key_text(), c.KEY_SAFE)
+        self.assertEqual(setup.finish(), (URL, root.resolve(), KEY))
+        self.assertEqual((config["schema"], config["url"], config["wow"], config["sources"]), (1, URL, str(root.resolve()), {}))
+        self.assertEqual(h.open_key(config["key"], h.TestOnlyProtector()), KEY)
+        self.assertEqual(c.needed_steps(config, h.TestOnlyProtector()), ())
+        self.assertEqual(c.needed_steps(config, None), ("key",), "without DPAPI the key is asked at every start")
+        self.assertEqual(c.needed_steps({}, None), ("url", "folder", "key"))
+        self.assertEqual(setup.folders(), [self.tmp / "nada"])
+
+    def test_change_one_step_and_no_dpapi(self):
+        config = {"schema": 1, "url": URL, "wow": str(self.wow()), "sources": {"x": {}}}
+        setup = c.Setup(config, None, steps=("key",))
+        self.assertEqual(setup.key_text(), c.KEY_MEMORY)
+        self.assertEqual(setup.check_key(KEY), "")
+        self.assertEqual(setup.finish()[2], KEY)
+        self.assertNotIn("key", config)
+        self.assertEqual(config["sources"], {"x": {}}, "the upload record is kept")
+        broken = c.Setup({}, None, detect=lambda: 1 / 0)
+        self.assertEqual(broken.folders(), [])
+
+    def test_a_new_panel_address_sends_everything_again(self):
+        """«Cambiar» (Panel): what was sent and the status belong to the old panel; the same address keeps them."""
+        wow = self.tmp / "World of Warcraft"
+        path = wow / "_forever_" / "WTF" / "Account" / "JUSEP" / "SavedVariables" / "OroHermandad.lua"
+        write(path, saved_variables(sample_hist()), age=60)
+        sent = []
+
+        def poster(url, key, payload, timeout):
+            body = json.loads(payload)
+            items = [item for market in body["markets"] for observer in market["observers"] for item in observer["items"]]
+            sent.append((url, sum(len(item["days"]) for item in items), sum(len(item["points"]) for item in items)))
+            return accepted()
+
+        def cycle(config):
+            uploader = h.GuildUploader(config["url"], KEY, config["wow"], state=config["sources"], poster=poster,
+                                       clock=lambda: NOW)
+            return [e.kind for e in uploader.cycle()["events"]]
+        protector = h.TestOnlyProtector()
+        config = {"schema": 1, "url": URL, "wow": str(wow), "key": h.seal_key(KEY, protector), "sources": {},
+                  "estado": {"aceptado": NOW - 60, "ultimo": "ok", "suben": 2, "aportan": 7, "quedan": 3}}
+        self.assertEqual(cycle(config), ["uploaded"])
+        first = sent[-1]
+        same = c.Setup(config, protector, steps=("url",))
+        self.assertEqual(same.check_url(URL + "/hermandad"), "")
+        same.finish()
+        self.assertIn(str(path), config["sources"], "same panel: the record is kept")
+        self.assertIn("estado", config)
+        other = "https://otro-panel.example.com"
+        setup = c.Setup(config, protector, steps=("url",))
+        self.assertEqual(setup.check_url(other), "")
+        self.assertEqual(setup.finish()[0], other)
+        self.assertEqual((config["url"], config["sources"]), (other, {}))
+        self.assertNotIn("estado", config, "the old panel's numbers are not shown for the new one")
+        self.assertIn(c.NEW_PANEL, self.lines[-1])
+        self.assertEqual(cycle(config), ["uploaded"], "the same file goes to the new panel")
+        self.assertEqual(sent[-1], (other,) + first[1:], "complete, like the first upload to the old panel")
+
+    def test_accounts_row_counts_saved_files(self):
+        root = self.wow()
+        self.assertEqual(c.scan_accounts(root), (0, None))
+        path = root / "_forever_" / "WTF" / "Account" / "JUSEP" / "SavedVariables" / "OroHermandad.lua"
+        write(path, "OroHermandadHist = {}", age=300)
+        self.assertEqual(c.scan_accounts(root), (1, NOW - 300))
+        self.assertEqual(c.scan_accounts(None), (0, None))
+
+
+# -----------------------------------------------------------------------------------------------------------
+# Start with Windows (Run key), desktop shortcut and the old hidden task, through injected fakes
+# -----------------------------------------------------------------------------------------------------------
+IÑAKI = "C:\\Users\\Iñaki\\Documents\\OroHermandad Subidor"
+
+
+class FakeWinreg:
+    """The part of winreg that RunKey uses, over a dict; records every call."""
+    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ, REG_EXPAND_SZ, REG_DWORD = "HKCU", 1, 2, 1, 2, 4
+
+    def __init__(self, values=None):
+        self.values, self.calls = dict(values or {}), []
+
+    @contextlib.contextmanager
+    def OpenKey(self, root, path, reserved, access):
+        self.calls.append(("OpenKey", root, path, access))
+        yield path
+
+    @contextlib.contextmanager
+    def CreateKeyEx(self, root, path, reserved, access):
+        self.calls.append(("CreateKeyEx", root, path, access))
+        yield path
+
+    def QueryValueEx(self, key, name):
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        return self.values[name]
+
+    def SetValueEx(self, key, name, reserved, kind, value):
+        self.calls.append(("SetValueEx", name, kind, value))
+        self.values[name] = (value, kind)
+
+    def DeleteValue(self, key, name):
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        del self.values[name]
+
+
+class StartWithWindowsTests(Quiet):
+    def test_command_quoting_with_spaces_and_accents(self):
+        packaged = {IÑAKI + "\\runtime\\pythonw.exe"}
+        self.assertEqual(h.autostart_command(IÑAKI + "\\app", exists=packaged.__contains__),
+                         f'"{IÑAKI}\\runtime\\pythonw.exe" -E -s "{IÑAKI}\\app\\subidor.pyw" --minimizado')
+        self.assertEqual(h.launch_parts(IÑAKI + "\\app\\", exists=packaged.__contains__),
+                         (IÑAKI + "\\runtime\\pythonw.exe", IÑAKI + "\\app\\subidor.pyw", IÑAKI))
+        source = "C:\\Users\\Iñaki\\el especulador\\pc_sync"
+        python = "C:\\Program Files\\Python313\\python.exe"
+        self.assertEqual(h.autostart_command(source, python, exists={"C:\\Program Files\\Python313\\pythonw.exe"}.__contains__),
+                         f'"C:\\Program Files\\Python313\\pythonw.exe" -E -s "{source}\\subidor.pyw" --minimizado')
+        self.assertEqual(h.autostart_command(source, python, exists=lambda path: False),
+                         f'"{python}" -E -s "{source}\\subidor.pyw" --minimizado')
+        self.assertNotIn(" -I ", h.autostart_command(source, python, exists=lambda path: False))
+
+    def test_run_key_through_winreg(self):
+        api = FakeWinreg()
+        registry = h.RunKey(api)
+        self.assertFalse(h.autostart_installed(registry))
+        h.install_autostart(registry, command='"C:\\x\\pythonw.exe" -E -s "C:\\x\\subidor.pyw" --minimizado')
+        self.assertIn(("CreateKeyEx", "HKCU", "Software\\Microsoft\\Windows\\CurrentVersion\\Run", api.KEY_SET_VALUE),
+                      api.calls)
+        self.assertIn(("SetValueEx", "OroHermandadSubidor", api.REG_SZ,
+                       '"C:\\x\\pythonw.exe" -E -s "C:\\x\\subidor.pyw" --minimizado'), api.calls)
+        self.assertTrue(h.autostart_installed(registry))
+        h.uninstall_autostart(registry)
+        h.uninstall_autostart(registry)                                 # already gone: fine
+        self.assertFalse(h.autostart_installed(registry))
+        api.values["OroHermandadSubidor"] = (5, api.REG_DWORD)
+        self.assertIsNone(registry.get("OroHermandadSubidor"), "only text values count")
+
+    def test_a_run_value_of_another_folder_is_rewritten_at_start_and_logged(self):
+        wanted = f'"{IÑAKI}\\runtime\\pythonw.exe" -E -s "{IÑAKI}\\app\\subidor.pyw" --minimizado'
+        api = FakeWinreg({"OroHermandadSubidor": ('"D:\\viejo\\runtime\\pythonw.exe" -E -s "D:\\viejo\\app\\subidor.pyw" '
+                                                  '--minimizado', 1)})
+        self.assertTrue(h.repair_autostart(h.RunKey(api), wanted))
+        self.assertEqual(api.values["OroHermandadSubidor"], (wanted, 1))
+        self.assertEqual(self.lines[-1][-len(h.AUTOSTART_MOVED):], "El inicio con Windows apuntaba a otra carpeta: ahora "
+                                                                    "abre esta.")
+        self.assertFalse(h.repair_autostart(h.RunKey(api), wanted), "already right")
+        self.assertFalse(h.repair_autostart(h.RunKey(FakeWinreg()), wanted), "never turned on by itself")
+        self.assertEqual(len(self.lines), 1)
+
+    def test_a_run_value_longer_than_windows_runs_is_never_written_or_kept(self):
+        """R2-14: Windows only runs a Run value of at most 260 characters; the command names the folder twice, so a
+        folder path over 100 characters gave a value that the checkbox showed as on and that never opened."""
+        def command(folder):
+            return h.autostart_command(folder + "\\app", exists={folder + "\\runtime\\pythonw.exe"}.__contains__)
+        fits = "C:\\" + "d" * 97                                        # 100 characters: 260 in the Run value
+        long = "C:\\Users\\maria.fernandez\\OneDrive - Universidad Complutense de Madrid\\Documentos\\Subidor_Windows" \
+               "\\OroHermandad Subidor"
+        self.assertEqual((len(command(fits)), len(command(fits + "e")), len(command(long))), (260, 262, 294))
+        api = FakeWinreg()
+        h.install_autostart(h.RunKey(api), command(fits))
+        self.assertTrue(h.autostart_installed(h.RunKey(api)))
+        h.uninstall_autostart(h.RunKey(api))
+        for folder in (fits + "e", long, "C:\\Usuarios\\" + "😀" * 49 + "x"):
+            with self.subTest(folder=folder), self.assertRaises(h.SyncError) as raised:
+                h.install_autostart(h.RunKey(api), command(folder))
+            self.assertIn("demasiado larga para el inicio con Windows", str(raised.exception))
+            self.assertFalse(h.autostart_installed(h.RunKey(api)), "the checkbox stays off")
+        # With this long folder, a value that would open nothing or an old copy is removed and said: this folder's
+        # (written before), another long one, a folder that is gone, an older copy, one not written by the window.
+        everywhere = lambda path: True
+        for current, exists, older in ((command(long), everywhere, ()), (command(long + "2"), everywhere, ()),
+                                       (command("D:\\viejo"), lambda path: False, ()),
+                                       (command("D:\\viejo"), everywhere, ("d:\\VIEJO\\app\\subidor.pyw",)),
+                                       ("D:\\otro.exe", everywhere, ())):
+            with self.subTest(current=current, older=older):
+                api = FakeWinreg({"OroHermandadSubidor": (current, 1)})
+                self.assertTrue(h.repair_autostart(h.RunKey(api), command(long), older=older, exists=exists))
+                self.assertFalse(h.autostart_installed(h.RunKey(api)))
+                self.assertIn("He quitado el inicio con Windows: la ruta de la carpeta del subidor es demasiado larga",
+                              self.lines[-1])
+        self.assertFalse(h.repair_autostart(h.RunKey(FakeWinreg()), command(long)), "never turned on by itself")
+
+    def test_a_long_folder_keeps_the_start_with_windows_of_another_copy_that_works(self):
+        """R3: the long folder was copied to C:\\OroHermandad as the window said, and the copy there starts with
+        Windows. Opening the long folder again removed that value, which Windows runs, and said it would not."""
+        def command(folder):
+            return h.autostart_command(folder + "\\app", exists={folder + "\\runtime\\pythonw.exe"}.__contains__)
+        long = "D:\\Users\\maria.fernandez\\OneDrive - Universidad Complutense de Madrid\\Documentos\\Subidor_Windows" \
+               "\\OroHermandad Subidor"
+        short = "C:\\OroHermandad"
+        self.assertEqual(h.autostart_script(command(short)), short + "\\app\\subidor.pyw")
+        self.assertEqual((h.copy_folder(short + "\\app\\subidor.pyw"), h.copy_folder("C:\\src\\pc_sync\\subidor.pyw")),
+                         (short, "C:\\src\\pc_sync"))
+        self.assertEqual([h.autostart_script(value) for value in (None, "", "C:\\otro.exe", 5)], [None] * 4)
+        seen = []
+        api = FakeWinreg({"OroHermandadSubidor": (command(short), 1)})
+        self.assertFalse(h.repair_autostart(h.RunKey(api), command(long), older=("C:\\viejo\\app\\subidor.pyw",),
+                                            exists=lambda path: seen.append(path) or True))
+        self.assertEqual(api.values["OroHermandadSubidor"], (command(short), 1), "kept: Windows opens it")
+        self.assertEqual(seen, [short + "\\app\\subidor.pyw"])
+        self.assertEqual(self.lines[-1].split("] ", 1)[-1],
+                         "La ruta de la carpeta del subidor es demasiado larga para el inicio con Windows: al iniciar "
+                         "Windows se sigue abriendo el subidor de C:\\OroHermandad.")
+        self.assertNotIn("He quitado", "".join(self.lines))
+        self.assertTrue(h.repair_autostart(h.RunKey(api), command(short + "2"), exists=lambda path: True),
+                        "a short folder still takes it")
+        self.assertEqual(api.values["OroHermandadSubidor"], (command(short + "2"), 1))
+
+    def test_registry_errors_become_spanish_messages(self):
+        class Broken(FakeWinreg):
+            def SetValueEx(self, *args):
+                raise PermissionError("denegado")
+        with self.assertRaises(h.SyncError) as raised:
+            h.install_autostart(h.RunKey(Broken()), command="x")
+        self.assertEqual(str(raised.exception), "Windows no ha dejado activar el inicio con Windows.")
+        self.assertFalse(h.repair_autostart(h.RunKey(Broken({"OroHermandadSubidor": ("otro", 1)})), "x"))
+        if os.name != "nt":
+            with self.assertRaises(h.SyncError):
+                h.install_autostart(command="x")
+            self.assertFalse(h.autostart_installed())
+
+    def runner(self, code=0):
+        calls = []
+
+        def run(args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(returncode=code, stdout="", stderr="")
+        return run, calls
+
+    def test_the_shortcut_gets_the_paths_only_through_its_environment(self):
+        run, calls = self.runner()
+        packaged = {IÑAKI + "\\runtime\\pythonw.exe"}
+        with patch.object(h, "_windows", return_value=True):
+            self.assertTrue(h.create_shortcut(IÑAKI + "\\app", runner=run, env={"SystemRoot": "C:\\Windows", "PATH": "x"},
+                                              exists=packaged.__contains__))
+        args, kwargs = calls[0]
+        self.assertEqual(args[:4], ["C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-NoProfile",
+                                    "-NonInteractive", "-Command"])
+        self.assertEqual(kwargs["creationflags"], h.CREATE_NO_WINDOW)
+        self.assertEqual(kwargs["creationflags"], 0x08000000)
+        self.assertIs(kwargs["stdin"], h.subprocess.DEVNULL)
+        script = args[4]
+        for secret in (IÑAKI, "runtime", "pythonw", "subidor.pyw", ".lnk"):
+            self.assertNotIn(secret, script, "nothing is interpolated into the command")
+        environment = kwargs["env"]
+        self.assertEqual(environment["OROHERMANDAD_ACCESO"], "Oro de Hermandad · Subidor.lnk")
+        self.assertEqual(environment["OROHERMANDAD_PROGRAMA"], IÑAKI + "\\runtime\\pythonw.exe")
+        self.assertEqual(environment["OROHERMANDAD_ARGUMENTOS"], f'-E -s "{IÑAKI}\\app\\subidor.pyw"')
+        self.assertEqual(environment["OROHERMANDAD_CARPETA"], IÑAKI)
+        self.assertEqual(environment["PATH"], "x")
+        self.assertIn("GetFolderPath('Desktop')", script)
+        failing, _ = self.runner(1)
+        with patch.object(h, "_windows", return_value=True), self.assertRaises(h.SyncError) as raised:
+            h.create_shortcut(IÑAKI + "\\app", runner=failing, env={}, exists=packaged.__contains__)
+        self.assertEqual(str(raised.exception), "No se pudo crear el acceso directo: abre «Abrir subidor.cmd».")
+
+        def missing(args, **kwargs):
+            raise FileNotFoundError("powershell")
+        with patch.object(h, "_windows", return_value=True), self.assertRaises(h.SyncError):
+            h.create_shortcut(IÑAKI + "\\app", runner=missing, env={}, exists=packaged.__contains__)
+        with patch.object(h, "_windows", return_value=False), self.assertRaises(h.SyncError):
+            h.create_shortcut(runner=run)
+
+    def test_only_an_existing_shortcut_is_rewritten_when_asked(self):
+        """R2-11: when the window moves to another folder it rewrites the desktop shortcut only if there is one."""
+        packaged = {IÑAKI + "\\runtime\\pythonw.exe"}.__contains__
+        for code, expected in ((0, True), (h.SHORTCUT_ABSENT, False)):
+            run, calls = self.runner(code)
+            with patch.object(h, "_windows", return_value=True):
+                self.assertEqual(h.create_shortcut(IÑAKI + "\\app", runner=run, env={}, exists=packaged,
+                                                   only_existing=True), expected)
+            self.assertEqual(calls[0][1]["env"]["OROHERMANDAD_SOLO_SI_EXISTE"], "1")
+            self.assertEqual(calls[0][1]["env"]["OROHERMANDAD_PROGRAMA"], IÑAKI + "\\runtime\\pythonw.exe")
+        run, calls = self.runner(0)
+        with patch.object(h, "_windows", return_value=True):
+            h.create_shortcut(IÑAKI + "\\app", runner=run, env={"OROHERMANDAD_SOLO_SI_EXISTE": "1"}, exists=packaged)
+        self.assertNotIn("OROHERMANDAD_SOLO_SI_EXISTE", calls[0][1]["env"], "«Crear acceso directo» always writes it")
+        absent, _ = self.runner(h.SHORTCUT_ABSENT)
+        with patch.object(h, "_windows", return_value=True), self.assertRaises(h.SyncError):
+            h.create_shortcut(IÑAKI + "\\app", runner=absent, env={}, exists=packaged)
+        self.assertIn("if ($env:OROHERMANDAD_SOLO_SI_EXISTE -and -not (Test-Path -LiteralPath $p)) "
+                      f"{{ exit {h.SHORTCUT_ABSENT} }}; ", h._SHORTCUT_SCRIPT)
+
+    def test_the_newest_copy_owns_the_start_with_windows_and_the_shortcut(self):
+        """R2-11: config["subidor"] remembers the newest copy of the window opened; an older copy in another folder
+        that still exists never takes the start with Windows or the shortcut back."""
+        old = "C:\\Users\\Jose\\Downloads\\Subidor_Windows\\OroHermandad Subidor"
+        new = "C:\\Users\\Jose\\Downloads\\Subidor_Windows (1)\\OroHermandad Subidor"
+        old_script, new_script = old + "\\app\\subidor.pyw", new + "\\app\\subidor.pyw"
+        both, only_old = {old_script, new_script}.__contains__, {old_script}.__contains__
+        config = {}
+        self.assertEqual(c.claim_copy(config, old_script, old, "0.6.0", both), (True, False, ""))
+        self.assertEqual(config["subidor"], {"programa": old_script, "carpeta": old, "version": "0.6.0"})
+        self.assertEqual(c.claim_copy(config, old_script.lower(), old, "0.6.1", both), (True, False, ""),
+                         "extracted over the same folder")
+        self.assertEqual(config["subidor"]["version"], "0.6.1")
+        self.assertEqual(c.claim_copy(config, new_script, new, "0.6.2", both), (True, True, ""))
+        saved = json.loads(json.dumps(config))
+        self.assertEqual(c.claim_copy(config, old_script, old, "0.6.1", both),
+                         (False, False, f"Esta carpeta tiene la versión 0.6.1 del subidor, pero en {new} está la 0.6.2: "
+                                        "cierra esta ventana y abre aquella. El inicio con Windows y el acceso directo "
+                                        "del escritorio no se cambian a esta carpeta."))
+        self.assertEqual(config, saved, "the old copy changes nothing")
+        self.assertEqual(c.claim_copy(config, old_script, old, "0.6.1", only_old), (True, True, ""), "the new one is gone")
+        self.assertEqual(c.claim_copy(config, new_script, new, "0.6.1", both), (True, True, ""), "the same version moved")
+        for broken in ("x", {"programa": 5, "version": "9.9"}, {"programa": "", "version": "9.9"}):
+            self.assertEqual(c.claim_copy({"subidor": broken}, old_script, old, "0.6.0", both), (True, False, ""), broken)
+        odd = {"subidor": {"programa": new_script, "version": "0.7.0-beta"}}
+        self.assertEqual(c.claim_copy(odd, old_script, old, "0.6.0", both), (True, True, ""), "no dotted version: no claim")
+
+    def test_a_same_version_copy_at_a_long_path_leaves_the_one_that_starts_with_windows(self):
+        """R3: both copies of the same version exist (the long folder was copied to a shorter path, as the window
+        said) and the short one starts with Windows. The long one, opened again, took the desktop shortcut and the
+        record of the newest copy; now it takes nothing while Windows opens the short one."""
+        def command(folder):
+            return h.autostart_command(folder + "\\app", exists={folder + "\\runtime\\pythonw.exe"}.__contains__)
+        long = "D:\\Users\\maria.fernandez\\OneDrive - Universidad Complutense de Madrid\\Documentos\\Subidor_Windows" \
+               "\\OroHermandad Subidor"
+        short = "C:\\OroHermandad"
+        long_script, short_script = long + "\\app\\subidor.pyw", short + "\\app\\subidor.pyw"
+        both, only_long = {long_script, short_script}.__contains__, {long_script}.__contains__
+        self.assertFalse(h.run_command_fits(command(long)))
+        recorded = {"programa": short_script, "carpeta": short, "version": "0.6.0"}
+        config = {"subidor": dict(recorded)}
+        self.assertEqual(c.claim_copy(config, long_script, long, "0.6.0", both, autostart=command(short),
+                                      command=command(long)),
+                         (False, False, "La ruta de esta carpeta es demasiado larga para el inicio con Windows, "
+                                        "y en C:\\OroHermandad está esta misma versión del subidor, que es la que se "
+                                        "abre al iniciar Windows. El inicio con Windows y el acceso directo del "
+                                        "escritorio no se cambian a esta carpeta."))
+        self.assertEqual(config, {"subidor": recorded}, "nothing changes")
+        self.assertEqual(c.claim_copy(config, long_script, long, "0.6.0", both, autostart=command(short.lower()),
+                                      command=command(long))[0], False, "Windows paths ignore case")
+        # Otherwise the long copy takes them as before: no start with Windows, or one of another folder, the short
+        # copy gone, a newer long copy (repair_autostart removes the old copy's value), or both short.
+        for autostart, exists, version in ((None, both, "0.6.0"), (command("E:\\otra"), both, "0.6.0"),
+                                           (command(short), only_long, "0.6.0"), (command(short), both, "0.6.1")):
+            with self.subTest(autostart=autostart, version=version):
+                config = {"subidor": dict(recorded)}
+                self.assertEqual(c.claim_copy(config, long_script, long, version, exists, autostart=autostart,
+                                              command=command(long)), (True, True, ""))
+                self.assertEqual(config["subidor"]["programa"], long_script)
+                self.assertEqual(c.older_copy(recorded, version), (short_script,) if version == "0.6.1" else ())
+        config = {"subidor": dict(recorded)}
+        self.assertEqual(c.claim_copy(config, "C:\\Otra\\app\\subidor.pyw", "C:\\Otra", "0.6.0", lambda path: True,
+                                      autostart=command(short), command=command("C:\\Otra")), (True, True, ""))
+        config = {"subidor": {"programa": long_script, "carpeta": long, "version": "0.6.0"}}
+        self.assertEqual(c.claim_copy(config, short_script, short, "0.6.0", both, autostart=None,
+                                      command=command(short)), (True, True, ""), "the short copy always takes them")
+        for broken in (None, "x", {"programa": 5, "version": "0.5.0"}, {"programa": short_script, "version": "0.6.0"},
+                       {"programa": short_script, "version": "0.7.0"}, {"programa": short_script}):
+            self.assertEqual(c.older_copy(broken, "0.6.0"), (), broken)
+        self.assertEqual(c.older_copy({"programa": short_script, "version": "0.5.9"}, "0.6.0"), (short_script,))
+
+    def test_the_hidden_task_is_found_and_removed_without_flashing_a_console(self):
+        run, calls = self.runner()
+        with patch.object(h, "_windows", return_value=True):
+            self.assertTrue(h.startup_task_installed(run))
+            self.assertTrue(h.uninstall_startup(run, end=True, hidden=True, quiet=True))
+        self.assertEqual([args for args, _ in calls], [["schtasks", "/Query", "/TN", h.TASK_NAME],
+                                                       ["schtasks", "/End", "/TN", h.TASK_NAME],
+                                                       ["schtasks", "/Delete", "/TN", h.TASK_NAME, "/F"]])
+        self.assertTrue(all(kwargs["creationflags"] == h.CREATE_NO_WINDOW for _, kwargs in calls))
+        self.assertEqual(self.lines, [], "quiet: the window logs its own line")
+        missing, _ = self.runner(1)
+        with patch.object(h, "_windows", return_value=True):
+            self.assertFalse(h.startup_task_installed(missing))
+
+            def broken(args, **kwargs):
+                raise OSError("sin schtasks")
+            self.assertFalse(h.startup_task_installed(broken))
+        cli, cli_calls = self.runner()
+        with patch.object(h, "_windows", return_value=True):
+            h.uninstall_startup(cli)                                   # the command line keeps its behaviour
+        self.assertEqual([args for args, _ in cli_calls], [["schtasks", "/Delete", "/TN", h.TASK_NAME, "/F"]])
+        self.assertNotIn("creationflags", cli_calls[0][1])
+        self.assertIn("Quitado: el subidor ya no arrancará con Windows.", self.lines[-1])
+        with patch.object(h, "_windows", return_value=False):
+            self.assertFalse(h.startup_task_installed(run))
+
+
+# -----------------------------------------------------------------------------------------------------------
+# Packaging pieces that the Windows build relies on
+# -----------------------------------------------------------------------------------------------------------
+class PackagingTests(unittest.TestCase):
+    def test_the_window_files_and_the_engine_version(self):
+        source = (HERE / "subidor.pyw").read_text(encoding="utf-8")
+        for needle in ("import hermandad as h", "import subidor_control as c", "root.after(c.POLL_MS, self.poll)",
+                       "--minimizado", "--comprobar", "queue.Queue()"):
+            self.assertIn(needle, source)
+        self.assertEqual(c.POLL_MS, 200)
+        control = (HERE / "subidor_control.py").read_text(encoding="utf-8")
+        self.assertNotIn("tkinter", control.split('"""', 2)[2], "the controller never imports Tk")
+        self.assertEqual(h.VERSION, "0.6.0")
+
+    def test_readme_puts_the_window_first(self):
+        text = (HERE / "LEEME.md").read_text(encoding="utf-8")
+        guild = text.split("## Panel de la hermandad")[1]
+        steps = ["1. Clic derecho en el zip → Propiedades → marca «Desbloquear» → Aceptar.",
+                 "2. Extrae la carpeta donde quieras (por ejemplo en Documentos).",
+                 "3. Abre «Abrir subidor.cmd»; la primera vez te ofrece un acceso directo en el escritorio."]
+        self.assertLess(guild.index("Subidor para Windows"), guild.index("HERMANDAD.cmd"))
+        self.assertEqual([guild.index(step) for step in steps], sorted(guild.index(step) for step in steps))
+        for needle in ("Cierra el subidor, desbloquea el zip nuevo y extrae su carpeta encima de la anterior (Reemplazar). "
+                       "Tu clave y tu configuración se conservan.", "solo si sabes lo que haces",
+                       "WoW solo escribe el archivo al usar `/reload` o al salir", "Riesgo de baneo: **muy bajo**",
+                       "nadie puede prometer «está permitido»", "**Quien tiene el subidor actualiza primero el addon y el subidor**",
+                       "Oro de Hermandad · Subidor", "Guardar y subir", "`sold`"):
+            self.assertIn(needle, guild)
+        self.assertNotIn("Auctionator y haz un escaneo completo", text)
+
+    def test_workflow_contract_c10(self):
+        text = (HERE.parent / ".github" / "workflows" / "subidor-windows.yml").read_text(encoding="utf-8")
+        for needle in ("  workflow_call:\n    outputs:\n      version:\n", "value: ${{ jobs.windows.outputs.version }}",
+                       "permissions:\n  contents: read\n", "runs-on: windows-2025", "runs-on: ubuntu-24.04",
+                       "persist-credentials: false", "python-version: '3.13.17'", "git config --global core.autocrlf false",
+                       'python -m unittest discover -s pc_sync -p "test_*.py"',
+                       'python -B pc_sync/empaquetar_windows.py --salida "$RUNNER_TEMP/Subidor_Windows.zip"',
+                       "name: Subidor_Windows\n", "path: ${{ runner.temp }}/Subidor_Windows.zip", "retention-days: 30",
+                       'echo "version=$version" >> "$GITHUB_OUTPUT"',
+                       # Windows Python prints "\r\n" and Git Bash keeps the "\r" in $(...): the check would always fail.
+                       "print(hermandad.VERSION)' | tr -d '\\r')\""):
+            self.assertIn(needle, text)
+        for forbidden in ("contents: write", "gh release", "inputs:", "secrets.", "archive: false"):
+            self.assertNotIn(forbidden, text)
+        self.assertEqual(text.count("workflow_call:"), 1)
+
+    def test_the_console_download_is_unchanged(self):
+        script = (HERE.parent / "scripts" / "prepare-downloads.mjs").read_text(encoding="utf-8")
+        line = next(line for line in script.splitlines() if "Sincronizador_PC.zip" in line)
+        self.assertIn('["sincronizar.py","SINCRONIZAR.cmd","LEEME.md","hermandad.py","HERMANDAD.cmd"]', line)
+
+    def test_the_tk_skip_rule(self):
+        import builtins
+        real_import = builtins.__import__
+
+        def no_tk(name, *args, **kwargs):
+            if name == "tkinter":
+                raise ImportError("no tkinter")
+            return real_import(name, *args, **kwargs)
+        with patch.object(builtins, "__import__", no_tk):
+            self.assertFalse(tk_available())
+        fake = SimpleNamespace(TclError=RuntimeError, Tk=lambda: (_ for _ in ()).throw(RuntimeError("no display")))
+        with patch.dict("sys.modules", {"tkinter": fake}), patch.object(os, "name", "posix"):
+            self.assertFalse(tk_available())
+
+
+# -----------------------------------------------------------------------------------------------------------
+# empaquetar_windows.py: the portable folder and its reproducible zip (a fake runtime here; the real one in CI)
+# -----------------------------------------------------------------------------------------------------------
+import empaquetar_windows as e  # noqa: E402
+
+RUNTIME_FILES = {
+    "python.exe": "exe", "pythonw.exe": "exe", "python313.dll": "dll", "LICENSE.txt": "licencia",
+    "DLLs/_tkinter.pyd": "pyd", "DLLs/tcl86t.dll": "dll", "Lib/os.py": "os", "Lib/tkinter/__init__.py": "tk",
+    "Lib/__pycache__/os.cpython-313.pyc": "pyc", "Lib/tkinter/__pycache__/x.pyc": "pyc", "Lib/stray.pyc": "pyc",
+    "Lib/test/test_os.py": "x", "Lib/idlelib/idle.py": "x", "Lib/turtledemo/demo.py": "x",
+    "Lib/ensurepip/_bundled/pip.whl": "x", "Lib/site-packages/pip/__init__.py": "x", "Lib/site-packages/README.txt": "x",
+    "Scripts/pip.exe": "x", "include/Python.h": "x", "libs/python313.lib": "x", "Doc/python.chm": "x",
+    "Tools/scripts/x.py": "x", "tcl/nmake/x86_64-w64-mingw32-nmakehlp.exe": "x", "tcl/nmake/rules.vc": "x",
+    "python-3.13.17-amd64.exe": "installer",
+    "tcl/tcl8.6/license.terms": "tcl", "tcl/tk8.6/license.terms": "tk",
+    "Lib/testing_helpers.py": "kept: only the Lib/test folder goes",
+}
+
+
+class PackagerTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.tmp = Path(folder.name).resolve()   # nombre largo también en Windows (no RUNNER~1)
+        self.runtime = self.tmp / "Python313"
+        for name, text in RUNTIME_FILES.items():
+            (self.runtime / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.runtime / name).write_text(text, encoding="utf-8")
+
+    def test_the_folder_layout_trimmed_runtime_and_app_files(self):
+        files = e.entries(self.runtime)
+        root = "OroHermandad Subidor/"
+        self.assertEqual(sorted(n for n in files if not n.startswith(root + "runtime/")),
+                         [root + "Abrir subidor.cmd", root + "LEEME.txt", root + "app/hermandad.py",
+                          root + "app/sincronizar.py", root + "app/subidor.pyw", root + "app/subidor_control.py"])
+        runtime = sorted(n[len(root + "runtime/"):] for n in files if n.startswith(root + "runtime/"))
+        self.assertEqual(runtime, ["DLLs/_tkinter.pyd", "DLLs/tcl86t.dll", "LICENSE.txt", "Lib/os.py",
+                                   "Lib/testing_helpers.py", "Lib/tkinter/__init__.py", "python.exe", "python313.dll",
+                                   "pythonw.exe", "tcl/tcl8.6/license.terms", "tcl/tk8.6/license.terms"])
+        self.assertEqual(files[root + "app/hermandad.py"], (HERE / "hermandad.py").read_bytes())
+        self.assertNotIn(root + "app/empaquetar_windows.py", files)
+        with self.assertRaises(e.BuildError):
+            e.entries(self.tmp)
+
+    def test_launcher_and_readme(self):
+        files = e.entries(self.runtime)
+        launcher = files["OroHermandad Subidor/Abrir subidor.cmd"]
+        text = launcher.decode("ascii")
+        self.assertEqual(text.count("\r\n"), text.count("\n"), "CRLF only")
+        self.assertTrue(text.startswith("@echo off\r\n"))
+        self.assertIn('if exist "%~dp0runtime\\pythonw.exe" goto abrir', text)
+        self.assertIn("echo Extrae primero la carpeta del zip", text)
+        self.assertIn('start "" "%~dp0runtime\\pythonw.exe" -E -s "%~dp0app\\subidor.pyw" %*\r\n', text)
+        self.assertNotIn(" -I ", text)
+        for line in text.split("\r\n"):
+            if line.startswith("echo "):
+                self.assertNotRegex(line, r"[()]", "a parenthesis in an echo would break the batch file")
+        readme = files["OroHermandad Subidor/LEEME.txt"]
+        self.assertTrue(readme.startswith(b"\xef\xbb\xbf"))
+        body = readme.decode("utf-8-sig")
+        self.assertEqual(body.count("\r\n"), body.count("\n"), "CRLF only")
+        for needle in ("1. Clic derecho en el zip → Propiedades → marca «Desbloquear» → Aceptar.",
+                       "2. Extrae la carpeta donde quieras (por ejemplo en Documentos).",
+                       "3. Abre «Abrir subidor.cmd»; la primera vez te ofrece un acceso directo en el escritorio.",
+                       "Cierra el subidor, desbloquea el zip nuevo y extrae su carpeta encima de la anterior (Reemplazar).",
+                       "Tu clave y tu configuración se conservan.", "WoW solo escribe el archivo al usar /reload o al salir",
+                       "Riesgo de baneo: muy bajo.", "nadie puede prometer «está permitido»",
+                       "Quien tiene el subidor actualiza primero el addon y el subidor"):
+            self.assertIn(needle, body.replace("\r\n  ", " ").replace("\r\n", " "))
+
+    def test_the_zip_is_reproducible_sorted_and_stamped(self):
+        files = e.entries(self.runtime)
+        first, second = e.write_zip(files, self.tmp / "a.zip"), e.write_zip(dict(reversed(files.items())), self.tmp / "b.zip")
+        self.assertEqual(e.sha256(first), e.sha256(second))
+        with zipfile_open(first) as archive:
+            infos = archive.infolist()
+            self.assertEqual([i.filename for i in infos], sorted(files))
+            self.assertTrue(all(i.date_time == e.stamp(h.VERSION) and i.compress_type == 8 for i in infos))
+            self.assertEqual(archive.read("OroHermandad Subidor/app/subidor.pyw"), (HERE / "subidor.pyw").read_bytes())
+        (self.runtime / "Lib" / "os.py").write_text("otro", encoding="utf-8")
+        self.assertNotEqual(e.sha256(e.write_zip(e.entries(self.runtime), self.tmp / "c.zip")), e.sha256(first))
+
+    def test_each_version_has_its_own_time_in_the_zip(self):
+        """R2-10: Explorer and 7-Zip give each extracted file the time of its zip entry, and Python checks a .pyc only
+        against the time and size of its .py: two versions never share that time, nor differ by a whole hour."""
+        self.assertEqual(e.stamp("0.6.0"), (2026, 11, 4, 0, 0, 0))
+        self.assertEqual(e.stamp("0.6.1"), (2026, 11, 4, 0, 0, 2))
+        self.assertEqual(e.stamp("0.7.0"), (2026, 11, 4, 0, 0, 40))
+        versions = [f"{a}.{b}.{c}" for a in range(2) for b in range(20) for c in range(20)]
+        seconds = [s[4] * 60 + s[5] for s in map(e.stamp, versions)]
+        self.assertEqual(len(set(seconds)), len(versions))
+        self.assertTrue(all(0 <= s < 3600 and s % 2 == 0 for s in seconds), "one hour, even seconds (DOS times)")
+        self.assertTrue(all(s[:4] == (2026, 11, 4, 0) for s in map(e.stamp, versions)))
+        files = e.entries(self.runtime)
+        name = f"{e.ROOT}/app/hermandad.py"
+        self.assertEqual(e.files_version(files), h.VERSION)
+        files[name] = re.sub(rb'(?m)^VERSION = "[0-9.]+"', b'VERSION = "0.6.1"', files[name], count=1)
+        with zipfile_open(e.write_zip(files, self.tmp / "nueva.zip")) as archive:
+            self.assertEqual({i.date_time for i in archive.infolist()}, {(2026, 11, 4, 0, 0, 2)})
+
+    def test_the_window_never_writes_pyc_next_to_itself(self):
+        """R2-10: the window runs with -E -s and without -B (the .cmd, the shortcut and the Run value), and a .pyc left
+        in app\\__pycache__ would keep running the old code after extracting a new version over the folder."""
+        app, cache = self.tmp / "OroHermandad Subidor" / "app", self.tmp / "pyc"
+        app.mkdir(parents=True)
+        for name in e.APP_FILES:
+            shutil.copyfile(HERE / name, app / name)
+        # pycache_prefix: whatever is written goes there, never next to the runtime's library (the Windows build runs
+        # this suite with the extracted runtime, whose folder must stay without .pyc).
+        result = subprocess.run([sys.executable, "-E", "-s", "-X", f"pycache_prefix={cache}", str(app / "subidor.pyw"),
+                                 "--help"], cwd=str(app), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        self.assertEqual(e.bytecode(app), [])
+        written = sorted(p.name.split(".")[0] for p in cache.rglob("*.pyc"))
+        self.assertEqual([n for n in written if n + ".py" in e.APP_FILES], [], written)
+
+    def test_only_zip_build_and_the_repository_rule(self):
+        digest = e.build(self.tmp / "salida" / "Subidor_Windows.zip", self.runtime, only_zip=True, scratch=self.tmp)
+        self.assertEqual(digest, e.sha256(self.tmp / "salida" / "Subidor_Windows.zip"))
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), ["Python313", "salida"], "the second build is removed")
+        with self.assertRaises(e.BuildError):
+            e.build(HERE / "Subidor_Windows.zip", self.runtime, only_zip=True, scratch=self.tmp)
+        self.assertFalse((HERE / "Subidor_Windows.zip").exists())
+
+    def test_full_build_runs_the_smoke_tests_and_checks_signatures(self):
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "powershell.exe" in command[0]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=0)
+        summary = self.tmp / "resumen.md"
+        with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
+            digest = e.build(self.tmp / "Subidor_Windows.zip", self.runtime, scratch=self.tmp, run=run)
+        smoke = [command for command, _ in calls if "powershell.exe" not in command[0]]
+        tested = self.tmp / "prueba" / "OroHermandad Subidor"
+        self.assertEqual([command[1:] for command in smoke],
+                         [["-B", "-E", "-s", "-c", "import ssl, ctypes, tkinter, json"],
+                          ["-B", "-m", "unittest", "discover", "-s", "pc_sync", "-p", "test_*.py"],
+                          ["-B", str(tested / "app" / "subidor.pyw"), "--comprobar"]])
+        self.assertTrue(all(command[0] == str(tested / "runtime" / "python.exe") for command in smoke))
+        self.assertTrue(all(kwargs["env"]["PYTHONDONTWRITEBYTECODE"] == "1" for _, kwargs in calls[:3]))
+        self.assertEqual(calls[1][1]["cwd"], str(HERE.parent), "the suite runs from the checkout")
+        powershell = [(command, kwargs) for command, kwargs in calls if "powershell.exe" in command[0]]
+        self.assertEqual(len(powershell), 1)
+        self.assertEqual(powershell[0][1]["env"]["OROHERMANDAD_RUNTIME"], str(tested / "runtime"))
+        self.assertIn("Get-AuthenticodeSignature", powershell[0][0][-1])
+        self.assertIn("$_.Status -ne 'Valid'", powershell[0][0][-1])
+        self.assertNotIn(str(tested), powershell[0][0][-1])
+        self.assertIn(f"SHA-256: {digest}", summary.read_text(encoding="utf-8"))
+
+    def test_failures_stop_the_build(self):
+        def unsigned(command, **kwargs):
+            if "powershell.exe" in command[0]:
+                return SimpleNamespace(returncode=0, stdout="NotSigned|C:\\x\\runtime\\DLLs\\tcl86t.dll\n", stderr="")
+            return SimpleNamespace(returncode=0)
+        with self.assertRaises(e.BuildError) as raised:
+            e.build(self.tmp / "z.zip", self.runtime, scratch=self.tmp, run=unsigned)
+        self.assertIn("NotSigned  C:\\x\\runtime\\DLLs\\tcl86t.dll", str(raised.exception))
+
+        def writes_bytecode(command, **kwargs):
+            if "--comprobar" in command:
+                cache = Path(command[2]).parent / "__pycache__"
+                cache.mkdir()
+                (cache / "hermandad.cpython-313.pyc").write_bytes(b"x")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        with self.assertRaises(e.BuildError) as raised:
+            e.build(self.tmp / "z.zip", self.runtime, scratch=self.tmp, run=writes_bytecode)
+        self.assertIn("__pycache__", str(raised.exception))
+
+        def failing(command, **kwargs):
+            return SimpleNamespace(returncode=3, stdout="", stderr="")
+        with self.assertRaises(e.BuildError) as raised:
+            e.build(self.tmp / "z.zip", self.runtime, scratch=self.tmp, run=failing)
+        self.assertIn("código 3", str(raised.exception))
+        with patch.object(e, "MAX_BYTES", 10), self.assertRaises(e.BuildError) as raised:
+            e.report(self.tmp / "z.zip", "0" * 64, summary="")
+        self.assertIn("más de 30 MB", str(raised.exception))
+
+    def test_main_off_windows_needs_solo_zip(self):
+        if os.name == "nt":
+            self.skipTest("en Windows construye de verdad")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(e.main(["--salida", str(self.tmp / "x.zip")]), 2)
+        self.assertIn("--solo-zip", err.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch.object(tempfile, "tempdir", str(self.tmp)):
+            self.assertEqual(e.main(["--solo-zip", "--runtime", str(self.runtime), "--salida", str(self.tmp / "x.zip")]), 0)
+        self.assertIn("Listo:", out.getvalue())
+
+
+def zipfile_open(path):
+    import zipfile
+    return zipfile.ZipFile(path)
+
+
+# -----------------------------------------------------------------------------------------------------------
+# Real Windows (the Windows runner of subidor-windows.yml): DPAPI, the registry, schtasks and a real shortcut
+# -----------------------------------------------------------------------------------------------------------
+@unittest.skipUnless(os.name == "nt", "solo en Windows")
+class RealWindowsTests(Quiet):
+    def test_dpapi_round_trip(self):
+        protector = h.DpapiProtector()
+        sealed = h.seal_key(KEY, protector)
+        self.assertEqual(sealed["protection"], "dpapi")
+        self.assertNotIn(KEY, json.dumps(sealed))
+        self.assertEqual(h.open_key(sealed, protector), KEY)
+        self.assertIsInstance(h.default_protector(), h.DpapiProtector)
+
+    def test_registry_and_task_scheduler_are_read(self):
+        self.assertIsNone(h.RunKey().get("OroHermandadSubidor-prueba-que-no-existe"))
+        self.assertIsInstance(h.autostart_installed(), bool)
+        self.assertIsInstance(h.startup_task_installed(), bool)
+        command = h.autostart_command()
+        self.assertTrue(command.endswith(" --minimizado"))
+        self.assertIn(' -E -s "', command)
+        program = command.split('"')[1]
+        self.assertTrue(Path(program).is_file(), program)
+
+    @unittest.skipUnless(os.environ.get("GITHUB_ACTIONS") == "true", "solo en el runner de GitHub (escribe en el escritorio)")
+    def test_a_real_shortcut_on_the_runner_desktop(self):
+        desktop = Path(os.environ["USERPROFILE"]) / "Desktop"
+        link = desktop / h.SHORTCUT_NAME
+        self.addCleanup(lambda: link.exists() and link.unlink())
+        if link.exists():
+            link.unlink()
+        self.assertFalse(h.create_shortcut(only_existing=True), "no shortcut: nothing is written")
+        self.assertFalse(link.exists())
+        self.assertTrue(h.create_shortcut())
+        self.assertTrue(link.is_file())
+        self.assertGreater(link.stat().st_size, 100)
+        self.assertTrue(h.create_shortcut(only_existing=True))
+
+
+# -----------------------------------------------------------------------------------------------------------
+# The Tk view (skipped without Tk or a display, as in deploy-cloudflare.yml on Linux)
+# -----------------------------------------------------------------------------------------------------------
+def load_window_module():
+    loader = importlib.machinery.SourceFileLoader("subidor_ventana", str(HERE / "subidor.pyw"))
+    spec = importlib.util.spec_from_loader("subidor_ventana", loader)
+    module = importlib.util.module_from_spec(spec)
+    keep = sys.dont_write_bytecode                  # subidor.pyw turns it on for its whole process
+    try:
+        loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = keep
+    return module
+
+
+class Flag:
+    """A tkinter.BooleanVar without Tk."""
+    def __init__(self):
+        self.value = False
+
+    def set(self, value):
+        self.value = bool(value)
+
+    def get(self):
+        return self.value
+
+
+class FakeView:
+    """What App asks of its Window, without Tk: questions are answered from answers, in order (then «No»)."""
+    answers = ()
+
+    def __init__(self, tk, ttk, root, app):
+        self.answers, self.asked, self.told, self.wizards = list(type(self).answers), [], [], 0
+        self.autostart = Flag()
+
+    def show_main(self):
+        pass
+
+    def show_wizard(self, *args, **kwargs):
+        self.wizards += 1
+
+    def refresh(self, controller):
+        pass
+
+    def ask(self, question):
+        self.asked.append(question)
+        return self.answers.pop(0) if self.answers else False
+
+    def tell(self, text):
+        self.told.append(text)
+
+
+class FakeRoot:
+    def protocol(self, *args):
+        pass
+
+    def iconify(self):
+        pass
+
+    def after(self, ms, action):
+        pass
+
+    def destroy(self):
+        pass
+
+
+class AppWithoutTkTests(Quiet):
+    """The real App.start() of subidor.pyw with FakeView (runs everywhere, also without Tk or a display): two copies of
+    the window sharing config.json, and the move from the old hidden start. The registry (FakeWinreg), the desktop
+    shortcut and the upload thread are fakes; each copy is a real folder with its subidor.pyw."""
+
+    def setUp(self):
+        super().setUp()
+        self.module = load_window_module()
+        self.home = self.tmp / "home"
+        wow = self.tmp / "World of Warcraft"
+        (wow / "_forever_" / "WTF").mkdir(parents=True)
+        h.save_config(self.home, {"schema": 1, "url": URL, "wow": str(wow), "key": h.seal_key(KEY, h.TestOnlyProtector()),
+                                  "acceso_ofrecido": True})
+        self.api, self.desktop, self.copy = FakeWinreg(), None, None
+        for name, value in (("_run_key", lambda registry=None: registry or h.RunKey(self.api)),
+                            ("launch_parts", lambda *args, **kwargs: self.parts(self.copy)),
+                            ("create_shortcut", self.shortcut),
+                            ("startup_task_installed", lambda *args, **kwargs: False)):
+            patcher = patch.object(h, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        begin = patch.object(self.module.App, "begin", lambda app, key=None: None)    # no upload thread or network
+        begin.start()
+        self.addCleanup(begin.stop)
+
+    def folder(self, name):
+        """A copy of the window: the folder name in tmp, with app/subidor.pyw (short: the Run value stays under 260
+        characters)."""
+        folder = self.tmp / name
+        (folder / "app").mkdir(parents=True, exist_ok=True)
+        (folder / "app" / "subidor.pyw").write_text("", encoding="utf-8")
+        return folder
+
+    def parts(self, folder):
+        return str(folder / "runtime" / "pythonw.exe"), str(folder / "app" / "subidor.pyw"), str(folder)
+
+    def shortcut(self, *args, only_existing=False, **kwargs):
+        if only_existing and self.desktop is None:
+            return False
+        self.desktop = self.copy
+        return True
+
+    def start(self, folder, version, answers=()):
+        """A double click on a launcher of that copy: a new App and its real start(), then the window is closed."""
+        self.copy = folder
+        app_class = type("App", (self.module.App,), {"view": type("View", (FakeView,), {"answers": answers})})
+        with patch.object(h, "VERSION", version):
+            app = app_class(None, None, FakeRoot(), self.home, protector=h.TestOnlyProtector())
+            app.windows = True
+            self.assertTrue(app.start())
+        app.shutdown()
+        return app
+
+    def opens(self):
+        """The copy the Run value opens (None without one)."""
+        value = (self.api.values.get(h.RUN_VALUE) or (None,))[0]
+        return next((f for f in (self.tmp / "vieja", self.tmp / "nueva") if value and str(f / "app") in value), value)
+
+    def said(self, app):
+        lines = []
+        while not app.messages.empty():
+            message = app.messages.get_nowait()
+            if message[0] == "linea":
+                lines.append(message[1].split("] ", 1)[-1])
+        return lines
+
+    def test_a_new_version_extracted_elsewhere_keeps_the_start_with_windows_and_the_shortcut(self):
+        """R2-11: the new version was extracted into another folder («Subidor_Windows (1)») and opened once. The
+        desktop shortcut made at the first run used to keep opening the old copy, which then took the start with
+        Windows back: both ran the old version from then on."""
+        old, new = self.folder("vieja"), self.folder("nueva")
+        self.copy = old
+        h.install_autostart()                                        # day 0: the old copy starts with Windows
+        self.desktop = old                                           # and has its desktop shortcut
+        app = self.start(old, "0.6.0")
+        self.assertEqual(self.said(app), [])
+        self.assertEqual(h.load_config(self.home)["subidor"], {"programa": str(old / "app" / "subidor.pyw"),
+                                                               "carpeta": str(old), "version": "0.6.0"})
+        app = self.start(new, "0.6.1")                               # day 1: the new copy, from its .cmd
+        self.assertEqual((self.opens(), self.desktop), (new, new))
+        self.assertEqual(self.said(app)[:2], [h.AUTOSTART_MOVED, c.SHORTCUT_MOVED])
+        app = self.start(self.desktop, "0.6.1")                      # day 2: the shortcut opens the new copy
+        self.assertEqual(self.said(app), [])
+        app = self.start(old, "0.6.0")                               # the old folder's .cmd, by habit
+        self.assertEqual((self.opens(), self.desktop), (new, new), "the old copy takes nothing back")
+        self.assertEqual(self.said(app), [c.OLD_COPY.format(esta="0.6.0", otra="0.6.1", carpeta=str(new))])
+        self.assertTrue(app.window.autostart.get())
+        self.assertEqual(h.load_config(self.home)["subidor"]["version"], "0.6.1")
+        shutil.rmtree(new)                                           # the new folder deleted: the old one is the only
+        app = self.start(old, "0.6.0")
+        self.assertEqual((self.opens(), self.desktop), (old, old))
+        self.assertEqual(self.said(app)[:2], [h.AUTOSTART_MOVED, c.SHORTCUT_MOVED])
+
+    def test_a_copy_at_a_long_path_leaves_the_start_with_windows_and_the_shortcut_of_the_same_version(self):
+        """R3: the folder's path was too long for the start with Windows, so the user copied it to a shorter one, as the
+        window said, and ticked the box there. Opening the long folder again removed that working value, said that
+        Windows would not open it and moved the desktop shortcut to the long folder."""
+        long = self.folder("Subidor en una ruta muy larga " + "x" * max(10, 110 - len(str(self.tmp))))
+        short = self.folder("corta")
+        self.copy = long
+        self.assertFalse(h.run_command_fits(h.autostart_command()), str(long))
+        self.desktop = long                                          # the first run made its shortcut
+        app = self.start(long, "0.6.0")
+        with self.assertRaises(h.SyncError):                         # ticking the box there: refused
+            h.install_autostart()
+        app = self.start(short, "0.6.0")                             # the copy at the short path
+        self.assertEqual(self.said(app), [c.SHORTCUT_MOVED])
+        h.install_autostart()                                        # the box ticked there
+        working = self.api.values[h.RUN_VALUE]
+        self.assertEqual(h.autostart_script(working[0]), str(short / "app" / "subidor.pyw"))
+        for _ in range(2):                                           # the long folder opened again, from its .cmd
+            app = self.start(long, "0.6.0")
+            self.assertEqual(self.said(app), [c.LONG_COPY.format(carpeta=str(short))])
+            self.assertEqual((self.api.values.get(h.RUN_VALUE), self.desktop), (working, short))
+            self.assertEqual(h.load_config(self.home)["subidor"]["programa"], str(short / "app" / "subidor.pyw"))
+            self.assertTrue(app.window.autostart.get())
+        app = self.start(short, "0.6.0")
+        self.assertEqual((self.said(app), self.api.values.get(h.RUN_VALUE), self.desktop), ([], working, short))
+        shutil.rmtree(short)                                         # the short copy deleted: the long one is the only
+        app = self.start(long, "0.6.0")
+        self.assertEqual((h.autostart_installed(), self.desktop), (False, long))
+        self.assertEqual(self.said(app)[:2], [h.AUTOSTART_TOO_LONG_REMOVED, c.SHORTCUT_MOVED])
+
+    def test_a_newer_copy_at_a_long_path_removes_the_start_with_windows_of_the_old_one(self):
+        """The old version at a short path starts with Windows and the new one was extracted at a long path: the Run
+        value of the old copy is removed and said (it would keep opening the old version), as before R3."""
+        long = self.folder("Subidor en una ruta muy larga " + "x" * max(10, 110 - len(str(self.tmp))))
+        short = self.folder("corta")
+        self.copy = short
+        h.install_autostart()
+        self.start(short, "0.6.0")
+        app = self.start(long, "0.6.1")
+        self.assertFalse(h.autostart_installed())
+        self.assertEqual(self.said(app)[0], h.AUTOSTART_TOO_LONG_REMOVED)
+        self.assertEqual(h.load_config(self.home)["subidor"]["version"], "0.6.1")
+
+    def test_after_removing_the_old_hidden_start_the_window_offers_to_start_with_windows(self):
+        """R2-12: that user had chosen to start the uploader with Windows; after «Sí» to removing the hidden start,
+        nothing started at the next logon and nothing said so. The Run value is only written on another «Sí»."""
+        folder = self.folder("ventana")
+        for answer, installed in ((True, False), (False, False), (None, True)):
+            with self.subTest(answer=answer, installed=installed):
+                self.copy = folder
+                self.api.values.clear()
+                if installed:
+                    h.install_autostart()
+                holder = contextlib.ExitStack()
+                self.assertTrue(holder.enter_context(h.instance_lock(self.home, "segundo-plano")))
+                removed = []
+                with patch.object(h, "uninstall_startup", lambda **kwargs: removed.append(kwargs) or holder.close()):
+                    app = self.start(folder, h.VERSION, answers=(True, answer))
+                holder.close()
+                self.assertEqual(removed, [{"end": True, "hidden": True, "quiet": True}])
+                self.assertEqual(app.window.asked, [c.MIGRATE] + ([] if installed else [c.MIGRATED_AUTOSTART]))
+                self.assertEqual(h.autostart_installed(), bool(answer) or installed)
+                self.assertEqual(app.window.autostart.get(), bool(answer) or installed, "the checkbox says so")
+                lines = self.said(app)
+                self.assertEqual(lines[0], c.MIGRATED)
+                self.assertEqual("El subidor se abrirá minimizado al iniciar Windows." in lines, bool(answer))
+
+
+@unittest.skipUnless(TK, "sin Tk o sin pantalla: las pruebas de la ventana solo corren en Windows o con pantalla")
+class WindowTests(Quiet):
+    def setUp(self):
+        super().setUp()
+        import tkinter
+        from tkinter import ttk
+        self.tk, self.ttk = tkinter, ttk
+        self.module = load_window_module()
+        self.root = tkinter.Tk()
+        self.root.withdraw()
+        self.addCleanup(self.destroy)
+
+    def destroy(self):
+        with contextlib.suppress(Exception):
+            self.root.destroy()
+
+    def app(self):
+        return self.module.App(self.tk, self.ttk, self.root, self.tmp / "home", protector=h.TestOnlyProtector())
+
+    def test_comprobar_builds_and_destroys_a_withdrawn_window(self):
+        self.assertEqual(self.module.main(["--comprobar"]), 0)
+
+    def test_the_main_view_shows_the_controller(self):
+        app = self.app()
+        controller = c.Controller(clock=lambda: NOW + 180, local=SPAIN)
+        controller.started(URL, Path("C:/World of Warcraft"), KEY)
+        controller.accounts = (2, NOW - 300)
+        controller.handle(("resultado", {"status": "ok", "events": [event("uploaded", result=accepted())]},
+                           {"aceptado": NOW, "ultimo": "ok", "suben": 2, "aportan": 7, "nueva": "0.6.1",
+                            "quedan": 21, "dia": h.day_index(NOW)}))
+        controller.handle(("linea", "[12:00:01] Cuenta JUSEP: envío aceptado (1 mercado, 2 objetos): 412 cambios."))
+        app.window.show_main()
+        app.window.refresh(controller)
+        self.root.update_idletasks()
+        window = app.window
+        self.assertEqual(window.status["text"], "Todo enviado")
+        self.assertEqual(window.detail["text"], "Último envío aceptado: hoy a las 12:00 (hace 3 min) · 412 cambios. "
+                                                "Te quedan 21 envíos hoy.")
+        self.assertEqual(window.rows["Hermandad"]["text"], "2 personas suben y 7 aportan precios (14 días)")
+        self.assertIn("0.6.1", window.notice["text"])
+        self.assertEqual(window.log.get("1.0", "end-1c"), "12:00 Cuenta JUSEP: envío aceptado (1 mercado, 2 objetos): "
+                                                          "412 cambios.")
+        self.assertEqual(window.light.itemcget(window.dot, "fill"), c.LIGHTS["verde"])
+        controller.handle(("error", h.AuthenticationError("clave"), None, {}))
+        window.refresh(controller)
+        self.assertEqual(window.action["text"], "Cambiar clave")
+        self.assertEqual(window.light.itemcget(window.dot, "fill"), c.LIGHTS["rojo"])
+
+    def blocked_app(self):
+        """A window started while a console HERMANDAD.cmd holds subidor.lock: state «bloqueado»."""
+        home = self.tmp / "home"
+        holder = contextlib.ExitStack()
+        self.addCleanup(holder.close)
+        self.assertTrue(holder.enter_context(h.instance_lock(home, "consola")))
+        wow = self.tmp / "World of Warcraft"
+        (wow / "_forever_" / "WTF").mkdir(parents=True)
+        h.save_config(home, {"schema": 1, "url": URL, "wow": str(wow), "key": h.seal_key(KEY, h.TestOnlyProtector()),
+                             "acceso_ofrecido": True, "estado": {"aceptado": NOW, "ultimo": "ok"},
+                             "sources": {"C:\\otra\\OroHermandad.lua": {"file": "a" * 64, "payload": "b" * 64}}})
+        for name, value in (("repair_autostart", None), ("autostart_installed", False), ("startup_task_installed", False),
+                            ("create_shortcut", False)):
+            patcher = patch.object(h, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        app = self.app()
+        self.addCleanup(app.stack.close)
+        app.window.ask = lambda question: True
+        app.window.tell = lambda text: self.fail("no dialog: " + text)
+        self.assertTrue(app.start())
+        self.assertEqual(app.controller.state, "bloqueado")
+        return app, home, holder
+
+    def test_while_blocked_nothing_changes_the_config_or_starts_an_upload(self):
+        app, home, holder = self.blocked_app()
+        before = (home / "config.json").read_bytes()
+        app.window.refresh(app.controller)
+        self.assertTrue(all(b.instate(["disabled"]) for b in app.window.change_buttons))
+        self.assertEqual([str(app.window.menu.entrycget(i, "state")) for i in app.window.config_entries],
+                         ["disabled", "disabled"])
+        app.change(("url",))                                           # «Cambiar» next to «Panel»
+        app.begin()                                                    # what its «Cancelar» calls
+        app.finish_setup(c.Setup({}, h.TestOnlyProtector(), detect=lambda: []), False)   # «Empezar» of a wizard
+        app.reset()                                                    # «Más…» → «Borrar mis datos de este PC»
+        self.root.update()
+        self.assertIsNone(app.session)
+        self.assertEqual((home / "config.json").read_bytes(), before, "config.json untouched")
+        self.assertEqual(app.controller.state, "bloqueado")
+        self.assertEqual(app.window.wizard.winfo_manager(), "", "no wizard")
+        # The console ends: «Reintentar» takes the lock and reads config.json from disk.
+        holder.close()
+        with patch.object(app, "begin") as begin:
+            app.status_action()
+        self.assertTrue(app.locked)
+        begin.assert_called_once_with()
+        self.assertEqual(app.config["url"], URL)
+        app.controller.configuring()
+        app.window.refresh(app.controller)
+        self.assertFalse(any(b.instate(["disabled"]) for b in app.window.change_buttons))
+
+    def test_the_first_run_wizard_walks_its_steps(self):
+        app = self.app()
+        setup = c.Setup({}, h.TestOnlyProtector(), detect=lambda: [])
+        done = []
+        app.window.show_wizard(setup, lambda s, shortcut: done.append((s.url, shortcut)))
+        self.root.update_idletasks()
+
+        def texts():
+            return [w.cget("text") for w in self.descendants(app.window.wizard) if "text" in w.keys()]
+        self.assertIn(c.WELCOME, texts())
+        self.assertIn(c.ASK_URL, texts())
+        self.press(app.window.wizard, c.NEXT)                       # empty address: an error, still step 1
+        self.assertIn(c.ASK_URL, texts())
+        entry = next(w for w in self.descendants(app.window.wizard) if isinstance(w, self.ttk.Entry))
+        entry.insert(0, URL)
+        self.press(app.window.wizard, c.NEXT)
+        self.assertIn(c.ASK_FOLDER, texts())
+        self.assertIn(c.ASK_FOLDER_NONE, texts())
+        setup.folder = self.tmp                                     # what «Elegir otra carpeta…» would set
+        (self.tmp / "_forever_" / "WTF").mkdir(parents=True)
+        app.window.show_wizard(setup, lambda s, shortcut: done.append((s.url, shortcut)))
+        app.window._step(setup, ["folder", "key", "ready"], 0, lambda s, shortcut: done.append((s.url, shortcut)), None)
+        self.press(app.window.wizard, c.NEXT)
+        self.assertIn(c.ASK_KEY, texts())
+        entry = next(w for w in self.descendants(app.window.wizard) if isinstance(w, self.ttk.Entry))
+        self.assertEqual(str(entry.cget("show")), "•")
+        entry.insert(0, KEY)
+        self.press(app.window.wizard, c.NEXT)
+        self.assertIn(c.READY, texts())
+        self.press(app.window.wizard, c.START)
+        self.assertEqual(done, [(URL, False)])
+        self.assertEqual(setup.key, KEY)
+
+    def descendants(self, widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from self.descendants(child)
+
+    def press(self, frame, text):
+        button = next(w for w in self.descendants(frame) if isinstance(w, self.ttk.Button) and w.cget("text") == text)
+        button.invoke()
+        self.root.update_idletasks()
+
+
+if __name__ == "__main__":
+    unittest.main()

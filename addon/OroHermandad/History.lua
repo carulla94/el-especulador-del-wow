@@ -1,7 +1,9 @@
 -- Oro de Hermandad: historial de precios de la lista vigilada (OroHermandadHist, contrato 2 de Especular).
--- Graba una vela por día y puntos de escaneo con los escaneos terminados de Auctionator, rellena una vez al día los
--- días que faltan con el historial de Auctionator, aprende los depósitos con la subasta abierta y prepara
--- /oro tabla y /oro sondeo. El formato y las reglas están en Spec.lua; aquí solo está el lado de WoW.
+-- Graba una vela por día y puntos de escaneo con los escaneos terminados (los del propio addon, Scanner.lua, y los de
+-- Auctionator), rellena una vez al día los días que faltan con el historial de Auctionator, aprende los depósitos con
+-- la subasta abierta y prepara /oro tabla y /oro sondeo. El formato y las reglas están en Spec.lua; aquí solo está el
+-- lado de WoW. Desde la 0.6.0 un punto puede llevar la venta estimada entre dos escaneos (dt, sold): sigue siendo el
+-- esquema 2 con las mismas claves, y la 0.4.x/0.5.x y el subidor 0.5.0 lo leen igual (se saltan esos dos campos).
 -- Lo que pasa Auctionator con sus eventos y su base de precios no es API pública: cada campo se comprueba y todo
 -- va en pcall. Los escaneos grandes se procesan por tandas con C_Timer para que el juego no se trabe.
 -- OroHermandadHist es lo único que el subidor de la hermandad saca del PC: solo lleva objetos vigilados (precios,
@@ -9,9 +11,9 @@
 -- profesiones ni nada de OroHermandadDB u OroHermandadCharDB.
 -- Esquema 2 (0.4.0): cada mercado lleva además `self` (los códigos de tus personajes) y `obs`, los precios de la lista
 -- fija que han compartido tus compañeros de hermandad al terminar sus escaneos completos (Relay.lua), con 15 días de
--- días, 72 h de puntos y su propio tope de 3 MB. Cada compañero va con un código de 8 cifras (un hash del nombre
--- del personaje y de la hermandad), nunca con su nombre. Ese código es seudónimo, no anónimo: quien conozca la lista
--- de la hermandad podría calcularlo.
+-- días, 72 h de puntos y su propio tope de 4 MB (3 MB hasta la 0.5.1). Cada compañero va con un código de 8 cifras
+-- (un hash del nombre del personaje y de la hermandad), nunca con su nombre. Ese código es seudónimo, no anónimo: quien
+-- conozca la lista de la hermandad podría calcularlo.
 local _, ns = ...
 local Data, Items, Spec, Prices = ns.Data, ns.Items, ns.Spec, ns.Prices
 local History = {}
@@ -37,7 +39,7 @@ local isInt = Spec.IsInt
 local hist                     -- OroHermandadHist (la tabla viva que el juego guarda al salir)
 local db = {}                  -- OroHermandadDB: estado privado (extras vigilados, día de la última importación)
 local marketKeyFn              -- función de Core que da "Reino-Facción"
-local version = "0.5.1"
+local version = "0.6.0"
 local loadInfo = {}            -- cómo se cargó OroHermandadHist (para /oro sondeo)
 local shapes = {}              -- tipo de escaneo -> forma de su primera fila (para /oro sondeo)
 local queue, running = {}, nil
@@ -92,11 +94,39 @@ local function changed()
   if not ok then History.lastError = tostring(err) end
 end
 
--- Aviso a Relay.lua de cada escaneo grabado (ya escrito): {market, t, whole, fallback, duplicate, written,
--- items = {{id, lo, qty, qty5}, ...}} con los objetos de la lista fija que se escribieron con punto, de menor a mayor
--- ID (nunca los extras de /oro vigilar). Relay decide si se comparte.
+-- Aviso a Relay.lua de cada escaneo grabado (ya escrito): {market, t, whole, fallback, duplicate, written, dt,
+-- items = {{id, lo, qty, qty5, sold}, ...}} con los objetos de la lista fija que se escribieron con punto, de menor a
+-- mayor ID (nunca los extras de /oro vigilar); dt y sold solo si el escaneo trae ventas (sold nil: ese objeto no).
+-- Relay decide si se comparte. El segundo argumento es true cuando llega desde History.Flush (al salir del juego o
+-- recargar): entonces hay que hacerlo en el acto, no en la siguiente tanda.
 local onScanRecorded
 function History.OnScanRecorded(fn) onScanRecorded = type(fn) == "function" and fn or nil end
+
+-- Quien escucha cada punto escrito (Timing.lua para «Cuándo vender»). fn(event, market, observer, ...):
+--   fn("point", market, observer, id, t, lo, qty, dt, sold): un punto escrito (dt y sold nil si no trae venta);
+--   fn("done", market, observer, t): ya se escribieron todos los puntos de ese escaneo.
+-- observer = "self" para lo tuyo (aquí) o el código de 8 cifras del compañero (Relay.lua). Un fallo de quien escucha
+-- no para nada: queda en History.lastError.
+local pointListeners = {}
+function History.OnPoint(fn)
+  if type(fn) ~= "function" then return end
+  for _, other in ipairs(pointListeners) do if other == fn then return end end
+  pointListeners[#pointListeners + 1] = fn
+end
+
+function History.NotifyPoint(market, observer, id, t, lo, qty, dt, sold)
+  for i = 1, #pointListeners do
+    local ok, err = pcall(pointListeners[i], "point", market, observer, id, t, lo, qty, dt, sold)
+    if not ok then History.lastError = tostring(err) end
+  end
+end
+
+function History.NotifyDone(market, observer, t)
+  for i = 1, #pointListeners do
+    local ok, err = pcall(pointListeners[i], "done", market, observer, t)
+    if not ok then History.lastError = tostring(err) end
+  end
+end
 
 -- Precio positivo -> cobre entero (al más cercano; los del escaneo completo son compra ya / cantidad y pueden
 -- tener decimales), o nil si no es un precio válido.
@@ -325,7 +355,9 @@ History.OBS_SCAN_SECONDS = 4 * 86400     -- escaneos aplicados que se recuerdan
 History.OBS_SCANS = 64
 History.OBS_STALE = 15 * 86400           -- un compañero sin escaneos en 15 días se olvida
 History.OBS_PER_MARKET = 40
-History.OBS_MAX_BYTES = 3072 * 1024      -- tope propio (40 compañeros con sus 15 días de 161 objetos; 2 MB hasta la 0.5.0, con 114), aparte de los 1,25 MB de lo tuyo
+-- Tope propio, aparte de los 2 MB de lo tuyo (0.6.0: compañeros a 8 escaneos al día con ventas; 3 MB en la 0.5.1 y 2 MB
+-- hasta la 0.5.0).
+History.OBS_MAX_BYTES = 4096 * 1024
 History.SELF_MAX = 10
 
 local function isHash(h) return type(h) == "string" and #h == 8 and not h:find("[^0-9a-f]") end
@@ -471,10 +503,11 @@ local function obsSize(h)
 end
 History.ObsSize = obsSize
 
--- Si lo de los compañeros pasa de 3 MB: (1) sus puntos de más de 24 h, (2) sus días de más de 7 días, (3) de más de
--- 3 días, (4) todos sus puntos y, solo si aún no cabe, (5) se van compañeros, el de escaneo más viejo primero (de
--- todos los mercados). Así lo último que se pierde es lo que el subidor aún tiene que enviar (los días de hoy y de
--- los 2 anteriores de cada compañero). Devuelve el paso (0 = cabía) y el tamaño.
+-- Si lo de los compañeros pasa de 4 MB (0.6.0): (1) sus puntos de más de 48 h, (2) sus días de más de 7 días, (3) sus
+-- puntos de más de 24 h, (4) sus días de más de 3 días, (5) todos sus puntos y, solo si aún no cabe, (6) se van
+-- compañeros, el de escaneo más viejo primero (de todos los mercados). Así lo último que se pierde es lo que el subidor
+-- aún tiene que enviar (los días de hoy y de los 2 anteriores de cada compañero) y los puntos (lo único por horas)
+-- aguantan más que los días viejos. Devuelve el paso (0 = cabía) y el tamaño.
 function History.ShrinkObs(h, t, maxBytes)
   maxBytes = maxBytes or History.OBS_MAX_BYTES
   local size = obsSize(h)
@@ -493,18 +526,19 @@ function History.ShrinkObs(h, t, maxBytes)
       end
     end
   end
-  eachItem(function(item) item.p = trimPoints(item.p, t, 86400) end)
-  size = obsSize(h)
-  if size <= maxBytes then return 1, size end
   local today = Spec.DayIndex(t)
-  for step, keep in ipairs({7, 3}) do
-    eachItem(function(item) item.d = trimDays(item.d, today, keep) end)
+  local steps = {
+    function(item) item.p = trimPoints(item.p, t, 2 * 86400) end,
+    function(item) item.d = trimDays(item.d, today, 7) end,
+    function(item) item.p = trimPoints(item.p, t, 86400) end,
+    function(item) item.d = trimDays(item.d, today, 3) end,
+    function(item) item.p = "" end,
+  }
+  for step, apply in ipairs(steps) do
+    eachItem(apply)
     size = obsSize(h)
-    if size <= maxBytes then return 1 + step, size end
+    if size <= maxBytes then return step, size end
   end
-  eachItem(function(item) item.p = "" end)
-  size = obsSize(h)
-  if size <= maxBytes then return 4, size end
   local list = {}
   for _, market in pairs(h.markets) do
     if type(market) == "table" and type(market.obs) == "table" then
@@ -521,10 +555,10 @@ function History.ShrinkObs(h, t, maxBytes)
     if next(o.market.obs) == nil then o.market.obs = nil end
     estimate = estimate - o.size
   end
-  return 5, obsSize(h)
+  return 6, obsSize(h)
 end
 
--- Llama a fn con los obs quitados un momento de cada mercado: el tope de 1,25 MB de lo tuyo se mide sin ellos.
+-- Llama a fn con los obs quitados un momento de cada mercado: el tope de 2 MB de lo tuyo se mide sin ellos.
 local function withoutObs(h, fn)
   local detached = {}
   for key, market in pairs(h.markets) do
@@ -590,8 +624,8 @@ end
 
 -- En ADDON_LOADED. saved: lo que el juego cargó en OroHermandadHist (nil si nada). opts: db (OroHermandadDB ya
 -- preparado), market (función "Reino-Facción"), version, dbLoaded (OroHermandadDB venía del archivo).
--- Limpia, poda (120 días, 14 días de puntos; lo de los compañeros, 15 días y 72 h) y deja lo tuyo en 1,25 MB o menos
--- (medido sin lo de los compañeros, que tiene su propio tope de 3 MB). Devuelve la tabla que debe quedar en
+-- Limpia, poda (120 días, 14 días de puntos; lo de los compañeros, 15 días y 72 h) y deja lo tuyo en 2 MB o menos
+-- (medido sin lo de los compañeros, que tiene su propio tope de 4 MB). Devuelve la tabla que debe quedar en
 -- OroHermandadHist.
 function History.Load(saved, opts)
   opts = opts or {}
@@ -634,7 +668,7 @@ end
 function History.Hist() return hist end
 function History.LoadInfo() return loadInfo end
 
--- En PLAYER_LOGOUT, antes de que el juego escriba el archivo: los topes de 1,25 MB (lo tuyo) y 3 MB (lo de los
+-- En PLAYER_LOGOUT, antes de que el juego escriba el archivo: los topes de 2 MB (lo tuyo) y 4 MB (lo de los
 -- compañeros, ya podado) también para lo de esta sesión. Devuelve paso y tamaño de cada uno.
 function History.BeforeSave()
   if not hist then return nil end
@@ -752,17 +786,24 @@ local function consume(job, row)
 end
 
 -- Escaneo entero sin filas que entender (Auctionator no las pasa o cambió su forma): el precio que Auctionator
--- acaba de guardar, solo de lo visto hoy. Va a la vela del día con la cantidad desconocida y sin punto.
+-- acaba de guardar, solo de lo visto hoy. Va a la vela del día con la cantidad desconocida y sin punto. Solo el de
+-- Auctionator (nunca la caché de precios del propio escáner, que sale de lo ya grabado: se escribiría a sí misma).
+local function auctionatorPrice(id)
+  if type(Prices.AuctionatorPrice) == "function" then return Prices.AuctionatorPrice(id), Prices.AuctionatorAge(id) end
+  return Prices.Price(id), Prices.Age(id)
+end
+
 local function fallback(job)
   job.fallback = true
   for id in pairs(job.watched) do
-    local price = copper(Prices.Price(id))
-    if price and Prices.Age(id) == 0 then job.agg[id] = {lo = price, qty = 0, qty5 = 0, noPoint = true} end
+    local raw, age = auctionatorPrice(id)
+    local price = copper(raw)
+    if price and age == 0 then job.agg[id] = {lo = price, qty = 0, qty5 = 0, noPoint = true} end
   end
 end
 
 local function prepare(job)
-  if job.whole and job.read == 0 then fallback(job) end
+  if job.whole and job.read == 0 and not job.aggregate then fallback(job) end
   local ids = {}
   for id, a in pairs(job.agg) do
     ids[#ids + 1] = id
@@ -837,26 +878,41 @@ function History.RecordDayText(text, d, p, qty)
   return Spec.EncodeDays((Spec.RecordScan(Spec.DecodeDays(text), d, p, qty)))
 end
 
-function History.AddPointText(text, t, lo, qty, qty5)
+-- dt y sold (opcionales, 0.6.0): la venta estimada que lleva el punto (Spec.AddPoint).
+function History.AddPointText(text, t, lo, qty, qty5, dt, sold)
   if History.FAST_WRITES and normalized and type(text) == "string" and text ~= "" then
     local prefix, lastText = splitLast(text)
     local decoded = Spec.DecodePoints(lastText)
     local last = decoded[1]
     if #decoded == 1 and Spec.EncodePoints(decoded) == lastText and isInt(t, 1, Spec.TIME_MAX) and t >= last.t then
-      local tail = Spec.EncodePoints(Spec.AddPoint(decoded, t, lo, qty, qty5))
+      local tail = Spec.EncodePoints(Spec.AddPoint(decoded, t, lo, qty, qty5, dt, sold))
       local out = join(prefix, tail)
       if countRecords(out) > Spec.MAX_POINTS then out = dropFirst(out) end
       return out
     end
   end
-  return Spec.EncodePoints(Spec.AddPoint(Spec.DecodePoints(text), t, lo, qty, qty5))
+  return Spec.EncodePoints(Spec.AddPoint(Spec.DecodePoints(text), t, lo, qty, qty5, dt, sold))
+end
+
+-- Venta estimada de un objeto en este escaneo: sold (o nil si ese objeto no la tiene).
+local function soldOf(job, id)
+  if not job.dt or type(job.sold) ~= "table" then return nil end
+  local sold = job.sold[id]
+  if isInt(sold, 0, Spec.SOLD_MAX) then return sold end
+  return nil
 end
 
 local function writeItem(job, market, id)
   local a = job.agg[id]
   local item = itemFor(market, id, job.watched[id])
   if job.whole then item.d = History.RecordDayText(item.d, job.d, a.lo, a.qty) end
-  if not a.noPoint then item.p = History.AddPointText(item.p, job.t, a.lo, a.qty, a.qty5) end
+  if not a.noPoint then
+    local sold = soldOf(job, id)
+    local dt = sold and job.dt or nil
+    item.p = History.AddPointText(item.p, job.t, a.lo, a.qty, a.qty5, dt, sold)
+    History.NotifyPoint(job.market, "self", id, job.t, a.lo, a.qty, dt, sold)
+    job.notified = true
+  end
 end
 
 -- Una tanda del trabajo en curso.
@@ -896,6 +952,31 @@ local function startNext()
   if running then schedule(step) end
 end
 
+-- Un trabajo terminado: resultado para /oro sondeo y avisos (ventana, Timing y Relay). sync: desde History.Flush.
+local function finish(job, sync)
+  History.lastResult = {kind = job.kind, whole = job.whole, rows = job.n, read = job.read, items = job.written,
+                        fallback = job.fallback, duplicate = job.duplicate, t = job.t, ticks = job.ticks,
+                        errors = job.errors, dt = job.dt}
+  if job.written == 0 then return end
+  if job.notified then History.NotifyDone(job.market, "self", job.t) end
+  changed()
+  if onScanRecorded then
+    local items, anySample = {}, false
+    for _, id in ipairs(job.ids) do
+      local a = job.agg[id]
+      if FIXED[id] and a and not a.noPoint then
+        local sold = soldOf(job, id)
+        anySample = anySample or sold ~= nil
+        items[#items + 1] = {id, a.lo, a.qty, a.qty5, sold}
+      end
+    end
+    local okHook, errHook = pcall(onScanRecorded, {market = job.market, t = job.t, whole = job.whole,
+      fallback = job.fallback or false, duplicate = job.duplicate or false, written = job.written, items = items,
+      dt = anySample and job.dt or nil}, sync and true or nil)
+    if not okHook then History.lastError = tostring(errHook) end
+  end
+end
+
 step = function()
   local job = running
   if not job then return end
@@ -906,33 +987,31 @@ step = function()
     if job.errors > MAX_ERRORS then job.phase = "done" end
   end
   if job.phase == "done" then
-    History.lastResult = {kind = job.kind, whole = job.whole, rows = job.n, read = job.read, items = job.written,
-                          fallback = job.fallback, duplicate = job.duplicate, t = job.t, ticks = job.ticks,
-                          errors = job.errors}
     running = nil
-    if job.written > 0 then
-      changed()
-      if onScanRecorded then
-        local items = {}
-        for _, id in ipairs(job.ids) do
-          local a = job.agg[id]
-          if FIXED[id] and a and not a.noPoint then items[#items + 1] = {id, a.lo, a.qty, a.qty5} end
-        end
-        local okHook, errHook = pcall(onScanRecorded, {market = job.market, t = job.t, whole = job.whole,
-          fallback = job.fallback or false, duplicate = job.duplicate or false, written = job.written, items = items})
-        if not okHook then History.lastError = tostring(errHook) end
-      end
-    end
+    finish(job)
     startNext()
   else
     schedule(step)
   end
 end
 
+local function watchedSet()
+  local watched = {}
+  for _, w in ipairs(History.WatchList()) do watched[w.id] = w.cat end
+  return watched
+end
+
+local function jobTime(opts)
+  local t = type(opts) == "table" and opts.t or nil
+  if isInt(t, 1, Spec.TIME_MAX) then return t end
+  return now()
+end
+
 -- Un escaneo de Auctionator ha terminado (Core.scanFinished). kind: "full" o "summary"; data: sus filas; whole: el
 -- escaneo recorrió toda la subasta. Solo un escaneo entero escribe la vela del día; uno parcial (una búsqueda que
--- cortó el escaneo de resumen) solo añade puntos. Se procesa por tandas; devuelve true si queda algo que hacer.
-function History.Record(kind, data, whole)
+-- cortó el escaneo de resumen) solo añade puntos. opts.t: hora del escaneo (por defecto, ahora; un resumen que
+-- Scanner.lua retuvo se graba con la suya). Se procesa por tandas; devuelve true si queda algo que hacer.
+function History.Record(kind, data, whole, opts)
   if not hist then return false end
   if type(data) == "table" then
     if seen[data] then return false end
@@ -942,16 +1021,47 @@ function History.Record(kind, data, whole)
     data = nil
   end
   if not data and not whole then return false end
-  local key, t = currentKey(), now()
+  local key, t = currentKey(), jobTime(opts)
   local d = t and Spec.DayIndex(t)
   if not (key and d) then return false end
   if #queue >= History.MAX_QUEUE then History.lastError = "demasiados escaneos en cola"; return false end
-  local watched = {}
-  for _, w in ipairs(History.WatchList()) do watched[w.id] = w.cat end
+  local watched = watchedSet()
   local me = type(UnitName) == "function" and UnitName("player") or nil
   local job = {kind = kind, data = data, n = data and #data or 0, whole = whole and true or false, t = t, d = d,
                market = key, watched = watched, me = type(me) == "string" and me or nil, agg = {}, ids = {},
                index = 1, writeIndex = 1, read = 0, written = 0, errors = 0, ticks = 0, phase = "read"}
+  queue[#queue + 1] = job
+  if not running then startNext() end
+  return true
+end
+
+-- Un escaneo ya leído por Scanner.lua (el escaneo completo propio o «Escanear la lista»). kind: "full" o "lista";
+-- agg = {[id] = {lo, qty, qty5}} (cobre por unidad y unidades; se queda solo lo vigilado y válido); whole: recorrió toda
+-- la subasta (escribe la vela del día). opts.t: hora del escaneo (por defecto, ahora); opts.dt (600..7200) y
+-- opts.sold = {[id] = unidades}: la venta estimada desde el escaneo anterior del personaje (Spec.InferSold), que va en
+-- el punto de cada objeto que la tenga. Entra en la misma cola que los de Auctionator (con su control de repetidos) y
+-- se escribe por tandas. Devuelve true si se encoló.
+function History.RecordAggregate(kind, agg, whole, opts)
+  if not hist or type(agg) ~= "table" then return false end
+  opts = type(opts) == "table" and opts or {}
+  local key, t = currentKey(), jobTime(opts)
+  local d = t and Spec.DayIndex(t)
+  if not (key and d) then return false end
+  if #queue >= History.MAX_QUEUE then History.lastError = "demasiados escaneos en cola"; return false end
+  local watched = watchedSet()
+  local clean = {}
+  for id, a in pairs(agg) do
+    if type(id) == "number" and watched[id] and type(a) == "table" then
+      local lo, qty, qty5 = a.lo or a[1], a.qty or a[2], a.qty5 or a[3]
+      if isInt(lo, 1, Spec.PRICE_MAX) and isInt(qty, 0, Spec.QTY_MAX) and isInt(qty5, 0, Spec.QTY_MAX) then
+        clean[id] = {lo = lo, qty = qty, qty5 = min(qty5, qty)}
+      end
+    end
+  end
+  local dt = isInt(opts.dt, Spec.SAMPLE_DT_MIN, Spec.SAMPLE_DT_MAX) and opts.dt or nil
+  local job = {kind = kind, n = 0, whole = whole and true or false, t = t, d = d, market = key, watched = watched,
+               agg = clean, ids = {}, index = 1, writeIndex = 1, read = 0, written = 0, errors = 0, ticks = 0,
+               phase = "prepare", aggregate = true, dt = dt, sold = dt and type(opts.sold) == "table" and opts.sold or nil}
   queue[#queue + 1] = job
   if not running then startNext() end
   return true
@@ -962,6 +1072,35 @@ function History.Pending()
   local n = #queue
   if running then n = n + 1 end
   return n
+end
+
+-- Al salir del juego o recargar (PLAYER_LOGOUT, antes de BeforeSave): termina en el acto lo que está por escribir,
+-- como mucho History.FLUSH_JOBS trabajos (unos pocos ms: 201 objetos cada uno), y avisa a Relay con sync (el escaneo
+-- llega al buzón aunque la sesión se acabe ya). Lo que quede en cola se pierde, como antes. Devuelve cuántos terminó.
+History.FLUSH_JOBS = 2
+function History.Flush()
+  local done = 0
+  while done < History.FLUSH_JOBS do
+    local job = running or table.remove(queue, 1)
+    if not job then break end
+    running = job
+    local guard = 0
+    while job.phase ~= "done" and guard < 100000 do
+      guard = guard + 1
+      local ok, err = pcall(advance, job)
+      if not ok then
+        job.errors = job.errors + 1
+        History.lastError = tostring(err)
+        if job.errors > MAX_ERRORS then job.phase = "done" end
+      end
+    end
+    job.phase = "done"
+    running = nil
+    finish(job, true)
+    done = done + 1
+  end
+  if not running and #queue > 0 then startNext() end
+  return done
 end
 
 ---------------------------------------------------------------------------

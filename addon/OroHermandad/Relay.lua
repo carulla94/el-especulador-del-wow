@@ -14,6 +14,10 @@
 -- Los 0.2.x/0.3.x ignoran P3 y Q3 (para ellos son mensajes de un tipo desconocido). Desde la 0.5.1 un P3 lleva la
 -- lista fija entera (161 objetos, con la pesca, en unas 12 partes); la 0.4.0 y la 0.5.0 se saltan los objetos que no
 -- comparten (History.IsShared) y se quedan con el resto.
+-- Desde la 0.6.0 un P3 puede llevar también la venta estimada entre dos escaneos (contrato C2, p3-samples.json): un
+-- campo 8 con dt (segundos, en base 36) y un quinto subcampo por objeto con las unidades vendidas (sin él, 0; vacío, ese
+-- objeto no tiene venta). Sin ventas el mensaje es exactamente el de la 0.5.1, y la 0.4.x/0.5.x aceptan los nuevos (se
+-- saltan los campos y subcampos de más) y se quedan con los precios. Nunca lleva nombres.
 local _, ns = ...
 local Spec, History, Guild = ns.Spec, ns.History, ns.Guild
 local Relay = {}
@@ -29,7 +33,8 @@ local BROADCAST_COOLDOWN = 900          -- cada personaje comparte en directo co
 local LIVE_PER_SENDER = 600             -- y se acepta como mucho uno nuevo de cada compañero cada 10 min
 local REPLY_COOLDOWN = 600              -- una respuesta a la misma persona cada 10 min como mucho
 local REPLY_DELAY_MIN, REPLY_DELAY_MAX = 2, 90 -- al azar: con muchos compañeros, las respuestas llegan repartidas
-local REPLY_MAX_SCANS, REPLY_MAX_MSGS = 4, 24
+local REPLY_MAX_SCANS, REPLY_MAX_MSGS = 4, 28 -- 28: dos escaneos enteros de 14 partes (con ventas; 24 hasta la 0.5.1)
+local LEGACY_REPLY_MSGS = 24            -- el más pequeño de cualquier versión: con él se ve si una respuesta llegó llena
 local REPLY_QUEUE_LIMIT = 48            -- con tantos mensajes de precios en cola no se responde
 local OUTBOX_MAX, OUTBOX_SECONDS = 32, 72 * 3600
 local ASK_COOLDOWN = 600                -- el PC con el subidor pide como mucho cada 10 min (por cuenta)
@@ -51,6 +56,7 @@ local TICK_MS, TICK_UNITS = 1.5, 6      -- por tanda: 1,5 ms (con debugprofilest
 local COMBAT_POLL = 5
 local CHANGE_SPACING = 10               -- la ventana y las descripciones se rehacen como mucho cada 10 s
 local TIME_MAX = Spec.TIME_MAX
+local DT_MIN, DT_MAX, SOLD_MAX = Spec.SAMPLE_DT_MIN or 600, Spec.SAMPLE_DT_MAX or 7200, Spec.SOLD_MAX or 1000000
 
 local floor, max, min = math.floor, math.max, math.min
 local isInt = Spec.IsInt
@@ -75,6 +81,16 @@ local function clock()
 end
 
 local function unixNow() return History.Now() end
+
+-- Hora del reloj del PC (time(), el mismo reloj que lee el subidor con time.time() al escribir su aviso), que puede ir
+-- distinto del servidor (zona horaria mal puesta, reloj sin sincronizar). Sin él, la del servidor.
+local function pcNow()
+  if type(time) == "function" then
+    local ok, t = pcall(time)
+    if ok and isInt(t, 1, TIME_MAX) then return t end
+  end
+  return unixNow()
+end
 
 local function after(seconds, fn)
   if type(C_Timer) == "table" and type(C_Timer.After) == "function" then C_Timer.After(seconds, fn) end
@@ -253,13 +269,25 @@ local function split(text, sep)
   return out
 end
 
-local function token(id, lo, qty, qty5) return b36(id) .. ":" .. b36(lo) .. ":" .. b36(qty) .. ":" .. b36(qty5) end
+-- Token de un objeto. withSamples (el escaneo trae ventas): quinto subcampo con las unidades vendidas en base 36,
+-- nada si son 0 y vacío si ese objeto no tiene venta (sold nil).
+local function token(id, lo, qty, qty5, sold, withSamples)
+  local tok = b36(id) .. ":" .. b36(lo) .. ":" .. b36(qty) .. ":" .. b36(qty5)
+  if withSamples then
+    if sold == nil then tok = tok .. ":" elseif sold > 0 then tok = tok .. ":" .. b36(sold) end
+  end
+  return tok
+end
+
+local function validDt(dt) return isInt(dt, DT_MIN, DT_MAX) end
 
 -- Reparte los tokens en mensajes de 250 bytes como mucho, siempre en el mismo orden y como si parte y total tuvieran
 -- 2 cifras: "<kind>|<seq>|<parte>|<total>|<mk>|<t>|tok,tok,...". Si salen más de maxParts, se quedan las primeras.
-local function pack(kind, seq, mk, t, tokens, maxParts)
+-- dt (opcional, solo P3 con ventas): cada parte acaba en "|<dt en base 36>", contado en los 250 bytes.
+local function pack(kind, seq, mk, t, tokens, maxParts, dt)
   local head, tail = kind .. "|" .. b36(seq) .. "|", "|" .. mk .. "|" .. b36(t) .. "|"
-  local budget = MAX_MSG - #(head .. "16|16" .. tail)
+  local suffix = dt and ("|" .. b36(dt)) or ""
+  local budget = MAX_MSG - #(head .. "16|16" .. tail) - #suffix
   local parts, cur = {}, nil
   for _, tok in ipairs(tokens) do
     if not cur then
@@ -274,22 +302,24 @@ local function pack(kind, seq, mk, t, tokens, maxParts)
   if cur then parts[#parts + 1] = cur elseif #parts == 0 then parts[1] = "" end
   while #parts > maxParts do table.remove(parts) end
   local msgs = {}
-  for i, p in ipairs(parts) do msgs[i] = head .. i .. "|" .. #parts .. tail .. p end
+  for i, p in ipairs(parts) do msgs[i] = head .. i .. "|" .. #parts .. tail .. p .. suffix end
   return msgs
 end
 
-local function sortTokens(items)
+local function sortTokens(items, withSamples)
   table.sort(items, function(a, b) return a[1] < b[1] end)
   local tokens = {}
-  for i, it in ipairs(items) do tokens[i] = token(it[1], it[2], it[3], it[4]) end
+  for i, it in ipairs(items) do tokens[i] = token(it[1], it[2], it[3], it[4], it[5], withSamples) end
   return tokens
 end
 
--- P3 de un escaneo: items = {{id, lo, qty, qty5}, ...} (se ordenan por ID).
-function Relay.PackP3(seq, mk, t, items)
+-- P3 de un escaneo: items = {{id, lo, qty, qty5, sold}, ...} (se ordenan por ID; sold: unidades vendidas o nil si ese
+-- objeto no tiene venta). dt: segundos de la venta estimada (600..7200) o nil; sin dt sale exactamente el P3 de la 0.5.1.
+function Relay.PackP3(seq, mk, t, items, dt)
   local copy = {}
   for i, it in ipairs(items) do copy[i] = it end
-  return pack("P3", seq, mk, t, sortTokens(copy), P3_PARTS)
+  if not validDt(dt) then dt = nil end
+  return pack("P3", seq, mk, t, sortTokens(copy, dt ~= nil), P3_PARTS, dt)
 end
 
 -- Q3: entries = {[código] = hora} o {{código, hora}, ...}; van ordenadas por código.
@@ -309,7 +339,8 @@ local function splitTokens(text)
   return out
 end
 
--- "id:lo:qty:qty5(:más)*" -> id, lo, qty, qty5 (o nil si está mal). Los subcampos de más se ignoran.
+-- "id:lo:qty:qty5(:más)*" -> id, lo, qty, qty5 y el quinto subcampo tal cual (nil si no hay), o nil si está mal. Los
+-- subcampos de más se ignoran.
 local function parseToken(tok)
   local f = split(tok, ":")
   if #f < 4 then return nil end
@@ -317,11 +348,19 @@ local function parseToken(tok)
   local id, lo = d36(f[1], 1, 2147483647), d36(f[2], 1, Spec.PRICE_MAX)
   local qty, qty5 = d36(f[3], 0, Spec.QTY_MAX), d36(f[4], 0, Spec.QTY_MAX)
   if not (id and lo and qty and qty5) or qty5 > qty then return nil end
-  return id, lo, qty, qty5
+  return id, lo, qty, qty5, f[5]
+end
+
+-- Quinto subcampo -> unidades vendidas: sin él, 0; vacío o fuera de 0..1000000, sin venta (nil).
+local function soldOf(field)
+  if field == nil then return 0 end
+  return d36(field, 0, SOLD_MAX)
 end
 
 -- Mensaje recibido -> tabla, o nil y el motivo. now: hora unix; channel: "GUILD" (en directo) o "WHISPER" (puesta al
 -- día); mk: etiqueta del mercado actual. Solo comprueba el texto; las reglas de quién y cuándo van aparte.
+-- P3: msg.dt = el campo 8 si es un base 36 de 600 a 7200 (si no, nil) e items = {{id, lo, qty, qty5, sold}, ...} con
+-- sold nil si el objeto no trae venta o el mensaje no trae un dt válido.
 function Relay.Parse(text, now, channel, mk)
   if type(text) ~= "string" or #text > 255 then return nil, "tamaño" end
   local f = split(text, "|")
@@ -338,17 +377,18 @@ function Relay.Parse(text, now, channel, mk)
     local t = d36(f[6], 1, TIME_MAX)
     local oldest = channel == "WHISPER" and now - CATCHUP_OLDEST or now - LIVE_OLDEST
     if not t or t < oldest or t > now + FUTURE then return nil, "hora" end
+    local dt = f[8] and d36(f[8], DT_MIN, DT_MAX) or nil
     local items, ids = {}, {}
     if f[7] ~= "" then
       for _, tok in ipairs(split(f[7], ",")) do
-        local id, lo, qty, qty5 = parseToken(tok)
+        local id, lo, qty, qty5, field = parseToken(tok)
         if not id then return nil, "objeto mal escrito" end
         if ids[id] then return nil, "objeto repetido" end
         ids[id] = true
-        if History.IsShared(id) then items[#items + 1] = {id, lo, qty, qty5} end
+        if History.IsShared(id) then items[#items + 1] = {id, lo, qty, qty5, dt and soldOf(field) or nil} end
       end
     end
-    return {kind = kind, seq = seq, part = part, total = total, mk = f[5], t = t, items = items, ids = ids}
+    return {kind = kind, seq = seq, part = part, total = total, mk = f[5], t = t, dt = dt, items = items, ids = ids}
   end
   local floorTime = d36(f[6], 0, TIME_MAX)
   if not floorTime then return nil, "hora" end
@@ -371,6 +411,8 @@ end
 ---------------------------------------------------------------------------
 local db, cdb                 -- OroHermandadDB.relay (cuenta) y OroHermandadCharDB.relay (personaje)
 local markerSeen = false      -- el subidor del PC dejó su aviso (OroHermandad_Subidor)
+local loadedAt = nil          -- hora unix del reloj del PC al cargar la interfaz (Relay.Init): el juego lee entonces el
+                              -- aviso del subidor, que lleva la hora del mismo reloj
 local loggedIn = false        -- ya pasó Relay.Login (25 s después de entrar)
 local stats = {received = 0, dropped = 0, lastReason = nil}
 local open, openCount, bySender, dead = {}, 0, {}, {}
@@ -382,6 +424,7 @@ local windowCount, windowParts, windowSeq = {}, {}, 0
 local replies, repliedAt = {}, {}
 local askedAt, targetLog, pendingTargets, lastTarget, targetTimer = {}, {}, {}, -math.huge, false
 local broadcastTimer = false
+local queuedSent = nil        -- hora del escaneo que esta sesión ya puso en cola en directo (relay.sent, al salir entero)
 local askPending = false      -- hay que pedir a toda la hermandad (hasta que la petición sale de verdad)
 local askQueued, askPolling = false, false -- esa petición ya está en la cola / hay un temporizador mirando si se puede
 local followAsk, followTarget = false, {} -- peticiones de lo que faltaba, ya programadas (toda la hermandad / código)
@@ -503,6 +546,14 @@ function Relay.GuildItems(key)
   return cache.items
 end
 
+-- ¿Está ya todo decodificado en GuildItems(key)? (Timing.lua espera a esto para su primera pasada.) Si la caché era de
+-- otro mercado, empieza a decodificar este.
+function Relay.GuildItemsReady(key)
+  if not key or not History.Hist() then return true end
+  if cache.key ~= key then resetCache(key) end
+  return cache.job == nil and #cache.queue == 0
+end
+
 function Relay.OnChange(fn) onChange = type(fn) == "function" and fn or nil end
 
 local function notifyChange()
@@ -555,6 +606,21 @@ local function evict(key, market, h)
   for id in pairs(entry.items) do markDirty(key, id) end
 end
 
+-- ¿Cabe en el mercado un compañero que aún no está en obs, con un escaneo de la hora t? Con 40
+-- (History.OBS_PER_MARKET), solo si es más nuevo que el de escaneo más viejo, que se va: devuelve también su código.
+-- La misma regla para aplicar (applyBegin) y para ver si una respuesta pide más (deliver).
+local function roomFor(market, t)
+  local count, oldest = 0, nil
+  for h, entry in pairs(type(market.obs) == "table" and market.obs or {}) do
+    count = count + 1
+    local candidate = {hash = h, seen = entry.seen}
+    if not oldest or History.EvictionOrder(candidate, oldest) then oldest = candidate end
+  end
+  if count < History.OBS_PER_MARKET then return true, nil end
+  if t > oldest.seen then return true, oldest.hash end
+  return false, nil
+end
+
 -- Primer paso de un escaneo: la hora va a s ANTES que los precios (así nunca se cuenta dos veces, aunque la sesión
 -- acabe a medias). Con 40 compañeros en el mercado, uno nuevo solo entra si su escaneo es más nuevo que el más viejo.
 local function applyBegin(scan)
@@ -567,16 +633,9 @@ local function applyBegin(scan)
   if obs then
     if hasTime(obs.s, scan.t) then return nil end
   else
-    local count, oldest = 0, nil
-    for h, entry in pairs(type(market.obs) == "table" and market.obs or {}) do
-      count = count + 1
-      local candidate = {hash = h, seen = entry.seen}
-      if not oldest or History.EvictionOrder(candidate, oldest) then oldest = candidate end
-    end
-    if count >= History.OBS_PER_MARKET then
-      if not (scan.t > oldest.seen) then stats.dropped = stats.dropped + 1; return nil end
-      evict(scan.market, market, oldest.hash)
-    end
+    local fits, out = roomFor(market, scan.t)
+    if not fits then stats.dropped = stats.dropped + 1; return nil end
+    if out then evict(scan.market, market, out) end
     market.obs = type(market.obs) == "table" and market.obs or {}
     obs = {seen = scan.t, s = "", items = {}}
     market.obs[scan.hash] = obs
@@ -589,16 +648,28 @@ local function applyBegin(scan)
   return {scan = scan, obs = obs, index = 1, d = Spec.DayIndex(scan.t)}
 end
 
--- Un objeto del escaneo, igual que History escribe los tuyos: la vela del día y el punto.
+-- Un objeto del escaneo, igual que History escribe los tuyos: la vela del día y el punto (con su venta, si la trae).
+-- Quien escucha los puntos (Timing.lua) recibe cada uno con el código del compañero, nunca su nombre.
 local function applyItem(job)
   local it = job.scan.items[job.index]
   job.index = job.index + 1
   local id, lo, qty, qty5 = it[1], it[2], it[3], it[4]
+  local dt = job.scan.dt
+  local sold = dt and it[5] or nil
+  if sold == nil then dt = nil end
   local item = job.obs.items[id]
   if not item then item = {d = "", p = ""}; job.obs.items[id] = item end
   item.d = History.RecordDayText(item.d, job.d, lo, qty)
-  item.p = History.AddPointText(item.p, job.scan.t, lo, qty, qty5)
+  item.p = History.AddPointText(item.p, job.scan.t, lo, qty, qty5, dt, sold)
   markDirty(job.scan.market, id)
+  if History.NotifyPoint then History.NotifyPoint(job.scan.market, job.scan.hash, id, job.scan.t, lo, qty, dt, sold) end
+end
+
+-- El escaneo que se estaba aplicando ya está entero.
+local function applyEnd(job)
+  applying = nil
+  changePending = true
+  if History.NotifyDone then History.NotifyDone(job.scan.market, job.scan.hash, job.scan.t) end
 end
 
 -- Una unidad de trabajo: un objeto de un escaneo, o lo de un compañero en un objeto. Un objeto a medio decodificar
@@ -606,8 +677,7 @@ end
 local function workUnit()
   if applying then
     if applying.index > #applying.scan.items then
-      applying = nil
-      changePending = true
+      applyEnd(applying)
     else
       applyItem(applying)
     end
@@ -711,14 +781,24 @@ local scheduleFollowUp
 
 -- Un escaneo completo de un compañero: a la bandeja de entrada (64 como mucho), si no se tenía ya y no pasa de los
 -- límites (uno en directo cada 10 min por compañero; 8 por ventana de puesta al día). Si su respuesta llega llena
--- (4 escaneos, o no cabría otro como el último en los 24 mensajes), lo que le quede se pide solo más tarde.
+-- (4 escaneos, o no cabría otro como el último en 24 mensajes), lo que le quede se pide solo más tarde. 24 y no 28:
+-- quien responde puede tener la 0.4.x/0.5.x, que para en 24. Con una de la 0.6.0 puede salir una petición de más, que
+-- no se repite: lo recibido entra en obs y la siguiente petición ya lleva su hora.
+-- Un escaneo por susurro de quien no está en obs y no cabe (40 compañeros, todos con algo más nuevo, y nada suyo
+-- esperando en la bandeja) se descarta aquí, como lo descartaría applyBegin, y no pide nada más: la siguiente petición
+-- no llevaría su código y le volvería a pedir lo mismo, cada 11 min sin fin. Sus partes sí cuentan para ver si la
+-- respuesta llegó llena (eran parte de ella): si el siguiente escaneo de la misma respuesta cabe, pide el resto.
 local function deliver(scan)
   local market = History.Market(scan.market)
   local obs = market and type(market.obs) == "table" and market.obs[scan.hash] or nil
   if obs and hasTime(obs.s, scan.t) then return false, "ya estaba" end
-  if applying and applying.scan.hash == scan.hash and applying.scan.t == scan.t then return false, "ya estaba" end
+  local pending = applying ~= nil and applying.scan.hash == scan.hash
+  if pending and applying.scan.t == scan.t then return false, "ya estaba" end
   for _, other in ipairs(inbox) do
-    if other.hash == scan.hash and other.t == scan.t then return false, "ya estaba" end
+    if other.hash == scan.hash then
+      if other.t == scan.t then return false, "ya estaba" end
+      pending = true
+    end
   end
   if #scan.items == 0 then return false, "vacío" end
   if scan.channel == "GUILD" then
@@ -733,7 +813,8 @@ local function deliver(scan)
     windowCount[k] = (windowCount[k] or 0) + 1
     local parts = scan.parts or 1
     windowParts[k] = (windowParts[k] or 0) + parts
-    if windowCount[k] >= REPLY_MAX_SCANS or windowParts[k] + parts > REPLY_MAX_MSGS then
+    if not obs and not pending and market and not roomFor(market, scan.t) then return reject("sin sitio") end
+    if windowCount[k] >= REPLY_MAX_SCANS or windowParts[k] + parts > LEGACY_REPLY_MSGS then
       scheduleFollowUp(win, scan.hash, scan.sender)
     end
   end
@@ -768,9 +849,11 @@ local function onP3(msg, sender, h, channel, key)
       dropSeries(worstKey, "demasiadas series")
     end
     s = {hash = h, sender = sender, t = msg.t, total = msg.total, channel = channel, market = key, parts = {}, got = 0,
-         ids = {}, at = clock()}
+         ids = {}, at = clock(), dt = msg.dt}
     open[skey], openCount, bySender[h] = s, openCount + 1, skey
   end
+  -- Todas las partes de un escaneo llevan el mismo dt; si no, se quedan los precios y se descartan las ventas.
+  if s.dt ~= msg.dt then s.mixed = true end
   if s.total ~= msg.total or s.channel ~= channel or s.market ~= key then
     dropSeries(skey)
     return reject("partes que no casan")
@@ -785,9 +868,13 @@ local function onP3(msg, sender, h, channel, key)
   dropSeries(skey) -- completa: las copias que lleguen tarde de esta serie se ignoran
   local items = {}
   for i = 1, s.total do
-    for _, it in ipairs(s.parts[i]) do items[#items + 1] = it end
+    for _, it in ipairs(s.parts[i]) do
+      if s.mixed then it[5] = nil end
+      items[#items + 1] = it
+    end
   end
-  return deliver({hash = h, sender = sender, t = s.t, channel = channel, market = key, items = items, parts = s.total})
+  return deliver({hash = h, sender = sender, t = s.t, channel = channel, market = key, items = items, parts = s.total,
+                  dt = not s.mixed and s.dt or nil})
 end
 
 local fireReply
@@ -862,15 +949,19 @@ local function validTokens(text)
 end
 
 -- Anuncia a la hermandad el escaneo más nuevo del buzón que aún no salió en directo, como mucho uno cada 15 min por
--- personaje (si toca esperar, un solo temporizador lo hace a su hora).
+-- personaje (si toca esperar, un solo temporizador lo hace a su hora). Los 15 min (lastSent) cuentan desde que se pone
+-- en cola, pero solo cuenta como compartido (sent) cuando sale su última parte: lo que aún estaba en la cola se pierde
+-- con un /reload o al salir (también con «Guardar y subir» unos segundos después del escaneo) y así sale otra vez al
+-- volver a entrar. En la misma sesión no se pone dos veces en cola (queuedSent).
 local function maybeBroadcast()
   if not shareOn() or not cdb or not salt() then return end
   local key, mk = marketNow()
   local t = unixNow()
   if not (key and t) then return end
+  local done = max(cdb.sent or 0, queuedSent or 0)
   local newest
   for _, scan in ipairs(cdb.out) do
-    if scan.mk == mk and scan.t > (cdb.sent or 0) and scan.t >= t - LIVE_OLDEST + TTL.live and scan.t <= t + FUTURE
+    if scan.mk == mk and scan.t > done and scan.t >= t - LIVE_OLDEST + TTL.live and scan.t <= t + FUTURE
        and (not newest or scan.t > newest.t) then
       newest = scan
     end
@@ -884,38 +975,48 @@ local function maybeBroadcast()
     end
     return
   end
-  local msgs = pack("P3", nextSeq(), mk, newest.t, splitTokens(newest.items), P3_PARTS)
-  if Guild.EnqueueRelay(msgs, "GUILD", nil, TTL.live) then cdb.lastSent, cdb.sent = t, newest.t end
+  local msgs = pack("P3", nextSeq(), mk, newest.t, splitTokens(newest.items), P3_PARTS, newest.dt)
+  local last, scanT = msgs[#msgs], newest.t
+  local function onSent(entry)
+    -- Las partes salen en orden y, si una falla o caduca, Guild quita el resto: la última sale solo si salieron todas.
+    if entry.msg == last and cdb then cdb.sent = max(cdb.sent or 0, scanT) end
+  end
+  if Guild.EnqueueRelay(msgs, "GUILD", nil, TTL.live, onSent) then cdb.lastSent, queuedSent = t, scanT end
 end
 
 -- History acaba de grabar un escaneo. Solo uno entero, propio (no el precio de reserva de Auctionator) y nuevo va
--- al buzón y se comparte; solo los objetos de la lista fija.
-local function onScan(info)
+-- al buzón y se comparte; solo los objetos de la lista fija. Con info.dt, cada objeto lleva su venta estimada.
+-- leaving (al salir o recargar): solo al buzón. Ya no saldría nada (los temporizadores se acaban con la sesión) y
+-- Relay.Login lo anuncia al volver a entrar.
+local function onScan(info, leaving)
   if not db or not cdb or type(info) ~= "table" then return end
   if not (info.whole and not info.fallback and not info.duplicate and (info.written or 0) > 0) then return end
   if not History.ValidMarketKey(info.market) or not isInt(info.t, 1, TIME_MAX) then return end
   if History.CurrentMarket() == info.market then recordSelf(info.market) end
   if not shareOn() then return end
+  local dt = validDt(info.dt) and info.dt or nil
   local items = {}
   for _, it in ipairs(type(info.items) == "table" and info.items or {}) do
-    local id, lo, qty, qty5 = it[1], it[2], it[3], it[4]
+    local id, lo, qty, qty5, sold = it[1], it[2], it[3], it[4], it[5]
     if History.IsShared(id) and isInt(lo, 1, Spec.PRICE_MAX) and isInt(qty, 0, Spec.QTY_MAX) and isInt(qty5, 0, Spec.QTY_MAX) then
-      items[#items + 1] = {id, lo, qty, min(qty5, qty)}
+      items[#items + 1] = {id, lo, qty, min(qty5, qty), (dt and isInt(sold, 0, SOLD_MAX)) and sold or nil}
     end
   end
   if #items == 0 then return end
-  cdb.out[#cdb.out + 1] = {t = info.t, mk = tagOf(info.market), items = table.concat(sortTokens(items), ",")}
+  cdb.out[#cdb.out + 1] = {t = info.t, mk = tagOf(info.market), items = table.concat(sortTokens(items, dt ~= nil), ","), dt = dt}
   cdb.out = pruneOutbox(cdb.out, unixNow())
-  maybeBroadcast()
+  if not leaving then maybeBroadcast() end
 end
 
--- Se llama al terminar de grabar (dentro de una tanda de History): el trabajo va en la siguiente.
-function Relay.OnScan(info)
+-- Se llama al terminar de grabar (dentro de una tanda de History): el trabajo va en la siguiente. sync (desde
+-- History.Flush, al salir o recargar): en el acto, para que el escaneo llegue al buzón antes de que se guarde.
+function Relay.OnScan(info, sync)
+  if sync then protect("escaneo", onScan, info, true); return end
   after(0, function() protect("escaneo", onScan, info) end)
 end
 
 -- Respuesta a una petición: tus escaneos de ese mercado posteriores a lo que ya tiene (since) y de las últimas 72 h,
--- solo escaneos enteros, del más viejo al más nuevo y como mucho 4 y 24 mensajes. Así lo que tiene quien pide avanza
+-- solo escaneos enteros, del más viejo al más nuevo y como mucho 4 y 28 mensajes. Así lo que tiene quien pide avanza
 -- sin huecos: lo que no cabe va en la siguiente petición (que quien pide hace sola si la respuesta llega llena).
 fireReply = function(h)
   local p = replies[h]
@@ -936,13 +1037,13 @@ fireReply = function(h)
   local chosen, count = {}, 0
   for _, scan in ipairs(list) do
     if #chosen >= REPLY_MAX_SCANS then break end
-    local n = #pack("P3", 1295, mk, scan.t, splitTokens(scan.items), P3_PARTS)
+    local n = #pack("P3", 1295, mk, scan.t, splitTokens(scan.items), P3_PARTS, scan.dt)
     if count + n > REPLY_MAX_MSGS then break end -- sin saltarse ninguno: el siguiente va en la próxima respuesta
     chosen[#chosen + 1] = scan
     count = count + n
   end
   for _, scan in ipairs(chosen) do
-    local msgs = pack("P3", nextSeq(), mk, scan.t, splitTokens(scan.items), P3_PARTS)
+    local msgs = pack("P3", nextSeq(), mk, scan.t, splitTokens(scan.items), P3_PARTS, scan.dt)
     if not Guild.EnqueueRelay(msgs, "WHISPER", p.sender, TTL.reply) then break end
   end
 end
@@ -966,6 +1067,83 @@ function Relay.UploaderMode()
   if db.subidor == "on" then return true end
   if db.subidor == "off" then return false end
   return markerSeen
+end
+
+-- Aviso del subidor 0.6.0 (datos = 2, contrato C7, marker-v2.json): devuelve detected (formato = 1, también el de la
+-- 0.5.x) e info, los campos que valen uno a uno (nil si datos no es 2): escrito, version, envio = {t, estado}, suben,
+-- aportan y quedan/dia (solo juntos). Se lee de _G cada vez: el aviso carga después que este addon (al entrar, en
+-- PLAYER_LOGIN ya está). Solo se lee; nunca se escribe.
+local MARKER_STATES = {ok = true, clave = true, red = true, cuota = true, rechazado = true}
+function Relay.MarkerInfo()
+  local marker = _G["OroHermandadSubidor"]
+  if type(marker) ~= "table" or secret(marker.formato) or marker.formato ~= 1 then return false, nil end
+  if marker.datos ~= 2 then return true, nil end
+  local function count(value, hi) return (not secret(value) and isInt(value, 0, hi)) and value or nil end
+  local info = {escrito = (not secret(marker.escrito) and isInt(marker.escrito, 1, TIME_MAX)) and marker.escrito or nil}
+  local version = marker.version
+  if type(version) == "string" and not secret(version) and #version <= 16 and version:match("^%d[%d%.]*$") then
+    info.version = version
+  end
+  local envio = marker.envio
+  if type(envio) == "table" and count(envio.t, TIME_MAX) and type(envio.estado) == "string" and MARKER_STATES[envio.estado] then
+    info.envio = {t = envio.t, estado = envio.estado}
+  end
+  info.suben, info.aportan = count(marker.suben, 100000), count(marker.aportan, 100000)
+  local quedan, dia = count(marker.quedan, 1000), count(marker.dia, 100000)
+  if quedan and dia then info.quedan, info.dia = quedan, dia end
+  return true, info
+end
+
+local function hhmm(t)
+  if type(date) ~= "function" or not t then return "--:--" end
+  local ok, text = pcall(date, "%H:%M", t)
+  return ok and text or "--:--"
+end
+
+local MARKER_WARNINGS = {clave = "el panel ha rechazado la clave", red = "sin conexión con el panel",
+                         cuota = "el panel pide esperar", rechazado = "el panel no aceptó los datos"}
+Relay.MARKER_STALE = 7200
+
+-- Líneas del subidor del PC (solo en el PC que sube precios y con un aviso 0.6.0), de la más importante a la menos:
+-- {stale = «no parece abierto», warn = «avisa: …», base = «último envío aceptado…»}; la ventana enseña la primera que
+-- haya y /oro subidor, todas. nil si no toca.
+-- «No parece abierto»: el aviso tenía más de 2 h al cargar la interfaz. El juego solo lee su archivo al entrar o con
+-- /reload y el subidor abierto lo reescribe cada hora: comparado con la hora de ahora, en cualquier sesión larga
+-- parecería cerrado aunque esté subiendo. La edad va con el reloj del PC, como escrito (el subidor lo pone con el
+-- suyo): con la hora del servidor, un PC con el reloj atrasado lo vería cerrado estando abierto, y uno adelantado, al
+-- revés.
+function Relay.UploaderLines()
+  if not Relay.UploaderMode() then return nil end
+  local _, info = Relay.MarkerInfo()
+  if not info then return nil end
+  local readAt = loadedAt or pcNow()
+  local out = {}
+  local parts = {}
+  local envio = info.envio
+  if envio and envio.t > 0 then
+    parts[#parts + 1] = "último envío aceptado a las " .. hhmm(envio.t)
+  else
+    parts[#parts + 1] = "aún ningún envío aceptado"
+  end
+  if info.aportan then
+    parts[#parts + 1] = plural(info.aportan, "persona aporta", "personas aportan") .. " precios"
+      .. (info.escrito and (" (dato de las " .. hhmm(info.escrito) .. ")") or "")
+  end
+  out.base = "Subidor del PC" .. (info.version and (" (" .. info.version .. ")") or "") .. ": " .. table.concat(parts, " · ") .. "."
+  if envio and envio.estado ~= "ok" then out.warn = "El subidor del PC avisa: " .. MARKER_WARNINGS[envio.estado] .. "." end
+  if info.escrito and readAt and readAt - info.escrito > Relay.MARKER_STALE then
+    out.stale = "El subidor del PC no parece abierto (último aviso a las " .. hhmm(info.escrito) .. "): ábrelo para que suba."
+  end
+  return out
+end
+
+-- Envíos que le quedan hoy a la clave del subidor en el panel (nil si el aviso no lo dice o es de otro día).
+function Relay.UploadsLeftToday(t)
+  local _, info = Relay.MarkerInfo()
+  t = t or unixNow()
+  if not (info and info.quedan and t) then return nil end
+  if info.dia ~= Spec.DayIndex(t) then return nil end
+  return info.quedan
 end
 
 -- La petición a toda la hermandad se arma justo al ponerla en cola (con lo que ya se tiene de cada compañero) y solo
@@ -1114,7 +1292,8 @@ function Relay.OnPeer(sender, kind, channel) protect("compañero", onPeer, sende
 
 -- Una respuesta llegó llena: pasados los 11 min en los que quien respondió no vuelve a responder, se pide lo que le
 -- queda (a toda la hermandad si fue la petición general, que solo contestan quienes tienen algo nuevo; solo a él si
--- fue por susurro). Cada vez avanza lo que ya se tiene y cada buzón guarda 32 escaneos como mucho: se acaba sola.
+-- fue por susurro). Solo la pide un escaneo que cabe en obs (deliver), así que cada vez avanza lo que ya se tiene, y
+-- cada buzón guarda 32 escaneos como mucho: se acaba sola.
 local function followUpAsk(tries)
   if not loggedIn or not Relay.UploaderMode() then return end
   local result = Relay.Ask()
@@ -1165,7 +1344,10 @@ local function sanitizeCDB(saved, t)
   local out = {}
   for _, scan in ipairs(type(r.out) == "table" and r.out or {}) do
     if type(scan) == "table" and isInt(scan.t, 1, TIME_MAX) and isHash(scan.mk) and validTokens(scan.items) then
-      out[#out + 1] = {t = scan.t, mk = scan.mk, items = scan.items}
+      local items = scan.items
+      -- Sin un dt válido no hay ventas: los tokens se quedan en sus 4 subcampos (el P3 de siempre).
+      if not validDt(scan.dt) then items = items:gsub("([^,:]*:[^,:]*:[^,:]*:[^,:]*)[^,]*", "%1") end
+      out[#out + 1] = {t = scan.t, mk = scan.mk, items = items, dt = validDt(scan.dt) and scan.dt or nil}
     end
   end
   r.out = pruneOutbox(out, t)
@@ -1175,6 +1357,7 @@ end
 -- En ADDON_LOADED, después de History.Load: ajustes de la cuenta (OroHermandadDB.relay: subidor, share, lastAsk) y
 -- del personaje (OroHermandadCharDB.relay: seq, lastSent, sent y el buzón out de 72 h).
 function Relay.Init(accountDB, charDB)
+  loadedAt = loadedAt or pcNow()
   accountDB.relay = sanitizeDB(accountDB.relay)
   charDB.relay = sanitizeCDB(charDB.relay, unixNow())
   db, cdb = accountDB.relay, charDB.relay
@@ -1185,11 +1368,12 @@ end
 
 -- 25 s después de entrar (la hermandad ya está identificada y su anuncio H2/R2 ya salió): se mira el aviso del
 -- subidor, se apunta tu código y, en el PC que sube precios, se pide a la hermandad lo que se perdió. También sale un
--- escaneo de antes del /reload que aún no se compartió.
+-- escaneo de antes del /reload que aún no se compartió (o que se quedó a medio enviar).
 function Relay.Login()
   protect("entrada", function()
     if not db then return end
     loggedIn = true
+    loadedAt = loadedAt or pcNow() -- (si al cargar aún no se podía leer la hora)
     markerSeen = Relay.MarkerDetected()
     local key = History.CurrentMarket()
     if key and History.Hist() then recordSelf(key) end
@@ -1261,6 +1445,21 @@ function Relay.ProbeLine()
     .. " · " .. string.format("%.0f", size / 1024) .. " KB de " .. floor(History.OBS_MAX_BYTES / 1024) .. " KB"
 end
 
+-- /oro sondeo: el aviso del subidor (versión del formato, campos que valen y edad, con el reloj del PC), solo cifras.
+function Relay.MarkerProbeLine()
+  local detected, info = Relay.MarkerInfo()
+  if not detected then return "Aviso del subidor: no está." end
+  if not info then return "Aviso del subidor: formato 1 (0.5.x o datos de otra versión), sin estado." end
+  local fields = {}
+  for _, k in ipairs({"escrito", "version", "envio", "suben", "aportan", "quedan", "dia"}) do
+    if info[k] ~= nil then fields[#fields + 1] = k end
+  end
+  local t = pcNow()
+  return "Aviso del subidor: datos 2, campos válidos " .. (#fields > 0 and table.concat(fields, ",") or "ninguno")
+    .. (info.envio and (", último intento " .. info.envio.estado) or "")
+    .. ((info.escrito and t) and (", escrito " .. agoText(t - info.escrito)) or "")
+end
+
 -- /oro estado: cuántos compañeros comparten precios contigo en este mercado.
 function Relay.StatusLine()
   if not History.Hist() then return "precios compartidos: el historial de precios está apagado en esta sesión." end
@@ -1274,6 +1473,23 @@ function Relay.StatusLine()
       .. ((newest and t) and (" (el último escaneo, " .. agoText(t - newest) .. ")") or "") .. "."
   end
   return text .. " Compartir tus escaneos: " .. (shareOn() and "sí" or "no") .. " · subidor: " .. subidorText() .. "."
+end
+
+-- ¿Nada de compañeros por aplicar? (bandeja vacía y ningún escaneo a medias). Timing.lua espera a esto para su primera
+-- pasada y el botón «Guardar y subir», para recargar.
+function Relay.Idle() return #inbox == 0 and applying == nil end
+
+-- Al salir del juego o recargar (PLAYER_LOGOUT): termina en el acto el escaneo de un compañero que se estaba aplicando
+-- (161 objetos como mucho). Los que esperaban en la bandeja no se tocan: su hora nunca llegó a obs.s, así que la
+-- siguiente puesta al día los vuelve a traer.
+function Relay.Flush()
+  return protect("al salir", function()
+    local guard = 0
+    while applying and guard < 1000 do
+      guard = guard + 1
+      if applying.index > #applying.scan.items then applyEnd(applying) else applyItem(applying) end
+    end
+  end)
 end
 
 -- Para las pruebas: contadores y estado interno.

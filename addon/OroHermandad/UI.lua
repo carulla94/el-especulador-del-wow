@@ -8,9 +8,15 @@ local ROW_TEXT_WIDTH = 340
 local COIN_ICON = "Interface\\Icons\\INV_Misc_Coin_01"
 local NOTE_ICON = "Interface\\Icons\\INV_Misc_Note_01"
 local LEVEL_COLORS = {ok = {0.45, 0.85, 0.45}, warn = {1, 0.78, 0.2}, error = {1, 0.35, 0.3}, info = {0.75, 0.75, 0.75}}
--- Parte de abajo, de abajo arriba: botones (y 8-30), pie de hasta 3 líneas (y 34-70), lista (desde y 74).
-local BUTTON_Y, FOOTER_Y, FOOTER_HEIGHT, FOOTER_LINES = 8, 34, 36, 3
+-- Parte de abajo, de abajo arriba: botones (y 8-30), pie de hasta 4 líneas (y 34-82), la fila de acciones del escáner
+-- o de «Guardar y subir» cuando la hay (UI.SetPanel) y la lista encima.
+local BUTTON_Y, FOOTER_Y, FOOTER_HEIGHT, FOOTER_LINES = 8, 34, 48, 4
 local LIST_BOTTOM = FOOTER_Y + FOOTER_HEIGHT + 4
+local PANEL_GAP = 4
+-- Botones de abajo: a la izquierda «Comprar lo que falta» y «Cuándo vender»; a la derecha «Opciones», «Tabla» y
+-- «Guardar y subir». Si no caben todos (Especular con lista de la compra en el PC del subidor), el de comprar se acorta.
+local BUTTON_WIDTHS = {shop = 136, shopShort = 70, cuando = 96, save = 104, table = 52, options = 72}
+local ROW_SPACE = WIDTH - 24
 local SECTION_TITLES = {notes = "Avisos", now = "Ahora", farm = "Recoger", group = "Hermandad", spec = "Especular",
                         balance = "Balance de la semana"}
 -- Orden y secciones que se muestran aunque estén vacías, si el resultado no los trae (Engine.MODES los da por modo).
@@ -65,11 +71,31 @@ local function makeRow(index)
   return row
 end
 
-local function button(label, width, onClick)
-  local b = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+local function button(label, width, onClick, parent)
+  local b = CreateFrame("Button", nil, parent or frame, "UIPanelButtonTemplate")
   b:SetSize(width, 22)
   b:SetText(label)
   b:SetScript("OnClick", onClick)
+  b.width, b.enabled = width, true
+  return b
+end
+
+-- Activa o desactiva un botón; con tooltip, al pasar el ratón por encima (también desactivado) dice por qué.
+local function setEnabled(b, enabled, tooltip)
+  b.enabled, b.tooltipText = enabled and true or false, tooltip
+  if b.SetEnabled then b:SetEnabled(b.enabled) end
+end
+
+local function withTooltip(b)
+  if b.SetMotionScriptsWhileDisabled then b:SetMotionScriptsWhileDisabled(true) end
+  b:SetScript("OnEnter", function(self)
+    if self.tooltipText and GameTooltip then
+      GameTooltip:SetOwner(self, "ANCHOR_TOP")
+      GameTooltip:SetText(self.tooltipText, 1, 1, 1, 1, true)
+      GameTooltip:Show()
+    end
+  end)
+  b:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
   return b
 end
 
@@ -147,15 +173,47 @@ function UI.Create(opts)
   scroll:SetScrollChild(content)
   frame.scroll = scroll
 
-  frame.shopButton = button("Comprar lo que falta", 160, function() if callbacks.onShop then callbacks.onShop() end end)
-  frame.shopButton:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 12, BUTTON_Y)
+  frame.shopButton = button("Comprar lo que falta", BUTTON_WIDTHS.shop, function() if callbacks.onShop then callbacks.onShop() end end)
   frame.shopButton:Hide()
-  frame.optionsButton = button("Opciones", 90, function() if callbacks.onOptions then callbacks.onOptions() end end)
-  frame.optionsButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -12, BUTTON_Y)
+  -- «Cuándo vender» (/oro cuando) a un clic; solo si Timing.lua está cargado.
+  frame.cuandoButton = button("Cuándo vender", BUTTON_WIDTHS.cuando, function() if callbacks.onCuando then callbacks.onCuando() end end)
+  frame.cuandoButton:Hide()
+  frame.optionsButton = button("Opciones", BUTTON_WIDTHS.options, function() if callbacks.onOptions then callbacks.onOptions() end end)
   -- Modo Especular: la tabla de precios (/oro tabla) a un clic.
-  frame.tableButton = button("Tabla", 80, function() if callbacks.onTable then callbacks.onTable() end end)
-  frame.tableButton:SetPoint("RIGHT", frame.optionsButton, "LEFT", -4, 0)
+  frame.tableButton = button("Tabla", BUTTON_WIDTHS.table, function() if callbacks.onTable then callbacks.onTable() end end)
   frame.tableButton:Hide()
+  -- PC del subidor: guardar ya (recargar la interfaz) para que suba los precios, con confirmación en la fila de acciones.
+  frame.saveButton = withTooltip(button("Guardar y subir", BUTTON_WIDTHS.save, function(self)
+    if self.enabled and callbacks.onSave then callbacks.onSave() end
+  end))
+  frame.saveButton:Hide()
+
+  -- Fila de acciones (escáner de la subasta o confirmación de «Guardar y subir»): texto, hasta 3 botones y una casilla.
+  -- Nada de StaticPopupDialogs: todo va dentro de esta ventana.
+  local panel = CreateFrame("Frame", nil, frame)
+  panel:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 12, LIST_BOTTOM)
+  panel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -12, LIST_BOTTOM)
+  panel.text = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  panel.text:SetPoint("TOPLEFT", panel, "TOPLEFT", 2, 0)
+  panel.text:SetJustifyH("LEFT")
+  panel.buttons = {}
+  for i = 1, 3 do
+    local b = withTooltip(button("", 96, function(self)
+      if self.enabled and self.onClick then self.onClick() end
+    end, panel))
+    b:Hide()
+    panel.buttons[i] = b
+  end
+  local check = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+  check:SetSize(22, 22)
+  check:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 0, 0)
+  check.label = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  check.label:SetPoint("LEFT", check, "RIGHT", 2, 0)
+  check:SetScript("OnClick", function(self) if self.onClick then self.onClick() end end)
+  check:Hide(); check.label:Hide()
+  panel.check = check
+  panel:Hide()
+  frame.panel = panel
 
   -- El pie tiene su propio hueco entre los botones y la lista: alto fijo y como mucho 3 líneas, para que un texto
   -- largo no crezca hacia arriba y se meta debajo de los botones.
@@ -166,8 +224,95 @@ function UI.Create(opts)
   frame.footer:SetJustifyH("LEFT")
   frame.footer:SetJustifyV("BOTTOM")
   if frame.footer.SetMaxLines then frame.footer:SetMaxLines(FOOTER_LINES) end
+  UI.LayoutButtons()
   return frame
 end
+
+-- Coloca los botones de abajo que se ven: de izquierda a derecha comprar y «Cuándo vender»; de derecha a izquierda
+-- «Opciones», «Tabla» y «Guardar y subir». Sin pisarse: si no caben, «Comprar lo que falta» pasa a «Comprar».
+local function layoutButtons()
+  local left = {frame.shopButton, frame.cuandoButton}
+  local right = {frame.optionsButton, frame.tableButton, frame.saveButton}
+  local function total(shopWidth)
+    local sum, n = 0, 0
+    for _, b in ipairs(left) do if b:IsShown() then sum, n = sum + (b == frame.shopButton and shopWidth or b.width), n + 1 end end
+    for _, b in ipairs(right) do if b:IsShown() then sum, n = sum + b.width, n + 1 end end
+    return sum + math.max(0, n - 1) * 4
+  end
+  local shop = frame.shopButton
+  if total(BUTTON_WIDTHS.shop) > ROW_SPACE then
+    shop.width = BUTTON_WIDTHS.shopShort
+    shop:SetText("Comprar")
+  else
+    shop.width = BUTTON_WIDTHS.shop
+    shop:SetText("Comprar lo que falta")
+  end
+  shop:SetSize(shop.width, 22)
+  -- Los ocultos también quedan colocados (en el sitio que tendrían), sin mover a los demás.
+  local x = 12
+  for _, b in ipairs(left) do
+    b:ClearAllPoints()
+    b:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", x, BUTTON_Y)
+    b.x = x
+    if b:IsShown() then x = x + b.width + 4 end
+  end
+  x = WIDTH - 12
+  for _, b in ipairs(right) do
+    b:ClearAllPoints()
+    b:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", x - WIDTH, BUTTON_Y)
+    b.x = x - b.width
+    if b:IsShown() then x = x - b.width - 4 end
+  end
+end
+UI.LayoutButtons = function() if frame then layoutButtons() end end
+
+-- Fila de acciones encima del pie. panel = nil (se quita) o {text, level, buttons = {{label, onClick, disabled,
+-- tooltip}, ...} (hasta 3), check = {label, onClick}}. La lista se acorta lo que ocupe.
+local LINE_HEIGHT = 12
+function UI.SetPanel(panel)
+  if not frame then return end
+  local p = frame.panel
+  for _, b in ipairs(p.buttons) do b:Hide(); b.onClick = nil end
+  p.check:Hide(); p.check.label:Hide()
+  if type(panel) ~= "table" or type(panel.text) ~= "string" or panel.text == "" then
+    p:Hide()
+    p.info = nil
+    frame.scroll:SetPoint("BOTTOMRIGHT", -32, LIST_BOTTOM)
+    return
+  end
+  p.info = panel
+  local right = WIDTH - 24
+  for i, spec in ipairs(panel.buttons or {}) do
+    local b = p.buttons[i]
+    if not b then break end
+    b:SetText(spec.label)
+    b.width = spec.width or 96
+    b:SetSize(b.width, 22)
+    b.onClick = spec.onClick
+    setEnabled(b, not spec.disabled, spec.tooltip)
+    b:ClearAllPoints()
+    b:SetPoint("TOPRIGHT", p, "TOPRIGHT", right - (WIDTH - 24), 0)
+    right = right - b.width - 4
+    b:Show()
+  end
+  local color = LEVEL_COLORS[panel.level or "info"] or LEVEL_COLORS.info
+  p.text:SetWidth(math.max(120, right - 4))
+  p.text:SetTextColor(color[1], color[2], color[3])
+  p.text:SetText(panel.text)
+  local height = math.max(22, (p.text:GetStringHeight() or LINE_HEIGHT) + 4)
+  if type(panel.check) == "table" then
+    p.check.label:SetText(panel.check.label or "")
+    p.check.onClick = panel.check.onClick
+    if p.check.SetChecked then p.check:SetChecked(panel.check.checked and true or false) end
+    p.check:Show(); p.check.label:Show()
+    height = height + 24
+  end
+  p:SetHeight(height)
+  p:Show()
+  frame.scroll:SetPoint("BOTTOMRIGHT", -32, LIST_BOTTOM + height + PANEL_GAP)
+end
+
+function UI.Panel() return frame and frame.panel.info or nil end
 
 local function header(key)
   if not headers[key] then
@@ -270,7 +415,17 @@ function UI.Render(result, info)
   content:SetHeight(math.max(y, 10))
   frame.shopButton:SetShown(shopping and info and info.canShop and true or false)
   frame.tableButton:SetShown(result.tableButton and true or false)
+  frame.cuandoButton:SetShown(info and info.cuando and true or false)
+  UI.SetSave(info and info.save)
   frame.footer:SetText(info and info.footer or "")
+end
+
+-- «Guardar y subir»: save = nil (no se ve) o {enabled, tooltip} (solo en el PC del subidor con algo nuevo guardado).
+function UI.SetSave(save)
+  if not frame then return end
+  frame.saveButton:SetShown(save and true or false)
+  if save then setEnabled(frame.saveButton, save.enabled, save.tooltip) end
+  layoutButtons()
 end
 
 function UI.Show() if frame then frame:Show() end end
@@ -289,10 +444,18 @@ end
 function UI.RestorePosition() applySavedPosition() end
 
 ---------------------------------------------------------------------------
--- Ventana de texto para copiar (/oro tabla, /oro sondeo)
+-- Ventana de texto para copiar (/oro tabla, /oro sondeo, /oro cuando)
 ---------------------------------------------------------------------------
 local TEXT_WIDTH, TEXT_HEIGHT = 640, 440
+local TEXT_TOP = 50 -- donde empieza el texto (debajo de la línea de ayuda), o la tabla si la hay
+-- Tabla en celdas encima del texto (la de «Cuándo vender»): la letra del juego no es de ancho fijo y una tabla hecha
+-- con espacios se tuerce. Una celda por FontString, de ancho fijo: la primera columna a la izquierda y las demás a la
+-- derecha. Se crean la primera vez y luego solo se cambia su texto.
+local GRID_LABEL_WIDTH, GRID_CELL_WIDTH, GRID_ROW_HEIGHT, GRID_CAPTION_HEIGHT = 80, 60, 16, 18
+local GRID_MAX_ROWS, GRID_MAX_COLUMNS = 8, 8
+local GRID_HINT = "Arriba, la tabla; debajo, todo el texto (también la tabla) ya seleccionado: Ctrl+C para copiarlo."
 local textFrame
+local pendingTable -- {text, tbl}: la tabla del próximo texto (UI.SetTextTable)
 
 local function createTextFrame()
   local f = CreateFrame("Frame", "OroHermandadTextFrame", UIParent, "BasicFrameTemplateWithInset")
@@ -319,9 +482,17 @@ local function createTextFrame()
   f.hint:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -30)
   f.hint:SetJustifyH("LEFT")
 
+  f.caption = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  f.caption:SetPoint("TOPLEFT", f, "TOPLEFT", 14, -TEXT_TOP)
+  f.caption:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -TEXT_TOP)
+  f.caption:SetJustifyH("LEFT")
+  if f.caption.SetWordWrap then f.caption:SetWordWrap(false) end
+  f.caption:Hide()
+  f.cells = {} -- f.cells[fila][columna]
+
   local ok, scroll = pcall(CreateFrame, "ScrollFrame", "OroHermandadTextScroll", f, "ScrollFrameTemplate")
   if not ok or not scroll then scroll = CreateFrame("ScrollFrame", "OroHermandadTextScroll2", f, "UIPanelScrollFrameTemplate") end
-  scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -50)
+  scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -TEXT_TOP)
   scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -32, 12)
   local edit = CreateFrame("EditBox", nil, scroll)
   edit:SetMultiLine(true)
@@ -341,12 +512,72 @@ local function createTextFrame()
   return f
 end
 
--- Muestra un texto seleccionado para copiarlo con Ctrl+C. hint: una línea de ayuda encima.
+-- La celda (fila r, columna c) de la tabla, creada una sola vez: rótulos (fila 1 y columna 1) en dorado y cifras en
+-- blanco, todas del mismo ancho en su columna.
+local function gridCell(f, r, c)
+  f.cells[r] = f.cells[r] or {}
+  local cell = f.cells[r][c]
+  if cell then return cell end
+  cell = f:CreateFontString(nil, "OVERLAY", (r == 1 or c == 1) and "GameFontNormal" or "GameFontHighlight")
+  local x = c == 1 and 14 or 14 + GRID_LABEL_WIDTH + (c - 2) * GRID_CELL_WIDTH
+  cell:SetPoint("TOPLEFT", f, "TOPLEFT", x, -(TEXT_TOP + GRID_CAPTION_HEIGHT + (r - 1) * GRID_ROW_HEIGHT))
+  cell:SetWidth(c == 1 and GRID_LABEL_WIDTH or GRID_CELL_WIDTH)
+  cell:SetJustifyH(c == 1 and "LEFT" or "RIGHT")
+  if cell.SetWordWrap then cell:SetWordWrap(false) end
+  f.cells[r][c] = cell
+  return cell
+end
+
+-- Pone la tabla (o la quita con tbl = nil) y coloca el texto debajo. tbl = {caption = texto, rows = {{celdas}, ...}}.
+local function setGrid(f, tbl)
+  local rows = type(tbl) == "table" and type(tbl.rows) == "table" and tbl.rows or {}
+  local used = math.min(#rows, GRID_MAX_ROWS)
+  for r = 1, math.max(used, #f.cells) do
+    local row = r <= used and type(rows[r]) == "table" and rows[r] or {}
+    for c = 1, GRID_MAX_COLUMNS do
+      local value = row[c]
+      if value ~= nil then
+        local cell = gridCell(f, r, c)
+        cell:SetText(tostring(value))
+        cell:Show()
+      elseif f.cells[r] and f.cells[r][c] then
+        f.cells[r][c]:SetText("")
+        f.cells[r][c]:Hide()
+      end
+    end
+  end
+  local top = TEXT_TOP
+  if used > 0 then
+    f.caption:SetText(type(tbl.caption) == "string" and tbl.caption or "")
+    f.caption:Show()
+    top = TEXT_TOP + GRID_CAPTION_HEIGHT + used * GRID_ROW_HEIGHT + 8
+  else
+    f.caption:SetText("")
+    f.caption:Hide()
+  end
+  f.scroll:ClearAllPoints()
+  f.scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -top)
+  f.scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -32, 12)
+  f.edit:SetHeight(TEXT_HEIGHT - top - 20)
+  f.grid = used > 0 and tbl or nil
+end
+
+-- Tabla para el próximo UI.ShowText de este mismo texto (Timing.View la deja; Core solo pasa título y texto).
+-- tbl = {caption = texto, rows = {{"Franja", "00-04", ...}, ...}} o nil para quitarla.
+function UI.SetTextTable(text, tbl)
+  pendingTable = (type(text) == "string" and type(tbl) == "table") and {text = text, tbl = tbl} or nil
+end
+
+-- Muestra un texto seleccionado para copiarlo con Ctrl+C. hint: una línea de ayuda encima. Si a este texto le dejaron
+-- una tabla (UI.SetTextTable), va dibujada en celdas encima y el texto, debajo, sigue entero para copiarlo.
 function UI.ShowText(title, text, hint)
   if not textFrame then textFrame = createTextFrame() end
+  local tbl = pendingTable and pendingTable.text == text and pendingTable.tbl or nil
+  pendingTable = nil
   textFrame.text = text or ""
   textFrame.title:SetText(title or "Oro de Hermandad")
-  textFrame.hint:SetText(hint or "Ya está todo seleccionado: Ctrl+C para copiarlo.")
+  setGrid(textFrame, tbl)
+  textFrame.hint:SetText(hint or (textFrame.grid and GRID_HINT) or "Ya está todo seleccionado: Ctrl+C para copiarlo.")
   textFrame:Show()
   textFrame.edit:SetText(textFrame.text)
   textFrame.edit:SetFocus()

@@ -7,7 +7,7 @@ import {DatabaseSync} from "node:sqlite";
 import worker, {Portfolio, GuildMarket as WorkerGuildMarket} from "../src/worker.mjs";
 import {FISHING} from "../src/fishing.mjs";
 import {GuildMarket, GuildStore, validateUpload, issueGuildSession, goldCell, pctCell, textCell, dateOfDay, LIMITS, WATCHLIST,
-  GUILD_COOKIE} from "../src/guild.mjs";
+  GUILD_COOKIE, LATEST_UPLOADER} from "../src/guild.mjs";
 import {DAY0, BUDGET, buildDays, baseline, assess, flip, deltas, weekday, texts, mergeDay, dayValue, median} from "../src/especular.mjs";
 
 const BASE = "https://especulador.test";
@@ -350,7 +350,9 @@ test("an identical body is a duplicate with no writes; the same data in a new fi
   const before = dump(f.gdb);
   const again = await f.sync(ana.key, JSON.stringify(body));
   assert.equal(again.status, 200);
-  assert.deepEqual(await again.json(), {accepted: true, duplicate: true, rowsChanged: 0, day: T0, message: "Este envío ya se había recibido: sin cambios."});
+  // Since 0.6.0 every answer also says who feeds the markets of the upload and the newest uploader (contract C4).
+  assert.deepEqual(await again.json(), {accepted: true, duplicate: true, rowsChanged: 0, day: T0, message: "Este envío ya se había recibido: sin cambios.",
+    estado: {mercados: [{market: MARKET, suben: 1, aportan: 1}]}, subidor: {ultima: LATEST_UPLOADER}});
   assert.deepEqual(dump(f.gdb), before, "a duplicate writes nothing");
   const reworded = await f.sync(ana.key, JSON.stringify({...body, addon: "0.3.0-b"}, null, 2));
   const report = await reworded.json();
@@ -460,6 +462,9 @@ test("malformed uploads are rejected with 400 before anything is written", async
     [withItem({points: Array.from({length: 131}, (_, i) => [at(T0, 0) + i * 60, 900, 1, 1])}), /points/], [point(0, at(T0 + 2)), /t debe/],
     [withItem({points: [[at(T0, 8), 900, 1, 1], [at(T0, 7), 900, 1, 1]]}), /ascendente/], [point(1, 0), /lo debe/], [point(3, -1), /qty5/],
     [withItem({points: [[at(T0, 8), 900, 1]]}), /cada punto/],
+    // 0.6.0 sell-through samples: [t, dt, units] of a point of the series.
+    [withItem({sold: [[at(T0, 8), 599, 1]]}), /cada venta es \[t, dt, unidades\] de un punto de la serie/],
+    [withItem({sold: [[at(T0, 9), 1800, 1]]}), /venta n\.º 1\): cada venta/],
     [withMarket({deposits: {}}), /deposits/], [withMarket({deposits: [[2589, 0, 5]]}), /dur/], [withMarket({deposits: [[2589, 10, 5]]}), /dur/],
     [withMarket({deposits: [[2589, 3, -1]]}), /copper/], [withMarket({deposits: [[2589, 3, 5], [2589, 3, 6]]}), /repetido/]
   ];
@@ -472,7 +477,7 @@ test("malformed uploads are rejected with 400 before anything is written", async
     assert.deepEqual(dump(f.gdb), before);
     f.advance(61000);                               // stay under the 60 attempts per hour
   }
-  assert.equal(cases.length, 59);
+  assert.equal(cases.length, 61);
   assert.equal((await f.sync(ana.key, good())).status, 200, "the same body without the defect is accepted");
 });
 
@@ -1230,7 +1235,7 @@ test("«Cuándo vender» answers from the scans of every person, cached for two 
   assert.equal(first.status, 200);
   assert.equal(first.headers.get("X-Guild-Cache"), "miss");
   const body = await first.json();
-  assert.deepEqual([body.market, body.rules, body.T, body.timeZone, body.blocks], [MARKET, "cuando-vender-1", T, "Europe/Madrid", 6]);
+  assert.deepEqual([body.market, body.rules, body.T, body.timeZone, body.blocks], [MARKET, "cuando-vender-2", T, "Europe/Madrid", 6]);
   const cloth = body.items.find(i => i.id === 2589);
   assert.equal(cloth.n, 28);
   const morning = cloth.cells.filter(c => c[0] % 6 === 2), afternoon = cloth.cells.filter(c => c[0] % 6 === 4);

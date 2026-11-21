@@ -12,3 +12,6 @@ public/especular.js
 __pycache__/
 *.pyc
 *.sqlite3
+# Empaquetador de CurseForge (BigWigsMods/packager) al probarlo en local, y las notas que le prepara el flujo
+.release/
+.notas-version.md

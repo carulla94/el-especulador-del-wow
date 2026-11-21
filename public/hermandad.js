@@ -14,6 +14,8 @@ const MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "
 const WEEKDAYS_SHORT = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"];
 const WEEKDAYS_LONG = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"];
 export const RELEASES_URL = "https://github.com/carulla94/el-especulador-del-wow/releases/latest/download/OroHermandad.zip";
+/** The Windows uploader of the latest GitHub release (contract C10: attached to every release by the publish workflow). */
+export const UPLOADER_URL = "https://github.com/carulla94/el-especulador-del-wow/releases/latest/download/Subidor_Windows.zip";
 export const CATEGORY_ORDER = ["metal", "piedra", "gema", "hierba", "piel", "tela", "pocion", "elixir", "frasco", "comida",
   "venda", "encantar", "elemental", "otro"];
 export const DURATIONS = [{value: 1, label: "Corta"}, {value: 2, label: "Media"}, {value: 3, label: "Larga"}];
@@ -797,13 +799,13 @@ function pctWords(bp) {
   const text = `${rules().texts.pct(Math.abs(bp))} %`;
   return bp > 0 ? `un ${text} por encima` : bp < 0 ? `un ${text} por debajo` : "igual";
 }
-/** What to do with the pattern, in words: {level: "sin-datos" | "pocos" | "plano" | "claro", title, lines: [text], best,
- * worst (the best and worst usable cells when they differ enough, else null)}. The weekday × time cells, the time of day
- * and the weekday are read apart, each when it has enough data. */
-export function timingAdvice(pattern) {
+/** What to do with the price pattern, in words: {level: "sin-datos" | "pocos" | "plano" | "claro", title, lines: [text],
+ * best, worst (the best and worst usable cells when they differ enough, else null)}. The weekday × time cells, the time
+ * of day and the weekday are read apart, each when it has enough data. The sales («Ventas») are read by timingAdvice. */
+export const SCAN_MORE = "Escanea la subasta con Oro de Hermandad (botón «Escanear», addon 0.6.0 o posterior) a distintas horas y días: con cada escaneo que se sube, aquí aparece cuándo se paga más y cuándo se vende más.";
+export function timingSummary(pattern) {
   if (!pattern || (pattern.points === 0 && !pattern.weekdays.some(d => d.n > 0))) {
-    return {level: "sin-datos", title: "Aún no hay escaneos de estos objetos", best: null, worst: null,
-      lines: ["Escanea la subasta con Auctionator a distintas horas y días: con cada escaneo que se sube, aquí aparece cuándo se paga más."]};
+    return {level: "sin-datos", title: "Aún no hay escaneos de estos objetos", best: null, worst: null, lines: [SCAN_MORE]};
   }
   const cells = extremes(pattern.cells), blocks = extremes(pattern.blocks), days = extremes(pattern.weekdays);
   const lines = [], cellsClear = !!cells && cells.spread >= TIMING_MIN.spreadBp;
@@ -839,10 +841,29 @@ export function timingAdvice(pattern) {
 }
 /** The heatmap: one row per weekday, one column per block of four hours; amber above the items' level that week, blue
  * below, stronger the further (full at ±10 %). Cells without enough scans stay empty with a dashed edge and their count
- * in the tooltip; the best cell of the advice gets a ring. Returns {node, cells}. */
-export function timingHeatmapSVG(pattern, {best = null, width = 440} = {}) {
-  const left = 40, top = 22, cols = BLOCK_LABELS.length, cellW = (width - left - 4) / cols, cellH = 30, height = top + 7 * cellH + 4;
-  const cells = pattern?.cells ?? [];
+ * in the tooltip; the best cell of the advice gets a ring. With sales (timingSales, mode "ventas") a cell shows how much
+ * more or less sells there than usual: green above, blue below, full at ×1,5 and ×0,5; an eighth row («todos») shows
+ * the blocks of any day, which the advice reads, and its best block gets the ring. Returns {node, cells}. */
+export function timingHeatmapSVG(pattern, {best = null, width = 440, sales = null} = {}) {
+  const left = 40, top = 22, cols = BLOCK_LABELS.length, cellW = (width - left - 4) / cols, cellH = 30, gap = 8;
+  const height = top + 7 * cellH + 4 + (sales ? cellH + gap : 0);
+  const cells = sales ? sales.cells : pattern?.cells ?? [];
+  const salesCell = c => {
+    const any = c.wd === 7;
+    const x = round1(left + c.block * cellW + 1), y = round1(top + c.wd * cellH + (any ? gap : 0) + 1), w = round1(cellW - 2), hgt = cellH - 2;
+    const name = any ? `Cualquier día ${BLOCK_TEXT[c.block]}` : `${WEEKDAYS_LONG[c.wd]} ${BLOCK_TEXT[c.block]}`;
+    const tip = c.n === 0 ? `${name}: nadie ha medido ventas a esa hora`
+      : `${name}: ${c.usable ? `se vende ${formatRate(c.value)} de lo normal` : "pocos datos"} · ${plural(c.n, "medición", "mediciones")}${any ? "" : ` de ${plural(c.days, "día", "días")}`} · ${formatHours(c.sec)} medidas`;
+    const strength = c.usable ? Math.min(1, Math.abs(c.value - 1) / 0.5) : 0;
+    const ring = any && sales.advice.best === c.block && c.usable;
+    return h("g", {class: "heat-cell"},
+      h("rect", {x, y, width: w, height: hgt, rx: 3, fill: c.usable ? (c.value >= 1 ? CHART.good : CHART.down) : "none",
+        "fill-opacity": c.usable ? round1(0.12 + 0.68 * strength) : 0, stroke: ring ? CHART.text : c.usable ? "none" : CHART.grid,
+        "stroke-width": ring ? 2 : 1, ...(c.usable || ring ? {} : {"stroke-dasharray": "3 3"})}),
+      h("text", {x: round1(x + w / 2), y: y + 19, "text-anchor": "middle", "font-size": 12, fill: c.usable ? CHART.text : CHART.muted},
+        c.usable ? formatRate(c.value) : c.n > 0 ? "·" : ""),
+      h("title", {}, tip));
+  };
   const cell = c => {
     const x = round1(left + c.block * cellW + 1), y = round1(top + c.wd * cellH + 1), w = round1(cellW - 2), hgt = cellH - 2;
     const name = `${WEEKDAYS_LONG[c.wd]} ${BLOCK_TEXT[c.block]}`;
@@ -860,11 +881,175 @@ export function timingHeatmapSVG(pattern, {best = null, width = 440} = {}) {
       h("title", {}, tip));
   };
   const node = h("svg", {class: "heatmap", viewBox: `0 0 ${width} ${height}`, width, height, role: "img",
-    "aria-label": "Precio más bajo por día de la semana y franja horaria frente a su nivel de esa semana. Las mismas conclusiones están en las frases de arriba."},
+    "aria-label": sales ? "Ventas estimadas por día de la semana y franja horaria frente a lo normal de esos objetos. Las mismas conclusiones están en las frases de arriba."
+      : "Precio más bajo por día de la semana y franja horaria frente a su nivel de esa semana. Las mismas conclusiones están en las frases de arriba."},
     h("g", {"font-size": 12, fill: CHART.muted, "text-anchor": "middle"}, BLOCK_LABELS.map((label, b) => h("text", {x: round1(left + b * cellW + cellW / 2), y: 14}, width < 420 ? label.replace(" h", "") : label))),
-    h("g", {"font-size": 12, fill: CHART.muted}, WEEKDAYS_SHORT.map((label, wd) => h("text", {x: 2, y: top + wd * cellH + 19}, label))),
-    cells.map(cell));
+    h("g", {"font-size": 12, fill: CHART.muted}, WEEKDAYS_SHORT.map((label, wd) => h("text", {x: 2, y: top + wd * cellH + 19}, label)),
+      sales ? h("text", {x: 2, y: top + 7 * cellH + gap + 19}, "todos") : null),
+    cells.map(sales ? salesCell : cell),
+    sales ? sales.blocks.map(b => salesCell({wd: 7, block: b.block, value: b.rateIdx, usable: b.rateIdx !== null, n: b.n, days: 0, sec: b.sec})) : null);
   return {node, cells};
+}
+
+// ---- Ventas: the sell-through estimates of addon 0.6.0 (cuando-vender-2 cells) and the advice rule C11 ------------
+/** Contract C11 (test/fixtures/v06/timing-advice.json), the same rule as the addon's Timing.Advice: a block counts for
+ * sales with at least minN samples on minDays days and minSec seconds measured once its largest sample is left out; a
+ * sales pattern needs minBlocks such blocks and minUnits units; a block «sells more» from faster times the usual rate.
+ * Without a sales pattern, a price pattern needs minBlocks blocks with a usable price and a spread of spreadBp. */
+export const SALES_RULE = Object.freeze({minN: 2.5, minDays: 2, minSec: 3600, minBlocks: 3, minUnits: 10, faster: 1.2});
+export const PRICE_RULE = Object.freeze({minBlocks: 3, spreadBp: 300});
+/** blocks: the six Spanish 4-hour blocks (0 = 0-4 h) of one item, [{priceOK, p, n, days, sec, u, mu, msec}]. Returns
+ * {salesOK: [6] booleans, rateIdx: [6] numbers or null (units per second of the block against the item's), best: block
+ * or null, reason: "ventas" | "precio" | "precio-alto" | "pocos", hint: [h1, h2] (put or match the price around h1-h2 h)
+ * or null}. best = the salesOK block with the highest (10000 + price index) × rateIdx (ties: the earlier block). */
+export function timingAdvice(blocks) {
+  const trimmed = blocks.map(b => ({u: Math.max(0, b.u - b.mu), sec: b.sec - b.msec}));
+  const salesOK = blocks.map((b, i) => b.n >= SALES_RULE.minN && b.days >= SALES_RULE.minDays && trimmed[i].sec >= SALES_RULE.minSec);
+  const ok = salesOK.flatMap((x, i) => x ? [i] : []);
+  const units = ok.reduce((sum, i) => sum + trimmed[i].u, 0), seconds = ok.reduce((sum, i) => sum + trimmed[i].sec, 0);
+  const rateIdx = Array(blocks.length).fill(null);
+  let best = null, reason = "pocos";
+  if (ok.length >= SALES_RULE.minBlocks && units >= SALES_RULE.minUnits) {
+    const overall = units / seconds;
+    for (const i of ok) rateIdx[i] = trimmed[i].u / trimmed[i].sec / overall;
+    const score = i => (10000 + (blocks[i].priceOK ? blocks[i].p : 0)) * rateIdx[i];
+    best = ok.reduce((a, i) => score(i) > score(a) ? i : a);
+    reason = rateIdx[best] >= SALES_RULE.faster ? "ventas" : "precio";
+  } else {
+    best = pricePattern(blocks);
+    if (best !== null) reason = "precio-alto";
+  }
+  return {salesOK, rateIdx, best, reason, hint: best === null ? null : [(4 * best + 23) % 24, 4 * best]};
+}
+/** The block with the highest usable price when at least PRICE_RULE.minBlocks blocks have one and they spread by
+ * PRICE_RULE.spreadBp (ties: the earlier block); else null. blocks: [{priceOK, p}]. */
+function pricePattern(blocks) {
+  const priced = blocks.flatMap((b, i) => b.priceOK ? [i] : []);
+  if (priced.length < PRICE_RULE.minBlocks) return null;
+  const values = priced.map(i => blocks[i].p);
+  if (Math.max(...values) - Math.min(...values) < PRICE_RULE.spreadBp) return null;
+  return priced.reduce((a, i) => blocks[i].p > blocks[a].p ? i : a);
+}
+/** «×1,6»: how many times the usual rate. */
+export function formatRate(x) { return Number.isFinite(x) ? `×${(Math.round(x * 10) / 10).toFixed(1).replace(".", ",")}` : "—"; }
+/** Seconds measured as hours, rounded to half an hour: «0 h», «0,5 h», «14 h». */
+export function formatHours(seconds) {
+  const half = Math.round((Number.isFinite(seconds) ? seconds : 0) / 1800) / 2;
+  return `${String(half).replace(".", ",")} h`;
+}
+const REASON_TEXT = {ventas: "más ventas", precio: "mejor precio", "precio-alto": "precio más alto"};
+/** «Mejor franja: 20-24 h (más ventas). Pon o iguala el precio hacia las 19-20 h, con 2 h (u 8 h si no vas a volver).»;
+ * null without a best block. advice: timingAdvice (or a group's advice of the same shape). */
+export function adviceText(advice) {
+  if (!advice || advice.best === null || !advice.hint) return null;
+  const [from, to] = advice.hint;
+  return `Mejor franja: ${4 * advice.best}-${4 * advice.best + 4} h (${REASON_TEXT[advice.reason]}). Pon o iguala el precio hacia las ${from}-${to} h, con 2 h (u 8 h si no vas a volver).`;
+}
+export const NO_SALES_YET = "Ningún envío trae ventas todavía: quien tiene el subidor tiene que actualizar el addon y el subidor a la 0.6.0.";
+export const FEW_SALES = "Aún pocas ventas medidas: el addon las calcula entre dos escaneos completos de la misma persona separados de 30 min a 2 h.";
+const count = x => Number.isSafeInteger(x) && x >= 0 ? x : 0;
+/** The six sales columns of a cuando-vender-2 cell; zeros for a cuando-vender-1 cell (an older cached answer). */
+const salesOf = c => ({u: count(c[6]), sec: count(c[7]), n: count(c[8]), days: count(c[9]), mu: count(c[10]), msec: count(c[11])});
+const cellSalesOK = s => s.n >= SALES_RULE.minN && s.days >= SALES_RULE.minDays && s.sec - s.msec >= SALES_RULE.minSec;
+/** The six blocks of one item as timingAdvice takes them: per block the sums of its weekday cells (soldDays add up:
+ * different weekdays are different days) and the largest of their largest samples; priceOK and p from the price
+ * rule of the blocks (TIMING_MIN blockPoints and blockDays). */
+export function itemBlocks(item) {
+  const blocks = BLOCK_LABELS.map(() => ({n: 0, days: 0, sec: 0, u: 0, mu: 0, msec: 0, pn: 0, pdays: 0, psum: 0}));
+  for (const c of item?.cells ?? []) {
+    const b = blocks[c[0] % BLOCK_LABELS.length];
+    if (!b || !isInt(c[0])) continue;
+    if (isInt(c[1]) && c[1] > 0 && isInt(c[3])) { b.pn += c[1]; b.pdays += count(c[2]); b.psum += c[3]; }
+    const s = salesOf(c);
+    b.n += s.n; b.days += s.days; b.sec += s.sec; b.u += s.u;
+    if (s.n > 0 && (s.mu > b.mu || (s.mu === b.mu && s.msec > b.msec))) { b.mu = s.mu; b.msec = s.msec; }
+  }
+  return blocks.map(({pn, pdays, psum, ...b}) => {
+    const priceOK = pn >= TIMING_MIN.blockPoints && pdays >= TIMING_MIN.blockDays;
+    return {priceOK, p: priceOK ? Math.round(psum / pn) : null, ...b};
+  });
+}
+/** «Ventas» of a group of items (ids null: every item) from /api/guild/timing: {any (some item of the market has a
+ * measured second: the uploaders send sales), items: [{id, blocks, advice}], advice (timingAdvice of the only item; for
+ * a group, its blocks' rateIdx is the mean of the items' rateIdx weighted by their trimmed seconds over the items with a
+ * sales pattern that count there, shown from 2 items, and the price is the group's equal-weight pattern), blocks: [6]
+ * {block, rateIdx, items, n, sec}, cells: [42] {cell, wd, block, value, usable, n, days, sec, items}}. A cell's value is
+ * its trimmed rate against the item's trimmed rate over its usable cells (a group: weighted like the blocks). */
+export function timingSales(timing, ids = null, pattern = null) {
+  const wanted = ids ? new Set(ids) : null, all = timing?.items ?? [];
+  const list = all.filter(i => !wanted || wanted.has(i.id));
+  const any = all.some(i => (i.cells ?? []).some(c => salesOf(c).sec > 0));
+  const single = list.length === 1, minItems = single ? 1 : 2;
+  const items = list.map(item => {
+    const blocks = itemBlocks(item), advice = timingAdvice(blocks);
+    // The item's usual rate for its cells: trimmed units over trimmed seconds of its usable cells.
+    let units = 0, seconds = 0;
+    const cells = new Map();
+    for (const c of item.cells ?? []) {
+      const s = salesOf(c);
+      if (!cellSalesOK(s)) continue;
+      const u = Math.max(0, s.u - s.mu), sec = s.sec - s.msec;
+      cells.set(c[0], {u, sec}); units += u; seconds += sec;
+    }
+    return {id: item.id, blocks, advice, cells, rate: units > 0 ? units / seconds : null};
+  });
+  const cells = Array.from({length: 7 * BLOCK_LABELS.length}, (_, cell) => ({cell, wd: Math.floor(cell / BLOCK_LABELS.length), block: cell % BLOCK_LABELS.length,
+    value: null, usable: false, n: 0, days: 0, sec: 0, items: 0, weight: 0, sum: 0}));
+  for (const item of list) for (const c of item.cells ?? []) {
+    const x = cells[c[0]], s = salesOf(c);
+    if (!x || s.n === 0) continue;
+    x.n += s.n; x.days = Math.max(x.days, s.days); x.sec += s.sec;
+  }
+  for (const item of items) {
+    if (item.rate === null) continue;
+    for (const [cell, t] of item.cells) {
+      const x = cells[cell];
+      if (!x || t.sec <= 0) continue;
+      x.items++; x.weight += t.sec; x.sum += t.sec * (t.u / t.sec / item.rate);
+    }
+  }
+  for (const x of cells) if (x.items >= minItems && x.weight > 0) { x.value = x.sum / x.weight; x.usable = true; }
+  // Blocks: the item's own advice, or the group's weighted mean of the items that have a sales pattern.
+  const blocks = BLOCK_LABELS.map((_, block) => {
+    let weight = 0, sum = 0, used = 0, n = 0, sec = 0;
+    for (const item of items) {
+      const b = item.blocks[block];
+      n += b.n; sec += b.sec;
+      const idx = item.advice.rateIdx[block];
+      if (idx === null) continue;
+      const w = b.sec - b.msec;
+      used++; weight += w; sum += w * idx;
+    }
+    return {block, rateIdx: used >= minItems && weight > 0 ? sum / weight : null, items: used, n, sec};
+  });
+  let advice;
+  if (single) advice = items[0].advice;
+  else {
+    const price = (pattern ?? timingPattern(timing, ids)).blocks;
+    const shaped = blocks.map((b, i) => ({priceOK: price[i].usable && isInt(price[i].value), p: price[i].usable ? price[i].value : null, rateIdx: b.rateIdx}));
+    const ok = shaped.flatMap((b, i) => b.rateIdx !== null ? [i] : []);
+    let best = null, reason = "pocos";
+    if (ok.length >= SALES_RULE.minBlocks) {
+      const score = i => (10000 + (shaped[i].priceOK ? shaped[i].p : 0)) * shaped[i].rateIdx;
+      best = ok.reduce((a, i) => score(i) > score(a) ? i : a);
+      reason = shaped[best].rateIdx >= SALES_RULE.faster ? "ventas" : "precio";
+    } else {
+      best = pricePattern(shaped);
+      if (best !== null) reason = "precio-alto";
+    }
+    advice = {salesOK: blocks.map(b => b.rateIdx !== null), rateIdx: blocks.map(b => b.rateIdx), best, reason, hint: best === null ? null : [(4 * best + 23) % 24, 4 * best]};
+  }
+  return {any, items: items.map(({id, blocks: b, advice: a}) => ({id, blocks: b, advice: a})), advice, blocks,
+    cells: cells.map(({weight, sum, ...x}) => x)};
+}
+/** What «Cuándo vender» says about sales: the advice line when there is a best block, and why there is no sales
+ * pattern when there is none. */
+export function salesLines(sales) {
+  const lines = [], text = adviceText(sales?.advice);
+  if (text) lines.push(text);
+  const pattern = sales?.advice && (sales.advice.reason === "ventas" || sales.advice.reason === "precio");
+  if (!pattern) lines.push(sales?.any ? FEW_SALES : NO_SALES_YET);
+  return lines;
 }
 
 // ---- Pesca: qué pescar, dónde, qué hacer con cada pez (y cuándo venderlo, arriba) --------------------------------
@@ -1151,9 +1336,20 @@ export function fishCards(zones, pools, uses, advice, {rate = CATCHES_PER_HOUR} 
       note: `${gain.best.label}: ${formatPct(gain.gainBp)} que venderlo crudo`}
       : {key: "use", label: "Qué hacer con lo pescado", target: "#uses-section", good: false, name: topUse ? "Véndelo crudo" : "Sin datos", id: null, amount: null, per: "",
         note: topUse ? "Hoy ninguna receta paga al menos un 10 % más que vender el pescado crudo." : "Faltan precios del pescado."},
-    {key: "sell", label: "Cuándo vender", target: "#sell-section", good: advice.level === "claro" && !!advice.best,
-      name: advice.best ? `El ${WEEKDAYS_LONG[advice.best.wd]} ${BLOCK_TEXT[advice.best.block]}` : advice.title, id: null, amount: null, per: "",
-      note: advice.best ? `Su precio más bajo suele estar ${pctWords(advice.best.value)} de su nivel de esa semana.` : advice.lines[0] ?? ""}];
+    sellCard(advice)];
+}
+/** The «Cuándo vender» card: the best block of the sales advice when there is a sales pattern, else the price summary's
+ * best moment. advice: timingSummary, with the sales (timingSales) in advice.sales when known. */
+function sellCard(advice) {
+  const sales = advice.sales?.advice, base = {key: "sell", label: "Cuándo vender", target: "#sell-section", id: null, amount: null, per: ""};
+  if (sales && (sales.reason === "ventas" || sales.reason === "precio")) {
+    const idx = sales.rateIdx[sales.best];
+    return {...base, good: sales.reason === "ventas", name: `De ${4 * sales.best} a ${4 * sales.best + 4} h`,
+      note: `${sales.reason === "ventas" ? `Se vende más (${formatRate(idx)})` : "Mejor precio y ventas normales"}: pon o iguala el precio hacia las ${sales.hint[0]}-${sales.hint[1]} h.`};
+  }
+  return {...base, good: advice.level === "claro" && !!advice.best,
+    name: advice.best ? `El ${WEEKDAYS_LONG[advice.best.wd]} ${BLOCK_TEXT[advice.best.block]}` : advice.title,
+    note: advice.best ? `Su precio más bajo suele estar ${pctWords(advice.best.value)} de su nivel de esa semana.` : advice.lines[0] ?? ""};
 }
 
 // ---- Tus sesiones de pesca: Forever Fishing (GET /api/guild/fishing, src/fishing.mjs), valued with the day's prices --
@@ -1257,7 +1453,7 @@ function boot(doc, win) {
   const state = {me: null, csrf: "", market: null, summary: null, detail: null, filters: {q: "", cat: "", show: "", conf: ""},
     sort: {key: "", dir: "asc"}, view: "hoy", lastUpload: null, pollTimer: null, members: null, busy: false,
     compensa: {prof: "", skill: "", budget: "", rare: false, cat: ""}, favorites: new Set(),
-    pesca: {skill: "", cook: "", alch: "", rate: "", group: "pesca"}, timing: null, timingKey: null, timingLoading: false, timingError: "",
+    pesca: {skill: "", cook: "", alch: "", rate: "", group: "pesca", mode: "precio"}, timing: null, timingKey: null, timingLoading: false, timingError: "",
     fishing: null, fishingKey: null, fishingLoading: false};
   let toastTimer;
   let cartera = null;
@@ -1935,11 +2131,16 @@ function boot(doc, win) {
     const saved = JSON.parse(win.localStorage.getItem("hermandad.pesca") ?? "{}");
     for (const [id, key] of PESCA_SAVED) if (typeof saved?.[key] === "string") { $(id).value = saved[key].slice(0, 3); state.pesca[key] = $(id).value; }
     if (typeof saved?.group === "string") state.pesca.group = saved.group;
+    if (saved?.mode === "ventas") state.pesca.mode = "ventas";
   } catch { /* private mode or an old value */ }
   for (const [id, key] of PESCA_SAVED) {
     $(id).addEventListener("input", event => { state.pesca[key] = event.target.value; savePesca(); renderPesca(); });
   }
   $("#sell-group").addEventListener("change", event => { state.pesca.group = event.target.value; savePesca(); renderPesca(); });
+  // «Precio / Ventas»: what the heatmap and its table show.
+  for (const mode of ["precio", "ventas"]) {
+    $(`#sell-mode-${mode}`).addEventListener("click", () => { state.pesca.mode = mode; savePesca(); renderPesca(); });
+  }
   let heatWidth = 0, heatTimer;
   win.addEventListener("resize", () => {
     clearTimeout(heatTimer);
@@ -2005,7 +2206,7 @@ function boot(doc, win) {
     const byId = new Map(s.items.map(e => [e.id, e]));
     const pricedFish = FISH.filter(f => byId.has(f.id)).length;
     $("#fish-missing").hidden = pricedFish > 0;
-    $("#fish-missing").textContent = "Aún no hay precios de pescado en este mercado: con el addon Oro de Hermandad 0.5.0 se apunta el pescado en cada escaneo de Auctionator. Mientras tanto, abajo solo cuenta lo que paga el mercader.";
+    $("#fish-missing").textContent = "Aún no hay precios de pescado en este mercado: con el addon Oro de Hermandad 0.5.0 o posterior se apunta el pescado en cada escaneo de la subasta. Mientras tanto, abajo solo cuenta lo que paga el mercader.";
     const zones = fishZones(s, inputs), pools = fishPools(s, inputs), uses = fishUses(s, inputs);
     $("#fish-season").textContent = zones.season === "invierno"
       ? "Ahora es invierno en el juego: pica el calamar de invierno y no la lubina (de abril a septiembre, al revés). El pargo nocturno sale de noche y el salmón escama de sol de día: las cuentas usan la media del día."
@@ -2019,7 +2220,8 @@ function boot(doc, win) {
     $("#pesca-caveat").textContent = "De dónde sale: lo que pica en cada zona y las recetas son de Wowhead Classic (pueden cambiar en Forever); los bancos no tienen datos allí y se cuentan con 4 de cada 5 capturas de su pez. "
       + "Los precios son los que ha visto la hermandad, tras la comisión de la subasta; las especias y los viales, a precio de mercader. " + $("#caveat").textContent;
   }
-  /** "Cuándo vender": the group select, the advice, the heatmap and its table. Returns the advice for the cards. */
+  /** "Cuándo vender": the group select, the advice (sales first, then prices), the «Precio / Ventas» heatmap and its
+   * table. Returns the price summary with the sales in .sales, for the cards. */
   function renderSell() {
     const timing = state.timing?.market === state.market ? state.timing.data : null;
     const groups = fishGroups(), select = $("#sell-group");
@@ -2038,20 +2240,48 @@ function boot(doc, win) {
     const chosen = select.value, group = groups.find(g => g.key === chosen);
     const ids = chosen.startsWith("id:") ? [Number(chosen.slice(3))] : group?.ids ?? null;
     const pattern = timing ? timingPattern(timing, ids) : null;
-    const advice = pattern ? timingAdvice(pattern) : {level: "sin-datos", title: state.timingLoading ? "Cargando los escaneos…" : "Aún no hay escaneos", best: null, worst: null,
-      lines: [state.timingError || (state.timingLoading ? "" : "Escanea la subasta con Auctionator a distintas horas y días: con cada escaneo que se sube, aquí aparece cuándo se paga más.")].filter(Boolean)};
+    const sales = timing ? timingSales(timing, ids, pattern) : null;
+    const summary = pattern ? timingSummary(pattern) : {level: "sin-datos", title: state.timingLoading ? "Cargando los escaneos…" : "Aún no hay escaneos", best: null, worst: null,
+      lines: [state.timingError || (state.timingLoading ? "" : SCAN_MORE)].filter(Boolean)};
+    const advice = {...summary, sales};
     const allPattern = timing && chosen !== "todo" && pattern && pattern.points === 0 ? timingPattern(timing, null) : null;
     $("#sell-feedback").hidden = !(allPattern && allPattern.points > 0);
     $("#sell-feedback").textContent = allPattern && allPattern.points > 0
       ? "De esto aún no hay escaneos con hora (llegan desde el addon 0.5.0). Mientras tanto, «Todo el mercado» ya tiene escaneos y suele seguir el mismo ritmo." : "";
-    $("#sell-advice").replaceChildren(el("h3", {text: advice.title}), ...advice.lines.map(line => el("p", {text: line})));
-    const show = !!pattern && pattern.points > 0;
-    $("#sell-legend").hidden = !show;
+    // The advice line (best block and when to post) goes first, then the price lines, then why there is no sales pattern
+    // yet. A sales pattern also names the title.
+    const measured = !!sales && sales.cells.some(c => c.n > 0), salesPattern = !!sales && (sales.advice.reason === "ventas" || sales.advice.reason === "precio");
+    const title = salesPattern ? (sales.advice.reason === "ventas" ? "Cuándo se vende más" : "Cuándo se vende mejor")
+      : measured && summary.level === "sin-datos" ? "Aún hay pocas ventas medidas" : summary.title;
+    const lead = timing ? adviceText(sales.advice) : null, why = timing ? salesLines(sales).filter(line => line !== lead) : [];
+    const lines = [lead, ...summary.lines.filter(line => line !== SCAN_MORE || !measured), ...why].filter(Boolean);
+    $("#sell-advice").replaceChildren(el("h3", {text: title}), ...lines.map(line => el("p", {text: line})));
+    const mode = state.pesca.mode === "ventas" ? "ventas" : "precio";
+    for (const m of ["precio", "ventas"]) $(`#sell-mode-${m}`).setAttribute("aria-pressed", m === mode ? "true" : "false");
+    const show = mode === "ventas" ? measured : !!pattern && pattern.points > 0;
+    $("#sell-modes").hidden = !(measured || (pattern && pattern.points > 0));
+    $("#sell-legend").hidden = !show || mode !== "precio";
+    $("#sell-legend-sales").hidden = !show || mode !== "ventas";
     $("#sell-twin").hidden = !show;
     const holder = $("#sell-holder");
     heatWidth = holder.clientWidth;
-    if (!show) { holder.replaceChildren(); $("#sell-table").replaceChildren(); return advice; }
-    const chart = timingHeatmapSVG(pattern, {best: advice.best, width: Math.max(300, Math.min(640, heatWidth || 440))});
+    if (!show) {
+      holder.replaceChildren(...(mode === "ventas" && pattern?.points > 0 ? [el("p", {class: "empty-line", text: sales?.any ? FEW_SALES : NO_SALES_YET})] : []));
+      $("#sell-table").replaceChildren();
+      return advice;
+    }
+    const width = Math.max(300, Math.min(640, heatWidth || 440));
+    if (mode === "ventas") {
+      holder.replaceChildren(svg(timingHeatmapSVG(pattern, {width, sales}).node));
+      const cellText = c => c.n === 0 ? "—" : c.usable ? formatRate(c.value) : `pocos (${c.n})`;
+      $("#sell-table").replaceChildren(twinTable([["Día"], ...BLOCK_LABELS.map(label => [label, true])],
+        [...WEEKDAYS_LONG.map((day, wd) => [day, ...sales.cells.filter(c => c.wd === wd).map(c => num(cellText(c)))]),
+          ["Cualquier día", ...sales.blocks.map(b => num(b.rateIdx === null ? b.n ? `pocos (${b.n})` : "—" : formatRate(b.rateIdx)))],
+          ["Medido", ...sales.blocks.map(b => num(formatHours(b.sec)))],
+          ["Mediciones", ...sales.blocks.map(b => num(String(b.n)))]]));
+      return advice;
+    }
+    const chart = timingHeatmapSVG(pattern, {best: summary.best, width});
     holder.replaceChildren(svg(chart.node));
     const cellText = c => c.n === 0 ? "—" : c.usable ? formatPct(c.value) : `pocos (${c.n})`;
     $("#sell-table").replaceChildren(twinTable([["Día"], ...BLOCK_LABELS.map(label => [label, true]), ["Con el precio del día", true]],
