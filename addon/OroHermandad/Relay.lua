@@ -82,6 +82,16 @@ end
 
 local function unixNow() return History.Now() end
 
+-- Hora del reloj del PC (time(), el mismo reloj que lee el subidor con time.time() al escribir su aviso), que puede ir
+-- distinto del servidor (zona horaria mal puesta, reloj sin sincronizar). Sin él, la del servidor.
+local function pcNow()
+  if type(time) == "function" then
+    local ok, t = pcall(time)
+    if ok and isInt(t, 1, TIME_MAX) then return t end
+  end
+  return unixNow()
+end
+
 local function after(seconds, fn)
   if type(C_Timer) == "table" and type(C_Timer.After) == "function" then C_Timer.After(seconds, fn) end
 end
@@ -401,7 +411,8 @@ end
 ---------------------------------------------------------------------------
 local db, cdb                 -- OroHermandadDB.relay (cuenta) y OroHermandadCharDB.relay (personaje)
 local markerSeen = false      -- el subidor del PC dejó su aviso (OroHermandad_Subidor)
-local loadedAt = nil          -- hora unix al cargar la interfaz (Relay.Init): el juego lee el aviso del subidor entonces
+local loadedAt = nil          -- hora unix del reloj del PC al cargar la interfaz (Relay.Init): el juego lee entonces el
+                              -- aviso del subidor, que lleva la hora del mismo reloj
 local loggedIn = false        -- ya pasó Relay.Login (25 s después de entrar)
 local stats = {received = 0, dropped = 0, lastReason = nil}
 local open, openCount, bySender, dead = {}, 0, {}, {}
@@ -595,6 +606,21 @@ local function evict(key, market, h)
   for id in pairs(entry.items) do markDirty(key, id) end
 end
 
+-- ¿Cabe en el mercado un compañero que aún no está en obs, con un escaneo de la hora t? Con 40
+-- (History.OBS_PER_MARKET), solo si es más nuevo que el de escaneo más viejo, que se va: devuelve también su código.
+-- La misma regla para aplicar (applyBegin) y para ver si una respuesta pide más (deliver).
+local function roomFor(market, t)
+  local count, oldest = 0, nil
+  for h, entry in pairs(type(market.obs) == "table" and market.obs or {}) do
+    count = count + 1
+    local candidate = {hash = h, seen = entry.seen}
+    if not oldest or History.EvictionOrder(candidate, oldest) then oldest = candidate end
+  end
+  if count < History.OBS_PER_MARKET then return true, nil end
+  if t > oldest.seen then return true, oldest.hash end
+  return false, nil
+end
+
 -- Primer paso de un escaneo: la hora va a s ANTES que los precios (así nunca se cuenta dos veces, aunque la sesión
 -- acabe a medias). Con 40 compañeros en el mercado, uno nuevo solo entra si su escaneo es más nuevo que el más viejo.
 local function applyBegin(scan)
@@ -607,16 +633,9 @@ local function applyBegin(scan)
   if obs then
     if hasTime(obs.s, scan.t) then return nil end
   else
-    local count, oldest = 0, nil
-    for h, entry in pairs(type(market.obs) == "table" and market.obs or {}) do
-      count = count + 1
-      local candidate = {hash = h, seen = entry.seen}
-      if not oldest or History.EvictionOrder(candidate, oldest) then oldest = candidate end
-    end
-    if count >= History.OBS_PER_MARKET then
-      if not (scan.t > oldest.seen) then stats.dropped = stats.dropped + 1; return nil end
-      evict(scan.market, market, oldest.hash)
-    end
+    local fits, out = roomFor(market, scan.t)
+    if not fits then stats.dropped = stats.dropped + 1; return nil end
+    if out then evict(scan.market, market, out) end
     market.obs = type(market.obs) == "table" and market.obs or {}
     obs = {seen = scan.t, s = "", items = {}}
     market.obs[scan.hash] = obs
@@ -763,14 +782,23 @@ local scheduleFollowUp
 -- Un escaneo completo de un compañero: a la bandeja de entrada (64 como mucho), si no se tenía ya y no pasa de los
 -- límites (uno en directo cada 10 min por compañero; 8 por ventana de puesta al día). Si su respuesta llega llena
 -- (4 escaneos, o no cabría otro como el último en 24 mensajes), lo que le quede se pide solo más tarde. 24 y no 28:
--- quien responde puede tener la 0.4.x/0.5.x, que para en 24 (con una de la 0.6.0, como mucho sobra una petición).
+-- quien responde puede tener la 0.4.x/0.5.x, que para en 24. Con una de la 0.6.0 puede salir una petición de más, que
+-- no se repite: lo recibido entra en obs y la siguiente petición ya lleva su hora.
+-- Un escaneo por susurro de quien no está en obs y no cabe (40 compañeros, todos con algo más nuevo, y nada suyo
+-- esperando en la bandeja) se descarta aquí, como lo descartaría applyBegin, y no pide nada más: la siguiente petición
+-- no llevaría su código y le volvería a pedir lo mismo, cada 11 min sin fin. Sus partes sí cuentan para ver si la
+-- respuesta llegó llena (eran parte de ella): si el siguiente escaneo de la misma respuesta cabe, pide el resto.
 local function deliver(scan)
   local market = History.Market(scan.market)
   local obs = market and type(market.obs) == "table" and market.obs[scan.hash] or nil
   if obs and hasTime(obs.s, scan.t) then return false, "ya estaba" end
-  if applying and applying.scan.hash == scan.hash and applying.scan.t == scan.t then return false, "ya estaba" end
+  local pending = applying ~= nil and applying.scan.hash == scan.hash
+  if pending and applying.scan.t == scan.t then return false, "ya estaba" end
   for _, other in ipairs(inbox) do
-    if other.hash == scan.hash and other.t == scan.t then return false, "ya estaba" end
+    if other.hash == scan.hash then
+      if other.t == scan.t then return false, "ya estaba" end
+      pending = true
+    end
   end
   if #scan.items == 0 then return false, "vacío" end
   if scan.channel == "GUILD" then
@@ -785,6 +813,7 @@ local function deliver(scan)
     windowCount[k] = (windowCount[k] or 0) + 1
     local parts = scan.parts or 1
     windowParts[k] = (windowParts[k] or 0) + parts
+    if not obs and not pending and market and not roomFor(market, scan.t) then return reject("sin sitio") end
     if windowCount[k] >= REPLY_MAX_SCANS or windowParts[k] + parts > LEGACY_REPLY_MSGS then
       scheduleFollowUp(win, scan.hash, scan.sender)
     end
@@ -1080,12 +1109,14 @@ Relay.MARKER_STALE = 7200
 -- haya y /oro subidor, todas. nil si no toca.
 -- «No parece abierto»: el aviso tenía más de 2 h al cargar la interfaz. El juego solo lee su archivo al entrar o con
 -- /reload y el subidor abierto lo reescribe cada hora: comparado con la hora de ahora, en cualquier sesión larga
--- parecería cerrado aunque esté subiendo.
+-- parecería cerrado aunque esté subiendo. La edad va con el reloj del PC, como escrito (el subidor lo pone con el
+-- suyo): con la hora del servidor, un PC con el reloj atrasado lo vería cerrado estando abierto, y uno adelantado, al
+-- revés.
 function Relay.UploaderLines()
   if not Relay.UploaderMode() then return nil end
   local _, info = Relay.MarkerInfo()
   if not info then return nil end
-  local readAt = loadedAt or unixNow()
+  local readAt = loadedAt or pcNow()
   local out = {}
   local parts = {}
   local envio = info.envio
@@ -1261,7 +1292,8 @@ function Relay.OnPeer(sender, kind, channel) protect("compañero", onPeer, sende
 
 -- Una respuesta llegó llena: pasados los 11 min en los que quien respondió no vuelve a responder, se pide lo que le
 -- queda (a toda la hermandad si fue la petición general, que solo contestan quienes tienen algo nuevo; solo a él si
--- fue por susurro). Cada vez avanza lo que ya se tiene y cada buzón guarda 32 escaneos como mucho: se acaba sola.
+-- fue por susurro). Solo la pide un escaneo que cabe en obs (deliver), así que cada vez avanza lo que ya se tiene, y
+-- cada buzón guarda 32 escaneos como mucho: se acaba sola.
 local function followUpAsk(tries)
   if not loggedIn or not Relay.UploaderMode() then return end
   local result = Relay.Ask()
@@ -1325,7 +1357,7 @@ end
 -- En ADDON_LOADED, después de History.Load: ajustes de la cuenta (OroHermandadDB.relay: subidor, share, lastAsk) y
 -- del personaje (OroHermandadCharDB.relay: seq, lastSent, sent y el buzón out de 72 h).
 function Relay.Init(accountDB, charDB)
-  loadedAt = loadedAt or unixNow()
+  loadedAt = loadedAt or pcNow()
   accountDB.relay = sanitizeDB(accountDB.relay)
   charDB.relay = sanitizeCDB(charDB.relay, unixNow())
   db, cdb = accountDB.relay, charDB.relay
@@ -1341,7 +1373,7 @@ function Relay.Login()
   protect("entrada", function()
     if not db then return end
     loggedIn = true
-    loadedAt = loadedAt or unixNow() -- (si al cargar aún no se podía leer la hora)
+    loadedAt = loadedAt or pcNow() -- (si al cargar aún no se podía leer la hora)
     markerSeen = Relay.MarkerDetected()
     local key = History.CurrentMarket()
     if key and History.Hist() then recordSelf(key) end
@@ -1413,7 +1445,7 @@ function Relay.ProbeLine()
     .. " · " .. string.format("%.0f", size / 1024) .. " KB de " .. floor(History.OBS_MAX_BYTES / 1024) .. " KB"
 end
 
--- /oro sondeo: el aviso del subidor (versión del formato, campos que valen y edad), solo cifras.
+-- /oro sondeo: el aviso del subidor (versión del formato, campos que valen y edad, con el reloj del PC), solo cifras.
 function Relay.MarkerProbeLine()
   local detected, info = Relay.MarkerInfo()
   if not detected then return "Aviso del subidor: no está." end
@@ -1422,7 +1454,7 @@ function Relay.MarkerProbeLine()
   for _, k in ipairs({"escrito", "version", "envio", "suben", "aportan", "quedan", "dia"}) do
     if info[k] ~= nil then fields[#fields + 1] = k end
   end
-  local t = unixNow()
+  local t = pcNow()
   return "Aviso del subidor: datos 2, campos válidos " .. (#fields > 0 and table.concat(fields, ",") or "ninguno")
     .. (info.envio and (", último intento " .. info.envio.estado) or "")
     .. ((info.escrito and t) and (", escrito " .. agoText(t - info.escrito)) or "")

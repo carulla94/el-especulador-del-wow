@@ -1221,6 +1221,52 @@ test("PC del subidor: la edad del aviso cuenta al cargar la interfaz (el juego n
   _G.OroHermandadSubidor = nil
 end)
 
+-- El reloj del PC (time(), el que lee el subidor con time.time() al escribir escrito) y el del servidor
+-- (GetServerTime) separados por skew segundos (positivo: el del PC va atrasado). Carga una sesión nueva con un aviso
+-- escrito hace age segundos según el reloj del PC y devuelve sus líneas del subidor y la de /oro sondeo.
+local function skewedMarker(skew, age)
+  local realTime = _G.time
+  _G.time = function() return math.floor(Stub.now) - skew end
+  local ok, lines, probe, written = pcall(function()
+    local pc = _G.time()
+    marker(string.format("OroHermandadSubidor = {formato = 1, datos = 2, escrito = %d, version = \"0.6.0\", "
+      .. "envio = {t = %d, estado = \"ok\"}, aportan = 7}", pc - age, pc - age - 100))
+    local s = freshSession()
+    slash("subidor auto")
+    s.Relay.Login()
+    render(s)
+    return s.Relay.UploaderLines(), s.Relay.MarkerProbeLine(), pc - age
+  end)
+  _G.time = realTime
+  _G.OroHermandadSubidor = nil
+  if not ok then error(lines, 0) end
+  return lines, probe, written
+end
+
+test("PC del subidor: la edad del aviso va con el reloj del PC, con el que lo escribe el subidor (no con el del servidor)", function()
+  -- Reloj del PC 45 min atrasado y el subidor abierto, que reescribió el aviso hace 80 min (su ciclo normal llega a
+  -- 1,5 h): con la hora del servidor tendría 2 h 5 min y diría «no parece abierto».
+  local lines, probe = skewedMarker(2700, 4800)
+  eq060(lines.stale, nil, "45 min atrasado, aviso de hace 80 min")
+  assert(has(lines.base, "7 personas aportan precios"), lines.base)
+  assert(not has(_G.OroHermandadFrame.footer.__text, "no parece abierto"), _G.OroHermandadFrame.footer.__text)
+  assert(has(probe, ", escrito hace 1 h"), probe) -- (con la hora del servidor, «hace 2 h»)
+  -- 2 h atrasado (un Windows que lee como hora local el reloj en UTC de Linux), aviso de hace 1 min: abierto.
+  lines = skewedMarker(7200, 60)
+  eq060(lines.stale, nil, "2 h atrasado, aviso de hace 1 min")
+  -- Reloj del PC 45 min adelantado y el subidor cerrado hace 2 h 2 min: con la hora del servidor tendría 1 h 17 min y
+  -- no avisaría.
+  local written
+  lines, probe, written = skewedMarker(-2700, 7320)
+  eq060(lines.stale, "El subidor del PC no parece abierto (último aviso a las " .. hhmm(written) .. "): ábrelo para que suba.",
+    "45 min adelantado, aviso de hace 2 h 2 min")
+  assert(has(_G.OroHermandadFrame.footer.__text, "no parece abierto"), _G.OroHermandadFrame.footer.__text)
+  assert(has(probe, ", escrito hace 2 h"), probe) -- (con la hora del servidor, «hace 77 min»)
+  -- Sin diferencia entre los relojes, lo de siempre: 1 h 59 min, abierto; 2 h 1 min, no parece abierto.
+  eq060(skewedMarker(0, 7140).stale, nil, "sin diferencia, 1 h 59 min")
+  assert(skewedMarker(0, 7260).stale, "sin diferencia, 2 h 1 min")
+end)
+
 test("«Guardar y subir» (R12): solo en el PC del subidor con algo nuevo; desactivado mientras se guarda; confirmación; un ReloadUI", function()
   local s = freshSession()
   local frame = _G.OroHermandadFrame

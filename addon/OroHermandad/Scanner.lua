@@ -252,6 +252,15 @@ local function sanitizeBase(p)
   end, Scanner.BASE_MARKETS)
 end
 
+-- cdb.scanner.cancelAt[mercado] = hora de la última subasta tuya cancelada allí. Solo sirve mientras la referencia de
+-- ventas de ese mercado es de antes (§2.9): el resto se quita, así que quedan 2 mercados como mucho.
+local function pruneCancels()
+  for key, at in pairs(cs.cancelAt) do
+    local base = cdb.scanBase[key]
+    if not base or at < base.t then cs.cancelAt[key] = nil end
+  end
+end
+
 -- En ADDON_LOADED (Core, después de History.Load y Relay.Init). callbacks (todas opcionales):
 --   listen(on): registra o quita REPLICATE_ITEM_LIST_UPDATE en el marco de eventos de Core;
 --   onScanDone(kind, whole, t): un escaneo propio terminó ("full" o "lista"), grabado o no;
@@ -273,7 +282,9 @@ function Scanner.Init(accountDB, charDB, callbacks)
   cdb.scanner = type(cdb.scanner) == "table" and cdb.scanner or {}
   if cdb.scanner.ownSeen ~= "yes" and cdb.scanner.ownSeen ~= "no" then cdb.scanner.ownSeen = nil end
   if not isInt(cdb.scanner.ownMiss, 1, 1000) then cdb.scanner.ownMiss = nil end
+  cdb.scanner.cancelAt = cleanMap(cdb.scanner.cancelAt, validMarket, isTime)
   S, cs = db.scanner, cdb.scanner
+  pruneCancels()
   Scanner.InstallHooks()
 end
 
@@ -487,11 +498,19 @@ function Scanner.RecordDue(key, t)
   return (not last or t - last >= Scanner.RECORD_GAP) and recordedOn(key, Spec.DayIndex(t)) < Scanner.RECORD_PER_DAY
 end
 
+-- ¿Cancelaste una subasta tuya en este mercado desde la referencia (base.t), sin que conste que el escaneo reconoce las
+-- tuyas (ownSeen «yes»)? Entonces esa referencia pudo tenerla como del mercado y, al no salir ya, contaría como
+-- vendida: esa pareja no mide (la siguiente parte de un escaneo posterior). Cubre también lo que el «no» no ve: tras
+-- entrar o un /reload, las subastas de antes no suman escaneos sin las tuyas (podrían haberse vendido sin conexión).
+local function cancelledSince(key, since)
+  return cs.ownSeen ~= "yes" and (cs.cancelAt[key] or 0) >= since
+end
+
 function Scanner.PairDue(key, t)
   t = t or now()
   if not Scanner.RecordDue(key, t) or cs.ownSeen == "no" then return false end
   local base = cdb.scanBase[key]
-  if not base or base.t < (S.sampledUntil[key] or 0) then return false end
+  if not base or base.t < (S.sampledUntil[key] or 0) or cancelledSince(key, base.t) then return false end
   local age = t - base.t
   return age >= Scanner.SAMPLE_MIN and age <= Scanner.PAIR_MAX
 end
@@ -863,13 +882,21 @@ function Scanner.OnAuctionCreated(auctionID)
   end)
 end
 
--- AUCTION_CANCELED: esa subasta ya no está.
+-- AUCTION_CANCELED: esa subasta ya no está. Se apunta cuándo y en qué mercado (el de la seguida; si no se sigue, el de
+-- tu facción salvo que sea una de la neutral): la pareja que empezó antes no mide ventas ahí (cancelledSince).
 function Scanner.OnAuctionGone(auctionID)
-  lastUserAction = now()
-  if cdb and cdb.auctions then
-    local id = readable(auctionID)
-    if id ~= nil then cdb.auctions[id] = nil end
-  end
+  local t = now()
+  lastUserAction = t
+  if not (cdb and cs and cdb.auctions) then return end
+  local id = readable(auctionID)
+  local text = id ~= nil and cdb.auctions[id] or nil
+  if id ~= nil then cdb.auctions[id] = nil end
+  local a = text and decodeAuction(text)
+  local where = a and a.market
+  if not where and visitHouse ~= "neutral" and not (id ~= nil and cdb.otherAuctions[id]) then where = market() end
+  if not (t and validMarket(where)) then return end
+  cs.cancelAt[where] = max(cs.cancelAt[where] or 0, t)
+  pruneCancels()
 end
 
 local function salesList(key) return decodeRecords(db.sales[key], 6) end
@@ -1342,14 +1369,16 @@ local function bandMinimums()
 end
 
 -- Tus subastas según la pestaña Subastas (GetOwnedAuctionInfo, 200 como mucho): cuántas están activas con precio de
--- compra (las vendidas que esperan en el correo no), cuántas hay y, si la lista está entera (HasFullOwnedAuctionResults
--- y no más de 200), el estado de cada auctionID.
+-- compra (las vendidas que esperan en el correo no), cuántas hay, si la lista está entera (HasFullOwnedAuctionResults
+-- y no más de 200; también con ninguna: el cliente la llena solo al abrir la pestaña Subastas y, hasta entonces, da 0
+-- sin estar entera, y ese 0 no dice nada) y, entera y con alguna, el estado de cada auctionID.
 local function ownedAuctions()
   local ok, n = ah("GetNumOwnedAuctions")
   n = ok and readable(n) or nil
-  if not isInt(n, 1, 100000) then return 0, n, nil end
+  if not isInt(n, 0, 100000) then return 0, n, nil, false end
   local okFull, full = ah("HasFullOwnedAuctionResults")
-  local statusOf = (okFull and readable(full) == true and n <= Scanner.OWNED_MAX) and {} or nil
+  full = (okFull and readable(full) == true and n <= Scanner.OWNED_MAX) and true or false
+  local statusOf = (full and n > 0) and {} or nil
   local active = 0
   for i = 1, min(n, Scanner.OWNED_MAX) do
     local okInfo, info = ah("GetOwnedAuctionInfo", i)
@@ -1359,24 +1388,30 @@ local function ownedAuctions()
       if statusOf and id ~= nil then statusOf[id] = status end
     end
   end
-  return active, n, statusOf
+  return active, n, statusOf, full
 end
 
--- Subastas de este personaje que deberían salir en el escaneo: las seguidas de este mercado aún vigentes, sin aviso de
--- venta y creadas en esta sesión (el aviso de venta solo llega con el personaje conectado: lo vendido mientras no
--- estabas seguiría contando), y las que la pestaña Subastas da como activas con precio de compra. Con esa lista entera,
--- una seguida que sale vendida o que no sale ya no cuenta. Contar de menos solo hace la comprobación más blanda.
+-- Subastas de este personaje que deberían salir en el escaneo (las que suman un escaneo sin las tuyas): las seguidas de
+-- este mercado aún vigentes, sin aviso de venta y creadas en esta sesión (el aviso de venta solo llega con el personaje
+-- conectado: lo vendido mientras no estabas seguiría contando), y las que la pestaña Subastas da como activas con
+-- precio de compra. Con esa lista entera, una seguida que sale vendida o que no sale ya no cuenta. Contar de menos solo
+-- hace la comprobación más blanda.
+-- Devuelve también si consta que no tienes ninguna en este mercado, lo único que quita el «no»: la lista de la pestaña
+-- Subastas entera y sin ninguna activa, y ninguna seguida de este mercado vigente y sin aviso de venta, sea de esta
+-- sesión o de antes (tras un /reload o al entrar, las de antes siguen a la venta), salvo que esa lista la dé vendida.
 local function expectedOwn(key, t)
-  local active, owned, statusOf = ownedAuctions()
+  local active, owned, statusOf, full = ownedAuctions()
   stats.ownedAuctions = type(owned) == "number" and (active .. " a la venta de " .. owned) or nil
-  local n = 0
+  local n, open = 0, 0
   for auctionID, text in pairs(cdb.auctions) do
-    local a = sessionAuctions[auctionID] and decodeAuction(text)
-    if a and a.market == key and not a.sold and auctionEnd(a) >= t and (not statusOf or statusOf[auctionID] == ACTIVE) then
-      n = n + 1
+    local a = decodeAuction(text)
+    if a and a.market == key and not a.sold and auctionEnd(a) >= t then
+      local status = statusOf and statusOf[auctionID]
+      if sessionAuctions[auctionID] and (not statusOf or status == ACTIVE) then n = n + 1 end
+      if status == nil or status == ACTIVE then open = open + 1 end
     end
   end
-  return n + active
+  return n + active, full and active == 0 and open == 0
 end
 
 -- Referencia de ventas de este personaje: los niveles más baratos de un objeto vigilado (sin tus subastas).
@@ -1424,6 +1459,7 @@ local function storeBaseline(job, key)
     table.sort(keys, function(a, b) return cdb.scanBase[a].t < cdb.scanBase[b].t end)
     for i = 1, #keys - Scanner.BASE_MARKETS do if keys[i] ~= key then cdb.scanBase[keys[i]] = nil end end
   end
+  pruneCancels()
   stats.baseItems, stats.baseBytes = 0, 0
   for _, text in pairs(items) do stats.baseItems = stats.baseItems + 1; stats.baseBytes = stats.baseBytes + #text end
 end
@@ -1458,24 +1494,33 @@ local function finishBegin(job)
   job.baseItems, job.baseCounts, job.baseTotal = {}, {}, 0
   job.day = Spec.DayIndex(t)
   -- ¿Salen tus subastas en el escaneo? Si dos escaneos seguidos no ven ninguna cuando debería haberlas, en este
-  -- personaje no se miden ventas (hasta que un escaneo vea alguna o ya no tengas ninguna que debiera salir: sin
-  -- subastas tuyas, el escaneo no puede tomarlas por las del mercado).
+  -- personaje no se miden ventas, hasta que un escaneo vea alguna o conste que ya no tienes ninguna aquí (sin subastas
+  -- tuyas, el escaneo no puede tomarlas por las del mercado). Si no se sabe (no se esperaba ninguna, pero la pestaña
+  -- Subastas no se ha abierto o queda alguna seguida a la venta), todo sigue igual.
+  local cleared = false
   if job.ownRows > 0 then cs.ownSeen, cs.ownMiss = "yes", nil
-  elseif expectedOwn(key, t) > 0 then
-    cs.ownMiss = (cs.ownMiss or 0) + 1
-    if cs.ownMiss >= Scanner.OWN_MISSES then cs.ownSeen = "no" end
   else
-    cs.ownMiss = nil
-    if cs.ownSeen == "no" then cs.ownSeen = nil end
+    local expected, none = expectedOwn(key, t)
+    if expected > 0 then
+      cs.ownMiss = (cs.ownMiss or 0) + 1
+      if cs.ownMiss >= Scanner.OWN_MISSES then cs.ownSeen = "no" end
+    elseif none then
+      cleared = cs.ownSeen == "no" or cs.ownMiss ~= nil
+      cs.ownMiss = nil
+      if cs.ownSeen == "no" then cs.ownSeen = nil end
+    end
   end
   -- Ventas solo si se va a grabar y hay referencia de este personaje de 15 min a 2 h antes, con los mismos tramos, y
   -- no anterior al último escaneo de la cuenta que ya midió ventas aquí (con un alter, las dos medidas se pisarían).
+  -- Tampoco el escaneo que quita el «no» (o la cuenta de escaneos sin las tuyas): su referencia es de un escaneo que no
+  -- reconoció tus subastas y puede tenerlas como si fueran del mercado (una que cancelaste contaría como vendida); la
+  -- siguiente pareja ya parte de este. Ni, sin constar que se reconocen, si cancelaste alguna aquí desde la referencia.
   local base = cdb.scanBase[key]
   local dt = base and t - base.t
   job.base, job.dt = base, dt
   job.sampling = Scanner.AllowRecord(key, t) and base ~= nil and dt >= Scanner.SAMPLE_MIN and dt <= Scanner.SAMPLE_MAX
-    and job.known and job.bandsOK and base.off == offset and cs.ownSeen ~= "no"
-    and base.t >= (S.sampledUntil[key] or 0)
+    and job.known and job.bandsOK and base.off == offset and cs.ownSeen ~= "no" and not cleared
+    and base.t >= (S.sampledUntil[key] or 0) and not cancelledSince(key, base.t)
   if job.sampling then
     job.sold, job.bought = {}, boughtIn(base.t, t)
     job.sampleStats = {items = 0, sold = 0, partial = 0, own = 0, dt = dt, from = base.t}

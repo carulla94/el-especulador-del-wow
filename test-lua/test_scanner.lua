@@ -1475,8 +1475,9 @@ test("Ventas: lo vendido sin conexión, sin aviso o con «Apuntar mis ventas» a
   due, p = pairWithoutOwn()
   eq(due, true); assert(p.dt, "apagado: la medida sigue")
   Scanner.SetSales(true)
-  -- 4) Una tuya que no sale en dos escaneos: «no». Cancelada (ya no tienes ninguna): el siguiente escaneo quita la marca
-  -- y la pareja vuelve a medir.
+  -- 4) Una tuya que no sale en dos escaneos: «no». Cancelada desde la pestaña Subastas (su lista, entera, ya no tiene
+  -- ninguna): el siguiente escaneo quita la marca sin medir (su referencia es de cuando no se reconocían) y la pareja
+  -- vuelve a medir.
   Stub.advance(2400)
   standardHouse()
   Stub.openAH(); Stub.advance(3)
@@ -1484,15 +1485,317 @@ test("Ventas: lo vendido sin conexión, sin aviso o con «Apuntar mis ventas» a
   for _ = 1, 2 do Stub.advance(1900); scanNow() end
   eq(cs().ownSeen, "no")
   Stub.fire("AUCTION_CANCELED", 5401)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, true
   Stub.advance(1900)
+  local before = lastPoint(2772).t
   scanNow()
   eq(cs().ownSeen, nil); eq(cs().ownMiss, nil)
+  assert(lastPoint(2772).t > before, "grabado"); eq(lastPoint(2772).dt, nil, "el escaneo que quita el «no» no mide")
   assert(has(table.concat(Scanner.ProbeLines(), "\n"), "Tus subastas en el escaneo: sin comprobar"), "sin comprobar")
   Stub.advance(2400)
   eq(Scanner.PairDue(KEY), true)
   scanNow()
   assert(lastPoint(2772).dt, "con ventas otra vez")
   Stub.closeAH()
+  Stub.ah.ownedFull = false
+end)
+
+-- Tu subasta sale en el escaneo sin tu nombre como dueño (el caso para el que existe el «no»): el escaneo la toma por
+-- una del mercado. La pestaña Subastas sin abrir: el cliente da 0 subastas tuyas y la lista no está entera.
+local function houseWithOwn(qty)
+  standardHouse(qty and {{2772, qty, 99, {band = 3}}} or nil)
+end
+-- Un escaneo wait segundos después (con la subasta abierta solo para él). Devuelve si la pareja tocaba antes y el punto
+-- nuevo del hierro (nil si no se grabó).
+local function scanAfter(wait, ownQty)
+  Stub.advance(wait)
+  houseWithOwn(ownQty)
+  Stub.openAH(); Stub.advance(3)
+  local due, last = Scanner.PairDue(KEY), lastPoint(2772)
+  local before = last and last.t or 0
+  scanNow()
+  Stub.closeAH()
+  local p = lastPoint(2772)
+  return due, (p and p.t > before) and p or nil
+end
+-- Publica 10 de hierro (seguida como auctionID) y dos escaneos que no la reconocen: «no» (sin abrir la pestaña Subastas).
+local function postUnrecognised(auctionID)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  houseWithOwn(10)
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 10, 99, auctionID)
+  scanNow()
+  Stub.closeAH()
+  scanAfter(1900, 10)
+  eq(OroHermandadCharDB.scanner.ownSeen, "no"); eq(OroHermandadCharDB.scanner.ownMiss, 2)
+end
+
+test("Ventas: al entrar o tras un /reload, sin abrir la pestaña Subastas, el «no» sigue (tu subasta de antes sigue a la venta)", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  local function probe() return table.concat(Scanner.ProbeLines(), "\n") end
+  -- A) Sales del juego (o recargas) con tu lote a la venta y escaneas sin abrir la pestaña Subastas.
+  boot()
+  setNow(dayStart(12))
+  postUnrecognised(7001)
+  reload()
+  assert(OroHermandadCharDB.auctions[7001], "sigue seguida"); eq(C_AuctionHouse.GetNumOwnedAuctions(), 0)
+  local due, p = scanAfter(1000, 10)
+  eq(cs().ownSeen, "no", "tras entrar"); eq(cs().ownMiss, 2)
+  assert(has(probe(), "Tus subastas no se reconocen en el escaneo"), probe())
+  -- Lo cancelas desde la pestaña Subastas (que ahora sí se consulta) y escaneas 40 min después: la marca se quita, pero
+  -- ese escaneo no mide (su referencia tenía tu lote como del mercado: los 10 cancelados no son ventas).
+  Stub.fire("AUCTION_CANCELED", 7001)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, true
+  due, p = scanAfter(2400)
+  eq(due, false, "sin pareja con el «no»"); assert(p, "grabado"); eq(p.dt, nil, "sin ventas"); eq(p.sold, nil)
+  eq(cs().ownSeen, nil); eq(cs().ownMiss, nil)
+  due, p = scanAfter(2400)
+  eq(due, true, "la pareja vuelve"); assert(p and p.dt, "mide"); eq(p.sold, 0, "nada vendido")
+  Stub.ah.ownedFull = false
+end)
+
+test("Ventas: con «Guardar y subir» entre escaneos (un /reload cada vez) ni el «no» ni la cuenta se pierden", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  local due, p
+  -- B) Tu lote sigue a la venta sin reconocerse y la pestaña Subastas no se abre.
+  boot()
+  setNow(dayStart(13))
+  postUnrecognised(7101)
+  for k = 1, 3 do
+    reload()
+    due, p = scanAfter(1900, 10)
+    eq(cs().ownSeen, "no", "recarga " .. k); eq(cs().ownMiss, 2, "recarga " .. k)
+    eq(due, false, "recarga " .. k); assert(p, "grabado"); eq(p.dt, nil, "recarga " .. k)
+  end
+  -- Con un solo escaneo sin la tuya antes de recargar, la cuenta tampoco vuelve a 0; con la pestaña Subastas abierta
+  -- (que la da activa), el siguiente escaneo llega al «no».
+  boot()
+  setNow(dayStart(14))
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  houseWithOwn(10)
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 10, 99, 7201)
+  scanNow()
+  Stub.closeAH()
+  eq(cs().ownMiss, 1)
+  reload()
+  scanAfter(1900, 10)
+  eq(cs().ownMiss, 1, "tras recargar"); eq(cs().ownSeen, nil)
+  reload()
+  Stub.ah.ownedList, Stub.ah.ownedFull = {{status = 0, buyoutAmount = 990, auctionID = 7201}}, true
+  scanAfter(1900, 10)
+  eq(cs().ownMiss, 2); eq(cs().ownSeen, "no")
+  -- Con la cuenta en 1 tras recargar, cancelas el lote desde la pestaña Subastas (queda vacía): ya no hay pareja (la
+  -- referencia es de antes de cancelar) y el escaneo quita la cuenta sin medir (los 10 cancelados no son ventas); la
+  -- siguiente pareja, sí.
+  boot()
+  setNow(dayStart(15))
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  houseWithOwn(10)
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 10, 99, 7231)
+  scanNow()
+  Stub.closeAH()
+  reload()
+  scanAfter(1900, 10)
+  eq(cs().ownMiss, 1)
+  Stub.fire("AUCTION_CANCELED", 7231)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, true
+  due, p = scanAfter(2400)
+  eq(due, false, "cancelaste desde la referencia"); eq(cs().ownMiss, nil); assert(p, "grabado")
+  eq(p.dt, nil, "los 10 cancelados no se cuentan como vendidos")
+  due, p = scanAfter(2400)
+  eq(due, true); assert(p and p.dt, "la pareja mide"); eq(p.sold, 0)
+  -- Una tuya que el addon no sigue (publicada en otro PC o antes de instalarlo): solo la pestaña Subastas la conoce.
+  -- Tras recargar sin abrirla, el 0 del cliente no dice que ya no la tengas: el «no» sigue.
+  boot()
+  setNow(dayStart(15))
+  Stub.ah.ownedList, Stub.ah.ownedFull = {{status = 0, buyoutAmount = 990, auctionID = 7251}}, true
+  scanAfter(0, 10); scanAfter(1900, 10)
+  eq(cs().ownSeen, "no"); eq(next(OroHermandadCharDB.auctions), nil, "ninguna seguida")
+  reload()
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  scanAfter(1900, 10)
+  eq(cs().ownSeen, "no", "sin abrir la pestaña Subastas"); eq(cs().ownMiss, 2)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+end)
+
+test("Ventas: el escaneo que quita el «no» no mide contra una referencia con tu subasta (cancelada, no vendida)", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  -- C) En la misma sesión: «no», y cancelas tu lote desde la pestaña Subastas (su lista, entera, queda vacía).
+  boot()
+  setNow(dayStart(15))
+  postUnrecognised(7301)
+  Stub.fire("AUCTION_CANCELED", 7301)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, true
+  local due, p = scanAfter(2400)
+  eq(cs().ownSeen, nil, "ya no tienes ninguna"); eq(due, false); assert(p, "grabado")
+  eq(p.dt, nil, "los 10 cancelados no se cuentan como vendidos"); eq(p.sold, nil)
+  due, p = scanAfter(2400)
+  eq(due, true); assert(p and p.dt, "la pareja mide"); eq(p.sold, 0)
+  -- D) Con la lista entera, una seguida de antes, vigente y sin aviso de venta, que la lista no trae: no consta que no
+  -- tengas ninguna (la lista puede ser de antes de publicarla) y el «no» sigue. Si la lista la da vendida, se quita.
+  boot()
+  setNow(dayStart(16))
+  postUnrecognised(7401)
+  reload()
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, true
+  due, p = scanAfter(1900)
+  eq(cs().ownSeen, "no", "seguida y vigente"); eq(cs().ownMiss, 2)
+  Stub.ah.ownedList = {{status = 1, buyoutAmount = 990, auctionID = 7401}}
+  due, p = scanAfter(1900)
+  eq(cs().ownSeen, nil, "vendida según la subasta"); eq(cs().ownMiss, nil); assert(p, "grabado"); eq(p.dt, nil)
+  -- Y una seguida ya caducada no cuenta: con la lista entera y vacía, se quita.
+  boot()
+  setNow(dayStart(17))
+  postUnrecognised(7501)
+  reload()
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, true
+  scanAfter(26 * 3600)
+  eq(cs().ownSeen, nil, "caducada")
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+end)
+
+-- Un escaneo wait segundos después con estas filas de más (con la subasta abierta solo para él). Devuelve si la pareja
+-- tocaba antes y el punto nuevo del hierro (nil si no se grabó).
+local function scanRows(wait, rows)
+  Stub.advance(wait)
+  standardHouse(rows)
+  Stub.openAH(); Stub.advance(3)
+  local due, last = Scanner.PairDue(KEY), lastPoint(2772)
+  local before = last and last.t or 0
+  scanNow()
+  Stub.closeAH()
+  local p = lastPoint(2772)
+  return due, (p and p.t > before) and p or nil
+end
+
+test("Ventas: si cancelas una tuya sin constar que el escaneo reconozca las tuyas, la pareja de antes no mide (también tras entrar o un /reload)", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  -- A (10 de hierro a 99, lo más barato) y B (5 a 125), sin tu nombre como dueño en el escaneo.
+  local both = {{2772, 10, 99, {band = 3}}, {2772, 5, 125, {band = 3}}}
+  local onlyB = {{2772, 5, 125, {band = 3}}}
+  local function postAB(a, b)
+    Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+    standardHouse(both)
+    Stub.openAH(); Stub.advance(3)
+    postCommodity(2772, 10, 99, a); postCommodity(2772, 5, 125, b)
+    Stub.closeAH()
+  end
+  -- Abres la pestaña Subastas (su lista, entera, trae las dos activas) y cancelas A: B sigue a la venta.
+  local function cancelA(a, b)
+    Stub.ah.ownedList = {{status = 0, buyoutAmount = 990, auctionID = a}, {status = 0, buyoutAmount = 625, auctionID = b}}
+    Stub.ah.ownedFull = true
+    Stub.fire("AUCTION_CANCELED", a)
+    Stub.ah.ownedList = {{status = 0, buyoutAmount = 625, auctionID = b}}
+  end
+  -- F) Publicas A y B, sales del juego y vuelves: un escaneo (la pestaña Subastas sin abrir: las de antes no cuentan),
+  -- cancelas A y escaneas 40 min después. La cuenta de escaneos sin las tuyas va por 1 (B), pero los 10 cancelados no
+  -- son ventas.
+  boot()
+  setNow(dayStart(18))
+  postAB(7601, 7602)
+  reload()
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  local due, p = scanRows(3600, both)
+  eq(cs().ownSeen, nil); eq(cs().ownMiss, nil, "las de antes no cuentan")
+  cancelA(7601, 7602)
+  assert(cs().cancelAt[KEY], "cancelación apuntada")
+  due, p = scanRows(2400, onlyB)
+  eq(due, false, "sin pareja"); assert(p, "grabado"); eq(p.dt, nil, "tras entrar: sin ventas"); eq(p.sold, nil)
+  eq(cs().ownMiss, 1, "B sigue a la venta")
+  -- E) «Guardar y subir» entre los dos escaneos: publicas A y B, escaneas, cancelas A, recargas y escaneas 40 min después.
+  boot()
+  setNow(dayStart(19))
+  postAB(7701, 7702)
+  scanRows(5, both)
+  eq(cs().ownMiss, 1)
+  cancelA(7701, 7702)
+  reload()
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  due, p = scanRows(2400, onlyB)
+  eq(due, false, "sin pareja"); assert(p, "grabado"); eq(p.dt, nil, "tras recargar: sin ventas"); eq(p.sold, nil)
+  eq(cs().ownMiss, 1, "la cuenta sigue")
+  -- La siguiente pareja parte de un escaneo posterior a cancelar: B sigue a la venta y nada se vendió.
+  due, p = scanRows(2400, onlyB)
+  eq(due, true, "la pareja vuelve"); assert(p and p.dt, "mide"); eq(p.sold, 0, "nada vendido")
+  eq(cs().cancelAt[KEY], nil, "ya no hace falta")
+  -- G) Una sola, cancelada antes de «Guardar y subir»: tampoco.
+  boot()
+  setNow(dayStart(20))
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  houseWithOwn(10)
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 10, 99, 7801)
+  Stub.closeAH()
+  scanRows(5, {{2772, 10, 99, {band = 3}}})
+  Stub.ah.ownedList, Stub.ah.ownedFull = {{status = 0, buyoutAmount = 990, auctionID = 7801}}, true
+  Stub.fire("AUCTION_CANCELED", 7801)
+  Stub.ah.ownedList = {}
+  reload()
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  due, p = scanRows(2400)
+  eq(due, false); assert(p, "grabado"); eq(p.dt, nil, "una sola: sin ventas"); eq(p.sold, nil)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+end)
+
+test("Ventas: con tus subastas reconocidas cancelar no quita la pareja; una sin seguir cuenta, una en la neutral no; lo guardado se limpia al cargar", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  local me = UnitName("player")
+  local due, p
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  -- Reconocidas (tu nombre como dueño): el escaneo ya las deja fuera de la referencia y la pareja mide igual.
+  boot()
+  setNow(dayStart(21))
+  local mine = {{2772, 10, 99, {band = 3, owner = me}}}
+  standardHouse(mine)
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 10, 99, 7901)
+  scanNow()
+  Stub.closeAH()
+  eq(cs().ownSeen, "yes")
+  Stub.fire("AUCTION_CANCELED", 7901)
+  due, p = scanRows(2400)
+  eq(due, true, "reconocidas: la pareja toca"); assert(p and p.dt, "mide"); eq(p.sold, 0, "la cancelada no era del mercado")
+  -- Sin comprobar: una que el addon no sigue (de otro PC), cancelada en la subasta de tu facción, también cuenta.
+  boot()
+  setNow(dayStart(22))
+  scanRows(0)
+  Stub.openAH(); Stub.advance(3)
+  Stub.fire("AUCTION_CANCELED", 7951)
+  local prop = Scanner.Proposal()
+  assert(not prop or prop.reason ~= "pareja", "sin propuesta de pareja")
+  Stub.closeAH()
+  due, p = scanRows(2400)
+  eq(due, false, "sin pareja"); assert(p, "grabado"); eq(p.dt, nil, "sin ventas")
+  due, p = scanRows(2400)
+  eq(due, true); assert(p and p.dt, "la siguiente mide")
+  -- Cancelada en la subasta neutral (otro mercado): la pareja de tu facción sigue.
+  boot()
+  setNow(dayStart(23))
+  scanRows(0)
+  Stub.mapID = 9001
+  Stub.openAH({npcFaction = false})
+  eq(Scanner.House(), "neutral")
+  Stub.fire("AUCTION_CANCELED", 7961)
+  Stub.closeAH()
+  Stub.mapID = 1453
+  eq(cs().cancelAt[KEY], nil, "neutral: no se apunta")
+  due, p = scanRows(2400)
+  eq(due, true); assert(p and p.dt, "la pareja mide")
+  -- Al cargar: fuera lo que no vale y lo que ya no toca ninguna referencia (de antes de ella o sin ella); se queda la
+  -- cancelación posterior a la referencia de un mercado.
+  local baseT = OroHermandadCharDB.scanBase[KEY].t
+  cs().cancelAt = {[KEY] = baseT + 1, ["Otro-Horde"] = baseT + 1, ["mal"] = baseT, ["Reino-Alliance"] = "x"}
+  reload()
+  eq(dump(cs().cancelAt), dump({[KEY] = baseT + 1}))
+  cs().cancelAt[KEY] = baseT - 1
+  reload()
+  eq(next(cs().cancelAt), nil, "anterior a la referencia")
+  cs().cancelAt = "x"
+  reload()
+  eq(type(cs().cancelAt), "table")
 end)
 
 test("Publicaciones: una rechazada, una confirmación cancelada o una venta de varias parada no se llevan la siguiente subasta", function()

@@ -1959,6 +1959,125 @@ test("Respuesta de la 0.5.1 (24 mensajes) al subidor 0.6.0: con escaneos de 13 p
   logout(up); logout(old)
 end)
 
+-- Mercado lleno: n compañeros en el obs del subidor (40 = History.OBS_PER_MARKET), con escaneos de las horas seen + 1
+-- a seen + n (el más viejo, seen + 1).
+local function fullMarket(up, n, seen)
+  current = up
+  local obs = {}
+  for o = 1, n do obs[string.format("%08x", 0x30000000 + o)] = {seen = seen + o, s = tostring(seen + o), items = {}} end
+  up.History.Market(MARKET, true).obs = obs
+  current = nil
+end
+-- Peticiones a toda la hermandad que salieron (cada una son varias partes con el mismo número de serie).
+local function asksBy(c)
+  local seqs, n = {}, 0
+  for _, e in ipairs(sentBy(c, "^Q3|", "GUILD")) do
+    local seq = e.msg:match("^Q3|([^|]*)|")
+    if not seqs[seq] then seqs[seq], n = true, n + 1 end
+  end
+  return n
+end
+
+-- Con 40 compañeros más nuevos en obs, el escaneo de quien no está no cabe (applyBegin lo tiraría). Si aun así contara
+-- como respuesta llena (13 + 13 > 24), cada 11 min saldría otra petición a toda la hermandad sin su código y él
+-- volvería a mandar lo mismo, sin fin. Con 39 sí cabe: la regla de los 24 mensajes sigue igual (una petición de más y
+-- se acaba).
+test("Mercado lleno (40 compañeros más nuevos): un escaneo de 13 partes que no cabe no pide más cada 11 min; con 39, entra", function()
+  for n, case in ipairs({{peers = 40}, {peers = 40, legacy = true}, {peers = 39}}) do
+    local label = (case.legacy and "0.5.1" or "0.6.0") .. ", " .. case.peers .. " compañeros"
+    local names = {"Fuera" .. n, "Subel" .. n}
+    -- (Responde a los 30 s: con todas las partes de la petición ya recibidas.)
+    local x = member(names[1], names, {relayFile = case.legacy and (LEGACY .. "Relay-0.5.1.lua") or nil,
+                                       random = function() return 30 end})
+    login(x, 30)
+    -- Un escaneo de la lista fija entera en 13 partes (cantidades de 4 cifras en base 36), de hace 1 h.
+    local items = {}
+    for i, id in ipairs(FIXED_IDS) do items[id] = {60000 + ((i * 7919 + n * 104729) % 900000), 1300 + (i * 37) % 4000, 1296 + i % 50} end
+    scan(x, items)
+    eq(#x.CharDB.relay.out, 1, label .. ": uno en el buzón")
+    run(3600)
+    local up = member(names[2], names, {marker = true})
+    fullMarket(up, case.peers, unix() - 100)
+    x.sent = {}
+    login(up, 25)
+    quiet(label, function() run(3 * 3600) end)
+    local h = hashOf(up, names[1])
+    eq(#sentBy(x, "^P3|", "WHISPER"), 13, label .. ": responde una vez, con sus 13 partes")
+    if case.peers == 40 then
+      eq(asksBy(up), 1, label .. ": una sola petición en 3 h")
+      eq(scansAt(up, h), 0, label .. ": no cabe")
+      current = up
+      eq(up.Relay.Stats().lastReason, "sin sitio", label .. ": descartado al llegar")
+      current = nil
+    else
+      eq(asksBy(up), 2, label .. ": la petición de lo que faltaba sale una vez y no encuentra nada más")
+      eq(scansAt(up, h), 1, label .. ": entra")
+    end
+    logout(up); logout(x)
+    run(700)
+  end
+end)
+
+-- El escaneo que no cabe sí cuenta para ver si la respuesta llegó llena: aquí quien responde manda 2 escaneos de 12
+-- partes (24 mensajes) y le quedan 2 más; el primero no cabe y el segundo sí. Contando solo el segundo (12 + 12 = 24)
+-- parecería una respuesta que no llegó llena y los otros dos no llegarían hasta otra petición.
+test("Mercado lleno: el primer escaneo de una respuesta llena no cabe y el segundo sí; los otros dos llegan solos", function()
+  local names = {"Mixta", "SubeM"}
+  local x = member("Mixta", names, {random = function() return 30 end})
+  login(x, 30)
+  local times = {}
+  for k = 1, 4 do
+    scan(x, wholeScan(40 + k))
+    times[k] = x.CharDB.relay.out[#x.CharDB.relay.out].t
+    run(1200)
+  end
+  eq(#x.CharDB.relay.out, 4, "4 en el buzón")
+  run(3600)
+  local up = member("SubeM", names, {marker = true})
+  -- 40 compañeros; el más viejo, 11 s más nuevo que el primer escaneo y 20 min más viejo que el segundo.
+  fullMarket(up, 40, times[1] + 10)
+  x.sent = {}
+  login(up, 25)
+  quiet("respuesta con uno que no cabe", function() run(300) end)
+  local h = hashOf(up, "Mixta")
+  eq(#sentBy(x, "^P3|", "WHISPER"), 2 * 12, "la primera respuesta: los 2 más viejos")
+  eq(scansAt(up, h), 1, "el primero no cabe; el segundo entra (y se va el compañero más viejo)")
+  quiet("lo que faltaba", function() run(900) end)
+  eq(scansAt(up, h), 3, "pasados 11 min, los otros dos, sin /oro sync")
+  local got = up.History.DecodeTimes(obsOf(up, h).s)
+  eq(got[1], times[2], "desde el segundo"); eq(got[3], times[4], "hasta el último")
+  run(3600)
+  eq(#sentBy(x, "^P3|", "WHISPER"), 4 * 12, "cada escaneo, una vez")
+  local asks = asksBy(up)
+  assert(asks >= 2 and asks <= 3, "peticiones: " .. asks)
+  run(3600)
+  eq(asksBy(up), asks, "y no pide más")
+  logout(up); logout(x)
+end)
+
+-- Lo que decide applyBegin al aplicar: si ya espera en la bandeja un escaneo del mismo compañero que sí cabe (aquí, en
+-- combate, uno en directo), el viejo que llega por susurro no se descarta antes: entra con él, como siempre.
+test("Mercado lleno: con un escaneo suyo esperando en la bandeja (en combate), el viejo por susurro no se descarta", function()
+  local names = {"Espera", "SubeE"}
+  local up = member("SubeE", names, {marker = true})
+  fullMarket(up, 40, unix() - 200)
+  login(up, 25)
+  run(10)
+  eq(asksBy(up), 1, "pidió: la ventana de los susurros está abierta")
+  up.combat = true
+  local from = "Espera-" .. C.guildRealm
+  for _, m in ipairs(R.PackP3(1, TAG, unix() - 30, {{2772, 120, 10, 5}})) do inject(up, m, "GUILD", from) end
+  for _, m in ipairs(R.PackP3(2, TAG, unix() - 3600, {{2772, 110, 10, 5}})) do inject(up, m, "WHISPER", from) end
+  run(20)
+  current = up
+  eq(#up.Relay.Internals().inbox, 2, "los dos esperan (en combate no se aplica nada)")
+  current = nil
+  up.combat = false
+  run(30)
+  eq(scansAt(up, hashOf(up, "Espera")), 2, "el de directo entra (más nuevo que el más viejo) y con él, el del susurro")
+  logout(up)
+end)
+
 -- Ejecuta un solo temporizador de la red simulada (el siguiente).
 local function runOne()
   local best, index
