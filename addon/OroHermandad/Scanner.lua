@@ -290,6 +290,7 @@ function Scanner.Init(accountDB, charDB, callbacks)
   cdb.scanner = type(cdb.scanner) == "table" and cdb.scanner or {}
   if cdb.scanner.ownSeen ~= "yes" and cdb.scanner.ownSeen ~= "no" then cdb.scanner.ownSeen = nil end
   if not isInt(cdb.scanner.ownMiss, 1, 1000) then cdb.scanner.ownMiss = nil end
+  if cdb.scanner.ownEver ~= true then cdb.scanner.ownEver = cdb.scanner.ownSeen == "yes" or nil end
   cdb.scanner.cancelAt = cleanMap(cdb.scanner.cancelAt, validMarket, isTime)
   S, cs = db.scanner, cdb.scanner
   pruneCancels()
@@ -512,7 +513,7 @@ end
 -- escaneo posterior). Cubre también lo que el «no» no ve: tras entrar o un /reload, las subastas de antes no suman
 -- escaneos sin las tuyas (podrían haberse vendido sin conexión).
 local function cancelledSince(key, base)
-  return cs.ownSeen ~= "yes" and (cs.cancelAt[key] or 0) >= snapOf(base)
+  return cs.ownSeen ~= "yes" and not cs.ownEver and (cs.cancelAt[key] or 0) >= snapOf(base)
 end
 
 local expectedOwn
@@ -520,7 +521,8 @@ local expectedOwn
 -- La misma regla que la medida de finishBegin, salvo lo que solo sabe el escaneo (tramos, si salen tus subastas).
 function Scanner.PairDue(key, t)
   t = t or now()
-  if not Scanner.RecordDue(key, t) or cs.ownSeen == "no" then return false end
+  if not Scanner.RecordDue(key, t) then return false end
+  if cs.ownSeen == "no" and not (cs.ownEver and expectedOwn(key, t) == 0) then return false end
   local base = cdb.scanBase[key]
   if not base or base.t < (S.sampledUntil[key] or 0) or cancelledSince(key, base) then return false end
   local age = t - base.t
@@ -720,6 +722,7 @@ function Scanner.DecodeLevels(text)
     if #list == 0 then return nil end
     levels[#levels + 1] = {price, list}
   end
+  if #levels == 0 then return nil end
   return levels
 end
 
@@ -1530,17 +1533,20 @@ local function finishBegin(job)
   -- Subastas no se ha abierto o queda alguna seguida a la venta), todo sigue igual: tras un /reload, las de antes no
   -- suman, y la cuenta no debe perderse. Salvo si ya consta que el escaneo reconoce las tuyas (ownSeen «yes»): ahí un
   -- escaneo sin ver ninguna (vendida justo antes, una lista de la pestaña Subastas sin refrescar) no dice que el
-  -- cliente no las reconozca, y solo cuentan los seguidos (un escaneo que no esperaba ninguna quita la cuenta).
+  -- cliente no las reconozca, y solo cuentan los seguidos (un escaneo que no esperaba ninguna quita la cuenta). Lo
+  -- mismo si algún escaneo ya vio alguna tuya en este personaje (ownEver): el cliente sí las reconoce, y un «no» de
+  -- una lista sin refrescar se quita en el siguiente escaneo que no espera ninguna (y ese mide).
   local cleared = false
-  if job.ownRows > 0 then cs.ownSeen, cs.ownMiss = "yes", nil
+  if job.ownRows > 0 then cs.ownSeen, cs.ownMiss, cs.ownEver = "yes", nil, true
   else
     local expected, none, listed = expectedOwn(key, t, job.req and job.req.t)
     stats.ownedAuctions = listed
     if expected > 0 then
       cs.ownMiss = (cs.ownMiss or 0) + 1
       if cs.ownMiss >= Scanner.OWN_MISSES then cs.ownSeen = "no" end
-    elseif cs.ownSeen == "yes" then
+    elseif cs.ownSeen == "yes" or cs.ownEver then
       cs.ownMiss = nil
+      if cs.ownSeen == "no" then cs.ownSeen = "yes" end
     elseif none then
       cleared = cs.ownSeen == "no" or cs.ownMiss ~= nil
       cs.ownMiss = nil

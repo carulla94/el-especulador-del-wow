@@ -1477,7 +1477,9 @@ test("Ventas: lo vendido sin conexión, sin aviso o con «Apuntar mis ventas» a
   Scanner.SetSales(true)
   -- 4) Una tuya que no sale en dos escaneos: «no». Cancelada desde la pestaña Subastas (su lista, entera, ya no tiene
   -- ninguna activa; las vendidas de antes, aún sin caducar, salen vendidas): el siguiente escaneo quita la marca sin
-  -- medir (su referencia es de cuando no se reconocían) y la pareja vuelve a medir.
+  -- medir (su referencia es de cuando no se reconocían) y la pareja vuelve a medir. Como en un personaje cuyas subastas
+  -- ningún escaneo ha reconocido nunca (las de arriba sí se reconocieron: ownEver).
+  cs().ownEver = nil
   Stub.advance(2400)
   standardHouse()
   Stub.openAH(); Stub.advance(3)
@@ -1891,6 +1893,71 @@ test("Tus subastas reconocidas: dos escaneos sin ver ninguna con días de por me
     eq(due, true, "día " .. d); assert(p and p.dt, "la pareja mide, día " .. d); eq(p.sold, 0)
   end
   Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+end)
+
+test("Tus subastas reconocidas alguna vez: un «no» por una lista sin refrescar se quita en el siguiente escaneo que no espera ninguna, también tras entrar, y ese mide", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  local me = UnitName("player")
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  boot()
+  setNow(dayStart(10))
+  standardHouse({{2772, 3, 140, {band = 3, owner = me}}})
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 3, 140, 8031)
+  scanNow()
+  eq(cs().ownSeen, "yes"); eq(cs().ownEver, true, "un escaneo vio una tuya")
+  notify("AuctionSold", "", 8031)
+  Stub.closeAH()
+  -- La pestaña Subastas se abrió una vez y su lista se quedó sin refrescar: da activa una que ya se vendió. Dos escaneos
+  -- seguidos sin ver ninguna: «no» (como antes).
+  Stub.advance(86400)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {{status = 0, buyoutAmount = 420, auctionID = 8031}}, true
+  scanRows(0)
+  scanRows(2400)
+  eq(cs().ownSeen, "no"); eq(cs().ownMiss, 2)
+  -- La lista se refresca (ya no la trae): el siguiente escaneo no espera ninguna. La pareja toca, el «no» se quita y mide.
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  local due, p = scanRows(2400)
+  eq(due, true, "la pareja toca"); eq(cs().ownSeen, "yes"); eq(cs().ownMiss, nil)
+  assert(p and p.dt, "mide"); eq(p.sold, 0)
+  -- Otra vez en «no» y al día siguiente se entra (la lista sin pedir): el primer escaneo lo quita, la pareja mide.
+  Stub.ah.ownedList, Stub.ah.ownedFull = {{status = 0, buyoutAmount = 420, auctionID = 8031}}, true
+  scanRows(2400); scanRows(2400)
+  eq(cs().ownSeen, "no")
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  Stub.advance(86400)
+  reload()
+  eq(cs().ownEver, true, "se guarda")
+  scanRows(0)
+  eq(cs().ownSeen, "yes"); eq(cs().ownMiss, nil)
+  due, p = scanRows(2400)
+  eq(due, true); assert(p and p.dt, "mide tras entrar")
+  -- Guardado de antes de la 0.6.0 final: un «yes» ya lo demuestra; otra cosa que no sea true se quita.
+  OroHermandadCharDB.scanner.ownEver = nil
+  reload()
+  eq(cs().ownEver, true, "del «yes» de antes")
+  OroHermandadCharDB.scanner.ownEver, OroHermandadCharDB.scanner.ownSeen = "si", nil
+  reload()
+  eq(cs().ownEver, nil, "solo true")
+end)
+
+test("Referencia con un texto sin niveles («;»): no se mide con ella y nada falla", function()
+  eq(Scanner.DecodeLevels(";"), nil); eq(Scanner.DecodeLevels(";;"), nil)
+  local me = UnitName("player")
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  boot()
+  setNow(dayStart(11))
+  standardHouse({{2772, 3, 140, {band = 3, owner = me}}})
+  Stub.openAH(); Stub.advance(3)
+  scanNow()
+  Stub.closeAH()
+  local base = OroHermandadCharDB.scanBase[KEY]
+  assert(base and base.items[2772], "referencia del hierro")
+  reload(function() OroHermandadCharDB.scanBase[KEY].items[2772] = ";" end)
+  Scanner.lastError = nil
+  local due, p = scanRows(2400)
+  eq(due, true); assert(p, "grabado")
+  eq(Scanner.lastError, nil, "sin fallo interno")
 end)
 
 test("Ventas: cancelar mientras llega la respuesta del escaneo quita la pareja que parte de él (la foto es de la petición)", function()
