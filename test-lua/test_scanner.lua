@@ -1476,8 +1476,8 @@ test("Ventas: lo vendido sin conexión, sin aviso o con «Apuntar mis ventas» a
   eq(due, true); assert(p.dt, "apagado: la medida sigue")
   Scanner.SetSales(true)
   -- 4) Una tuya que no sale en dos escaneos: «no». Cancelada desde la pestaña Subastas (su lista, entera, ya no tiene
-  -- ninguna): el siguiente escaneo quita la marca sin medir (su referencia es de cuando no se reconocían) y la pareja
-  -- vuelve a medir.
+  -- ninguna activa; las vendidas de antes, aún sin caducar, salen vendidas): el siguiente escaneo quita la marca sin
+  -- medir (su referencia es de cuando no se reconocían) y la pareja vuelve a medir.
   Stub.advance(2400)
   standardHouse()
   Stub.openAH(); Stub.advance(3)
@@ -1485,7 +1485,11 @@ test("Ventas: lo vendido sin conexión, sin aviso o con «Apuntar mis ventas» a
   for _ = 1, 2 do Stub.advance(1900); scanNow() end
   eq(cs().ownSeen, "no")
   Stub.fire("AUCTION_CANCELED", 5401)
-  Stub.ah.ownedList, Stub.ah.ownedFull = {}, true
+  Stub.ah.ownedList = {}
+  for _, id in ipairs({5201, 5202, 5301, 5302}) do
+    Stub.ah.ownedList[#Stub.ah.ownedList + 1] = {status = 1, buyoutAmount = 990, auctionID = id}
+  end
+  Stub.ah.ownedFull = true
   Stub.advance(1900)
   local before = lastPoint(2772).t
   scanNow()
@@ -1784,18 +1788,244 @@ test("Ventas: con tus subastas reconocidas cancelar no quita la pareja; una sin 
   eq(cs().cancelAt[KEY], nil, "neutral: no se apunta")
   due, p = scanRows(2400)
   eq(due, true); assert(p and p.dt, "la pareja mide")
-  -- Al cargar: fuera lo que no vale y lo que ya no toca ninguna referencia (de antes de ella o sin ella); se queda la
-  -- cancelación posterior a la referencia de un mercado.
-  local baseT = OroHermandadCharDB.scanBase[KEY].t
+  -- Al cargar: fuera lo que no vale y lo que ya no toca ninguna referencia (de antes de su foto, la hora de su petición,
+  -- o sin ella); se queda la cancelación posterior a la petición de la referencia de un mercado (también mientras
+  -- llegaba su respuesta).
+  local baseT, baseQ = OroHermandadCharDB.scanBase[KEY].t, OroHermandadCharDB.scanBase[KEY].q
+  eq(baseQ, baseT - 2, "la petición, 2 s antes de la respuesta")
   cs().cancelAt = {[KEY] = baseT + 1, ["Otro-Horde"] = baseT + 1, ["mal"] = baseT, ["Reino-Alliance"] = "x"}
   reload()
   eq(dump(cs().cancelAt), dump({[KEY] = baseT + 1}))
-  cs().cancelAt[KEY] = baseT - 1
+  cs().cancelAt[KEY] = baseQ
+  reload()
+  eq(cs().cancelAt[KEY], baseQ, "cancelada al pedir la referencia")
+  cs().cancelAt[KEY] = baseQ - 1
   reload()
   eq(next(cs().cancelAt), nil, "anterior a la referencia")
+  -- Una referencia con una petición que no vale (posterior a su respuesta, o no es una hora) la pierde: vale su t.
+  OroHermandadCharDB.scanBase[KEY].q = baseT + 5
+  reload()
+  eq(OroHermandadCharDB.scanBase[KEY].q, nil, "petición posterior a la respuesta")
+  eq(OroHermandadCharDB.scanBase[KEY].t, baseT)
+  OroHermandadCharDB.scanBase[KEY].q = "x"
+  reload()
+  eq(OroHermandadCharDB.scanBase[KEY].q, nil, "no es una hora")
   cs().cancelAt = "x"
   reload()
   eq(type(cs().cancelAt), "table")
+end)
+
+-- Pide el escaneo con la subasta abierta y, a los 1 s (la respuesta llega a los 2 s: su foto es de la petición), hace
+-- during(); lo lee hasta el final.
+local function scanWhile(during)
+  assert(Scanner.Request(true))
+  Stub.advance(1)
+  during()
+  Stub.runUntil(function() return not busy() end, 120)
+  Stub.runUntil(function() return History.Pending() == 0 end, 30)
+end
+
+test("Tus subastas reconocidas: lo que publicas mientras llega o se lee la respuesta no cuenta como no visto (tampoco si la pestaña Subastas ya lo trae)", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  local me = UnitName("player")
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  boot()
+  setNow(dayStart(9))
+  -- Reconocidas: tu lote sale con tu nombre.
+  standardHouse({{2772, 3, 140, {band = 3, owner = me}}})
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 3, 140, 8001)
+  scanNow()
+  eq(cs().ownSeen, "yes")
+  notify("AuctionSold", "", 8001)
+  Stub.closeAH()
+  -- Dos días: abres la subasta, pides el escaneo y, antes de que llegue la respuesta, publicas 5 de hierro (no está en
+  -- la foto); el segundo día, además, abres la pestaña Subastas (su lista, entera, ya lo trae). Se vende antes de volver.
+  for d = 1, 2 do
+    Stub.advance(86400)
+    standardHouse()
+    Stub.openAH(); Stub.advance(3)
+    scanWhile(function()
+      postCommodity(2772, 5, 120, 8100 + d)
+      standardHouse({{2772, 5, 120, {band = 3, owner = me}}})
+      if d == 2 then Stub.ah.ownedList, Stub.ah.ownedFull = {{status = 0, buyoutAmount = 600, auctionID = 8102}}, true end
+    end)
+    eq(Scanner.Internals().stats.lastRead.ownRows, 0, "no está en la foto, día " .. d)
+    eq(cs().ownSeen, "yes", "día " .. d); eq(cs().ownMiss, nil, "publicado después de pedir, día " .. d)
+    notify("AuctionSold", "", 8100 + d)
+    Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+    Stub.closeAH()
+  end
+  -- Al tercer día, sin nada a la venta, la pareja mide.
+  Stub.advance(86400)
+  local due, p = pairWithoutOwn()
+  eq(due, true, "la pareja toca"); assert(p.dt, "con ventas"); eq(cs().ownSeen, "yes")
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+end)
+
+test("Tus subastas reconocidas: dos escaneos sin ver ninguna con días de por medio no quitan la medida; el que no esperaba ninguna quita la cuenta y mide", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  local me = UnitName("player")
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  boot()
+  setNow(dayStart(9))
+  standardHouse({{2772, 3, 140, {band = 3, owner = me}}})
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 3, 140, 8011)
+  scanNow()
+  eq(cs().ownSeen, "yes")
+  notify("AuctionSold", "", 8011)
+  Stub.closeAH()
+  -- Una lista de la pestaña Subastas sin refrescar da activa una que ya no está: un escaneo sin ver ninguna (la cuenta
+  -- va por 1). El siguiente no espera ninguna: quita la cuenta y mide (consta que el escaneo reconoce las tuyas), con la
+  -- lista sin pedir (día 1) o entera y vacía (día 2).
+  local due, p
+  for d = 1, 2 do
+    Stub.advance(86400)
+    Stub.ah.ownedList, Stub.ah.ownedFull = {{status = 0, buyoutAmount = 600, auctionID = 8200 + d}}, true
+    scanRows(0)
+    eq(cs().ownMiss, 1, "día " .. d); eq(cs().ownSeen, "yes")
+    Stub.ah.ownedList, Stub.ah.ownedFull = {}, d == 2
+    due, p = scanRows(2400)
+    eq(cs().ownMiss, nil, "un escaneo que no esperaba ninguna quita la cuenta, día " .. d); eq(cs().ownSeen, "yes")
+    eq(due, true, "día " .. d); assert(p and p.dt, "la pareja mide, día " .. d); eq(p.sold, 0)
+  end
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+end)
+
+test("Ventas: cancelar mientras llega la respuesta del escaneo quita la pareja que parte de él (la foto es de la petición)", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  local lot = {{2772, 10, 99, {band = 3}}} -- tu lote, sin tu nombre como dueño
+  -- Con referencia de ayer: pides el escaneo y, antes de que llegue la respuesta, cancelas el lote (de otra sesión). La
+  -- foto, tomada al pedir, lo tiene como del mercado.
+  boot()
+  setNow(dayStart(9))
+  standardHouse(lot)
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 10, 99, 8301)
+  Stub.closeAH()
+  reload()
+  scanRows(0, lot)
+  Stub.advance(86400)
+  standardHouse(lot)
+  Stub.openAH(); Stub.advance(3)
+  local cancelT
+  scanWhile(function()
+    Stub.fire("AUCTION_CANCELED", 8301)
+    cancelT = cs().cancelAt[KEY]
+    standardHouse()
+  end)
+  Stub.closeAH()
+  local base, reqT = OroHermandadCharDB.scanBase[KEY], Stub.ah.calls[#Stub.ah.calls].at
+  assert(cancelT and reqT < cancelT and cancelT < base.t, "cancelado entre la petición y la respuesta")
+  assert(has(base.items[2772], "99:310"), "la referencia lo tiene: " .. base.items[2772])
+  eq(cs().cancelAt[KEY], cancelT, "se queda")
+  local due, p = scanRows(2400)
+  eq(due, false, "sin pareja"); assert(p, "grabado"); eq(p.dt, nil, "los 10 cancelados no son ventas"); eq(p.sold, nil)
+  due, p = scanRows(2400)
+  eq(due, true, "la pareja vuelve"); assert(p and p.dt, "mide"); eq(p.sold, 0)
+  eq(cs().cancelAt[KEY], nil, "ya no hace falta")
+  eq(OroHermandadCharDB.scanBase[KEY].q, Stub.ah.calls[#Stub.ah.calls].at, "la referencia guarda la hora de su petición")
+end)
+
+test("Ventas: cancelar mientras se lee el primer escaneo del personaje (sin referencia aún) quita la pareja que parte de él", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  local lot = {{2772, 10, 99, {band = 3}}} -- tu lote, sin tu nombre como dueño
+  local cancelT, base, due, p
+  -- Publicas, pides el escaneo y cancelas mientras se lee.
+  boot()
+  setNow(dayStart(9))
+  standardHouse(lot)
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 10, 99, 8351)
+  eq(OroHermandadCharDB.scanBase[KEY], nil, "sin referencia")
+  local fired
+  Stub.ah.onRowRead = function(i)
+    if i == 5 and not fired and state() == "reading" then
+      fired = true
+      Stub.fire("AUCTION_CANCELED", 8351)
+      cancelT = cs().cancelAt[KEY]
+    end
+  end
+  scanWhile(function() standardHouse() end)
+  Stub.ah.onRowRead = nil
+  Stub.closeAH()
+  assert(fired and cancelT, "cancelado mientras se leía y apuntado")
+  base = OroHermandadCharDB.scanBase[KEY]
+  assert(base.t < cancelT and has(base.items[2772], "99:310"), "la referencia, de antes, lo tiene")
+  eq(cs().cancelAt[KEY], cancelT, "se queda")
+  due, p = scanRows(2400)
+  eq(due, false, "sin pareja"); assert(p, "grabado"); eq(p.dt, nil, "los 10 cancelados no son ventas")
+  due, p = scanRows(2400)
+  eq(due, true); assert(p and p.dt, "la siguiente mide"); eq(p.sold, 0)
+end)
+
+test("Proponer: sin «pareja» antes del escaneo que quita la cuenta de escaneos sin las tuyas (ese no mide)", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+  boot()
+  setNow(dayStart(9))
+  -- Tu lote, sin tu nombre como dueño, no se reconoce en un escaneo: la cuenta va por 1.
+  houseWithOwn(10)
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 10, 99, 8401)
+  scanNow()
+  Stub.closeAH()
+  eq(cs().ownMiss, 1); eq(cs().ownSeen, nil)
+  -- Se vende entero y abres la pestaña Subastas (su lista, entera, lo da vendido): consta que no tienes ninguna.
+  notify("AuctionSold", "", 8401)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {{status = 1, buyoutAmount = 990, auctionID = 8401}}, true
+  Stub.advance(2400)
+  houseWithOwn()
+  Stub.openAH(); Stub.advance(3)
+  eq(Scanner.PairDue(KEY), false, "el escaneo quitará la cuenta y no medirá")
+  local prop = Scanner.Proposal()
+  assert(prop and prop.reason ~= "pareja", "sin propuesta de pareja: " .. tostring(prop and prop.reason))
+  local before = lastPoint(2772).t
+  scanNow()
+  Stub.closeAH()
+  eq(cs().ownMiss, nil); assert(lastPoint(2772).t > before, "grabado"); eq(lastPoint(2772).dt, nil, "no mide")
+  -- La siguiente, sí: se propone y mide.
+  Stub.advance(2400)
+  houseWithOwn()
+  Stub.openAH(); Stub.advance(3)
+  eq(Scanner.PairDue(KEY), true); eq(Scanner.Proposal().reason, "pareja")
+  scanNow()
+  Stub.closeAH()
+  assert(lastPoint(2772).dt, "mide"); eq(lastPoint(2772).sold, 0)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
+end)
+
+test("Ventas: una lista de la pestaña Subastas de antes de publicar no quita el «no» aunque tu mercancía avise de una venta parcial (el resto sigue a la venta)", function()
+  local cs = function() return OroHermandadCharDB.scanner end
+  boot()
+  setNow(dayStart(9))
+  -- Abres la pestaña Subastas sin nada a la venta (lista entera y vacía) y publicas 10 de hierro desde Vender: la lista
+  -- no se vuelve a pedir. Dos escaneos no reconocen tu lote: «no».
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, true
+  houseWithOwn(10)
+  Stub.openAH(); Stub.advance(3)
+  postCommodity(2772, 10, 99, 8501)
+  scanNow()
+  Stub.closeAH()
+  scanAfter(1900, 10)
+  eq(cs().ownSeen, "no"); eq(cs().ownMiss, 2)
+  -- Compran 4: la subasta avisa de una venta (queda marcada como vendida) y siguen 6 tuyas a la venta.
+  notify("AuctionSold", "", 8501)
+  assert(OroHermandadCharDB.auctions[8501]:match(",c,s$"), OroHermandadCharDB.auctions[8501])
+  for k = 1, 2 do
+    local due, p = scanAfter(1900, 6)
+    eq(cs().ownSeen, "no", "escaneo " .. k); eq(due, false); assert(p, "grabado"); eq(p.dt, nil, "sin ventas")
+  end
+  -- Cuando la lista, pedida otra vez, lo da vendido entero, ya consta: se quita sin medir y la pareja vuelve.
+  Stub.ah.ownedList = {{status = 1, buyoutAmount = 990, auctionID = 8501}}
+  local due, p = scanAfter(1900)
+  eq(cs().ownSeen, nil); eq(due, false); assert(p, "grabado"); eq(p.dt, nil, "el escaneo que quita el «no» no mide")
+  due, p = scanAfter(2400)
+  eq(due, true); assert(p and p.dt, "mide"); eq(p.sold, 0)
+  Stub.ah.ownedList, Stub.ah.ownedFull = {}, false
 end)
 
 test("Publicaciones: una rechazada, una confirmación cancelada o una venta de varias parada no se llevan la siguiente subasta", function()

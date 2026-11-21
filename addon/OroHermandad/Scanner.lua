@@ -241,10 +241,12 @@ local function isAuction(v)
     or v:match("^%d+,%d+,%d+,%d,%d+,[^,]+,c,s$") ~= nil)
 end
 
+-- Referencia de ventas: {t = hora del escaneo (el primer aviso de la respuesta), q = hora de su petición, off, items}.
 local function sanitizeBase(p)
   return cleanMap(p, validMarket, function(v)
     if type(v) ~= "table" or not isTime(v.t) or type(v.items) ~= "table" then return false end
     if v.off ~= nil and v.off ~= 0 and v.off ~= 1 then v.off = nil end
+    if v.q ~= nil and not (isTime(v.q) and v.q <= v.t) then v.q = nil end
     for id, text in pairs(v.items) do
       if not (isInt(id, 1, ID_MAX) and type(text) == "string" and text:match("^[%d:,;]+$")) then v.items[id] = nil end
     end
@@ -252,12 +254,18 @@ local function sanitizeBase(p)
   end, Scanner.BASE_MARKETS)
 end
 
--- cdb.scanner.cancelAt[mercado] = hora de la última subasta tuya cancelada allí. Solo sirve mientras la referencia de
--- ventas de ese mercado es de antes (§2.9): el resto se quita, así que quedan 2 mercados como mucho.
+-- Desde cuándo puede faltar algo en la foto de una referencia: la subasta la toma al pedirla (base.q), no cuando llega
+-- la respuesta (base.t, unos segundos después). Una referencia guardada sin q, su t.
+local function snapOf(base) return base.q or base.t end
+
+-- cdb.scanner.cancelAt[mercado] = hora de la última subasta tuya cancelada allí. Solo sirve mientras la foto de la
+-- referencia de ventas de ese mercado es de antes (§2.9): el resto se quita al cargar y al guardar una referencia, así
+-- que quedan 2 mercados como mucho. No al cancelar: sin referencia aún, la del escaneo en marcha (pedido antes de
+-- cancelar) puede tener lo cancelado como del mercado, y se decide al guardarla.
 local function pruneCancels()
   for key, at in pairs(cs.cancelAt) do
     local base = cdb.scanBase[key]
-    if not base or at < base.t then cs.cancelAt[key] = nil end
+    if not base or at < snapOf(base) then cs.cancelAt[key] = nil end
   end
 end
 
@@ -498,21 +506,32 @@ function Scanner.RecordDue(key, t)
   return (not last or t - last >= Scanner.RECORD_GAP) and recordedOn(key, Spec.DayIndex(t)) < Scanner.RECORD_PER_DAY
 end
 
--- ¿Cancelaste una subasta tuya en este mercado desde la referencia (base.t), sin que conste que el escaneo reconoce las
--- tuyas (ownSeen «yes»)? Entonces esa referencia pudo tenerla como del mercado y, al no salir ya, contaría como
--- vendida: esa pareja no mide (la siguiente parte de un escaneo posterior). Cubre también lo que el «no» no ve: tras
--- entrar o un /reload, las subastas de antes no suman escaneos sin las tuyas (podrían haberse vendido sin conexión).
-local function cancelledSince(key, since)
-  return cs.ownSeen ~= "yes" and (cs.cancelAt[key] or 0) >= since
+-- ¿Cancelaste una subasta tuya en este mercado desde la foto de la referencia (snapOf: también mientras llegaba o se
+-- leía su respuesta), sin que conste que el escaneo reconoce las tuyas (ownSeen «yes»)? Entonces esa referencia pudo
+-- tenerla como del mercado y, al no salir ya, contaría como vendida: esa pareja no mide (la siguiente parte de un
+-- escaneo posterior). Cubre también lo que el «no» no ve: tras entrar o un /reload, las subastas de antes no suman
+-- escaneos sin las tuyas (podrían haberse vendido sin conexión).
+local function cancelledSince(key, base)
+  return cs.ownSeen ~= "yes" and (cs.cancelAt[key] or 0) >= snapOf(base)
 end
 
+local expectedOwn
+
+-- La misma regla que la medida de finishBegin, salvo lo que solo sabe el escaneo (tramos, si salen tus subastas).
 function Scanner.PairDue(key, t)
   t = t or now()
   if not Scanner.RecordDue(key, t) or cs.ownSeen == "no" then return false end
   local base = cdb.scanBase[key]
-  if not base or base.t < (S.sampledUntil[key] or 0) or cancelledSince(key, base.t) then return false end
+  if not base or base.t < (S.sampledUntil[key] or 0) or cancelledSince(key, base) then return false end
   local age = t - base.t
-  return age >= Scanner.SAMPLE_MIN and age <= Scanner.PAIR_MAX
+  if age < Scanner.SAMPLE_MIN or age > Scanner.PAIR_MAX then return false end
+  -- Con la cuenta de escaneos sin las tuyas empezada y sin constar que se reconocen, si ya consta que no tienes ninguna
+  -- a la venta aquí, el escaneo quitará la cuenta y no medirá: no es una pareja.
+  if cs.ownSeen == nil and cs.ownMiss ~= nil then
+    local _, none = expectedOwn(key, t)
+    if none then return false end
+  end
+  return true
 end
 
 ---------------------------------------------------------------------------
@@ -883,7 +902,8 @@ function Scanner.OnAuctionCreated(auctionID)
 end
 
 -- AUCTION_CANCELED: esa subasta ya no está. Se apunta cuándo y en qué mercado (el de la seguida; si no se sigue, el de
--- tu facción salvo que sea una de la neutral): la pareja que empezó antes no mide ventas ahí (cancelledSince).
+-- tu facción salvo que sea una de la neutral): la pareja cuya foto es de antes no mide ventas ahí (cancelledSince).
+-- Aquí no se limpia cancelAt (pruneCancels): sin referencia de ese mercado, el escaneo en marcha guardará una de antes.
 function Scanner.OnAuctionGone(auctionID)
   local t = now()
   lastUserAction = t
@@ -896,7 +916,6 @@ function Scanner.OnAuctionGone(auctionID)
   if not where and visitHouse ~= "neutral" and not (id ~= nil and cdb.otherAuctions[id]) then where = market() end
   if not (t and validMarket(where)) then return end
   cs.cancelAt[where] = max(cs.cancelAt[where] or 0, t)
-  pruneCancels()
 end
 
 local function salesList(key) return decodeRecords(db.sales[key], 6) end
@@ -1371,47 +1390,58 @@ end
 -- Tus subastas según la pestaña Subastas (GetOwnedAuctionInfo, 200 como mucho): cuántas están activas con precio de
 -- compra (las vendidas que esperan en el correo no), cuántas hay, si la lista está entera (HasFullOwnedAuctionResults
 -- y no más de 200; también con ninguna: el cliente la llena solo al abrir la pestaña Subastas y, hasta entonces, da 0
--- sin estar entera, y ese 0 no dice nada) y, entera y con alguna, el estado de cada auctionID.
+-- sin estar entera, y ese 0 no dice nada), entera y con alguna, el estado de cada auctionID, y los auctionID de las
+-- activas con precio de compra.
 local function ownedAuctions()
   local ok, n = ah("GetNumOwnedAuctions")
   n = ok and readable(n) or nil
-  if not isInt(n, 0, 100000) then return 0, n, nil, false end
+  if not isInt(n, 0, 100000) then return 0, n, nil, false, {} end
   local okFull, full = ah("HasFullOwnedAuctionResults")
   full = (okFull and readable(full) == true and n <= Scanner.OWNED_MAX) and true or false
   local statusOf = (full and n > 0) and {} or nil
-  local active = 0
+  local active, activeIDs = 0, {}
   for i = 1, min(n, Scanner.OWNED_MAX) do
     local okInfo, info = ah("GetOwnedAuctionInfo", i)
     if okInfo and type(info) == "table" then
       local status, buyout, id = readable(info.status), readable(info.buyoutAmount), readable(info.auctionID)
-      if status == ACTIVE and type(buyout) == "number" and buyout > 0 then active = active + 1 end
+      if status == ACTIVE and type(buyout) == "number" and buyout > 0 then
+        active = active + 1
+        if id ~= nil then activeIDs[id] = true end
+      end
       if statusOf and id ~= nil then statusOf[id] = status end
     end
   end
-  return active, n, statusOf, full
+  return active, n, statusOf, full, activeIDs
 end
 
 -- Subastas de este personaje que deberían salir en el escaneo (las que suman un escaneo sin las tuyas): las seguidas de
 -- este mercado aún vigentes, sin aviso de venta y creadas en esta sesión (el aviso de venta solo llega con el personaje
 -- conectado: lo vendido mientras no estabas seguiría contando), y las que la pestaña Subastas da como activas con
--- precio de compra. Con esa lista entera, una seguida que sale vendida o que no sale ya no cuenta. Contar de menos solo
--- hace la comprobación más blanda.
+-- precio de compra. Con esa lista entera, una seguida que sale vendida o que no sale ya no cuenta. Tampoco las creadas
+-- después de snap (el segundo de la petición del escaneo: publicadas mientras llegaba o se leía la respuesta, no pueden
+-- salir en su foto), ni en esa lista. Contar de menos solo hace la comprobación más blanda.
 -- Devuelve también si consta que no tienes ninguna en este mercado, lo único que quita el «no»: la lista de la pestaña
--- Subastas entera y sin ninguna activa, y ninguna seguida de este mercado vigente y sin aviso de venta, sea de esta
--- sesión o de antes (tras un /reload o al entrar, las de antes siguen a la venta), salvo que esa lista la dé vendida.
-local function expectedOwn(key, t)
-  local active, owned, statusOf, full = ownedAuctions()
-  stats.ownedAuctions = type(owned) == "number" and (active .. " a la venta de " .. owned) or nil
-  local n, open = 0, 0
+-- Subastas entera y sin ninguna activa, y ninguna seguida de este mercado vigente, sea de esta sesión o de antes (tras un
+-- /reload o al entrar, las de antes siguen a la venta) y aunque haya avisado de una venta (una mercancía avisa con la
+-- primera compra parcial y el resto sigue a la venta), salvo que esa lista la dé vendida: puede ser de antes de
+-- publicarla (el cliente no la vuelve a pedir al publicar). Y, como tercer valor, el texto de /oro sondeo.
+expectedOwn = function(key, t, snap)
+  local listed, owned, statusOf, full, activeIDs = ownedAuctions()
+  local active, n, open = listed, 0, 0
   for auctionID, text in pairs(cdb.auctions) do
     local a = decodeAuction(text)
-    if a and a.market == key and not a.sold and auctionEnd(a) >= t then
-      local status = statusOf and statusOf[auctionID]
-      if sessionAuctions[auctionID] and (not statusOf or status == ACTIVE) then n = n + 1 end
-      if status == nil or status == ACTIVE then open = open + 1 end
+    if a then
+      local late = snap ~= nil and a.at > snap
+      if late and activeIDs[auctionID] then active = active - 1 end
+      if a.market == key and auctionEnd(a) >= t then
+        local status = statusOf and statusOf[auctionID]
+        if not (a.sold or late) and sessionAuctions[auctionID] and (not statusOf or status == ACTIVE) then n = n + 1 end
+        if status == nil or status == ACTIVE then open = open + 1 end
+      end
     end
   end
-  return n + active, full and active == 0 and open == 0
+  return n + active, full and listed == 0 and open == 0,
+    type(owned) == "number" and (listed .. " a la venta de " .. owned) or nil
 end
 
 -- Referencia de ventas de este personaje: los niveles más baratos de un objeto vigilado (sin tus subastas).
@@ -1451,7 +1481,8 @@ local function storeBaseline(job, key)
       items[id] = nil
     end
   end
-  cdb.scanBase[key] = {t = job.t, off = (job.known and job.bandsOK) and job.offset or nil, items = items}
+  local q = job.req and isTime(job.req.t) and min(job.req.t, job.t) or nil
+  cdb.scanBase[key] = {t = job.t, q = q, off = (job.known and job.bandsOK) and job.offset or nil, items = items}
   -- 2 mercados por personaje como mucho: fuera el escaneado hace más tiempo.
   local keys = {}
   for k in pairs(cdb.scanBase) do keys[#keys + 1] = k end
@@ -1496,14 +1527,20 @@ local function finishBegin(job)
   -- ¿Salen tus subastas en el escaneo? Si dos escaneos seguidos no ven ninguna cuando debería haberlas, en este
   -- personaje no se miden ventas, hasta que un escaneo vea alguna o conste que ya no tienes ninguna aquí (sin subastas
   -- tuyas, el escaneo no puede tomarlas por las del mercado). Si no se sabe (no se esperaba ninguna, pero la pestaña
-  -- Subastas no se ha abierto o queda alguna seguida a la venta), todo sigue igual.
+  -- Subastas no se ha abierto o queda alguna seguida a la venta), todo sigue igual: tras un /reload, las de antes no
+  -- suman, y la cuenta no debe perderse. Salvo si ya consta que el escaneo reconoce las tuyas (ownSeen «yes»): ahí un
+  -- escaneo sin ver ninguna (vendida justo antes, una lista de la pestaña Subastas sin refrescar) no dice que el
+  -- cliente no las reconozca, y solo cuentan los seguidos (un escaneo que no esperaba ninguna quita la cuenta).
   local cleared = false
   if job.ownRows > 0 then cs.ownSeen, cs.ownMiss = "yes", nil
   else
-    local expected, none = expectedOwn(key, t)
+    local expected, none, listed = expectedOwn(key, t, job.req and job.req.t)
+    stats.ownedAuctions = listed
     if expected > 0 then
       cs.ownMiss = (cs.ownMiss or 0) + 1
       if cs.ownMiss >= Scanner.OWN_MISSES then cs.ownSeen = "no" end
+    elseif cs.ownSeen == "yes" then
+      cs.ownMiss = nil
     elseif none then
       cleared = cs.ownSeen == "no" or cs.ownMiss ~= nil
       cs.ownMiss = nil
@@ -1512,15 +1549,16 @@ local function finishBegin(job)
   end
   -- Ventas solo si se va a grabar y hay referencia de este personaje de 15 min a 2 h antes, con los mismos tramos, y
   -- no anterior al último escaneo de la cuenta que ya midió ventas aquí (con un alter, las dos medidas se pisarían).
-  -- Tampoco el escaneo que quita el «no» (o la cuenta de escaneos sin las tuyas): su referencia es de un escaneo que no
-  -- reconoció tus subastas y puede tenerlas como si fueran del mercado (una que cancelaste contaría como vendida); la
-  -- siguiente pareja ya parte de este. Ni, sin constar que se reconocen, si cancelaste alguna aquí desde la referencia.
+  -- Tampoco el escaneo que quita el «no» (o la cuenta de escaneos sin las tuyas) sin constar que se reconocen: su
+  -- referencia es de un escaneo que no reconoció tus subastas y puede tenerlas como si fueran del mercado (una que
+  -- cancelaste contaría como vendida); la siguiente pareja ya parte de este. Ni, sin constar que se reconocen, si
+  -- cancelaste alguna aquí desde la foto de la referencia. PairDue sigue las mismas reglas.
   local base = cdb.scanBase[key]
   local dt = base and t - base.t
   job.base, job.dt = base, dt
   job.sampling = Scanner.AllowRecord(key, t) and base ~= nil and dt >= Scanner.SAMPLE_MIN and dt <= Scanner.SAMPLE_MAX
     and job.known and job.bandsOK and base.off == offset and cs.ownSeen ~= "no" and not cleared
-    and base.t >= (S.sampledUntil[key] or 0) and not cancelledSince(key, base.t)
+    and base.t >= (S.sampledUntil[key] or 0) and not cancelledSince(key, base)
   if job.sampling then
     job.sold, job.bought = {}, boughtIn(base.t, t)
     job.sampleStats = {items = 0, sold = 0, partial = 0, own = 0, dt = dt, from = base.t}
