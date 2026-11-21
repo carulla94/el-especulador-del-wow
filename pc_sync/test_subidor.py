@@ -831,6 +831,7 @@ RUNTIME_FILES = {
     "Lib/ensurepip/_bundled/pip.whl": "x", "Lib/site-packages/pip/__init__.py": "x", "Lib/site-packages/README.txt": "x",
     "Scripts/pip.exe": "x", "include/Python.h": "x", "libs/python313.lib": "x", "Doc/python.chm": "x",
     "Tools/scripts/x.py": "x", "tcl/nmake/x86_64-w64-mingw32-nmakehlp.exe": "x", "tcl/nmake/rules.vc": "x",
+    "python-3.13.17-amd64.exe": "installer",
     "tcl/tcl8.6/license.terms": "tcl", "tcl/tk8.6/license.terms": "tk",
     "Lib/testing_helpers.py": "kept: only the Lib/test folder goes",
 }

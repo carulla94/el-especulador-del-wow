@@ -6,8 +6,9 @@ Runs on the GitHub Actions Windows runner (.github/workflows/subidor-windows.yml
     python pc_sync/empaquetar_windows.py --salida "$RUNNER_TEMP/Subidor_Windows.zip"
 
 1. Copies sys.base_prefix into runtime/ without Lib/test, Lib/idlelib, Lib/turtledemo, Lib/ensurepip, what is in
-   Lib/site-packages, Scripts, include, libs, Doc, Tools, tcl/nmake and every __pycache__ (LICENSE.txt and the
-   Tcl/Tk license files stay); the app files into app/; writes «Abrir subidor.cmd» and LEEME.txt (CRLF).
+   Lib/site-packages, Scripts, include, libs, Doc, Tools, tcl/nmake, the python.org installer that GitHub's runners
+   leave in the folder (python-X.Y.Z-amd64.exe) and every __pycache__ (LICENSE.txt and the Tcl/Tk license files
+   stay); the app files into app/; writes «Abrir subidor.cmd» and LEEME.txt (CRLF).
 2. Writes the zip in sorted order with fixed timestamps and deflate level 9: the same sources give the same bytes.
 3. Extracts it into a fresh folder and runs the smoke tests there, all with -B and PYTHONDONTWRITEBYTECODE=1 (no .pyc
    in what players get): the runtime imports ssl, ctypes, tkinter and json; the whole pc_sync suite runs with that
@@ -68,6 +69,11 @@ def _trimmed(relative):
     """True for a path of the runtime (posix, relative to it) that does not go in the zip."""
     parts = relative.split("/")
     if "__pycache__" in parts or relative.endswith((".pyc", ".pyo")):
+        return True
+    # El instalador de python.org (python-3.13.17-amd64.exe, unos 27 MB) se queda dentro del Python de los runners
+    # de GitHub (actions/python-versions lo copia ahí para instalar); no forma parte del Python.
+    name = relative.lower()
+    if len(parts) == 1 and name.startswith("python-") and name.endswith(".exe"):
         return True
     for prefix in TRIMMED:
         if relative.lower() == prefix.lower() or relative.lower().startswith(prefix.lower() + "/"):
