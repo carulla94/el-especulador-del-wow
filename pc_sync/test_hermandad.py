@@ -1187,7 +1187,9 @@ class CliTests(Quiet):
                 if polls > 6:
                     raise h.AuthenticationError("parar")
                 return {"status": "ok", "events": []}
-        self.assertEqual(h.MARKER_POLLS * h.POLL_SECONDS, 3600)
+        self.assertEqual(h.MARKER_POLLS * h.POLL_SECONDS, 1800)
+        # Revisado cada media hora y reescrito a la hora: el aviso nunca llega a las 2 h con el subidor abierto.
+        self.assertLessEqual(h.MARKER_REFRESH + h.MARKER_POLLS * h.POLL_SECONDS, 5400)
         with patch.object(h, "MARKER_POLLS", 2):
             self.assertEqual(h.run(Uploader(), sleep=lambda s: None, marker=marker), 2)
         self.assertEqual(asked, [0, 2, 4, 6])
@@ -1236,6 +1238,28 @@ class PackagingTests(unittest.TestCase):
                        "python.org", "Add python.exe to PATH", "if errorlevel 1 pause"):
             self.assertIn(needle, text)
         self.assertNotIn("gld_", text)
+
+    def test_the_console_uploader_never_writes_pyc_next_to_itself(self):
+        """R2-10 (console download): every entry of Sincronizador_PC.zip has the same time, so a __pycache__ next to
+        hermandad.py would keep running the old sincronizar.py of the same size after extracting a new version over
+        it. Run as a script, hermandad.py writes no .pyc; imported (the window, these tests), it changes nothing."""
+        with tempfile.TemporaryDirectory() as folder:
+            app, cache = Path(folder).resolve() / "Sincronizador_PC", Path(folder).resolve() / "pyc"
+            app.mkdir()
+            for name in ("hermandad.py", "sincronizar.py"):
+                shutil.copyfile(HERE / name, app / name)
+            # pycache_prefix: whatever is written goes there, never next to the library of the Python that runs this.
+            result = subprocess.run([sys.executable, "-E", "-s", "-X", f"pycache_prefix={cache}", str(app / "hermandad.py"),
+                                     "--help"], cwd=str(app), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+            self.assertFalse((app / "__pycache__").exists())
+            written = sorted(p.name.split(".")[0] for p in cache.rglob("*.pyc"))
+            self.assertNotIn("sincronizar", written)
+            imported = subprocess.run([sys.executable, "-E", "-s", "-X", f"pycache_prefix={cache}", "-c",
+                                       "import sys, hermandad; print(sys.dont_write_bytecode)"], cwd=str(app),
+                                      stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+            self.assertEqual(imported.stdout.strip(), "False", imported.stderr[-2000:])
 
     def test_downloads_zip_ships_the_guild_uploader(self):
         script = (HERE.parent / "scripts" / "prepare-downloads.mjs").read_text(encoding="utf-8")
@@ -1602,8 +1626,8 @@ class RelayUploadTests(Quiet):
             self.assertEqual(series_of(first, "bbbb0001")[2589]["points"], [], "the mates' points stay out")
             self.assertEqual(series_of(first)[2589]["points"], [[NOW - 7200, 80, 350, 40]], "this account's stay in")
             self.assertEqual(len(series_of(first)[2589]["days"]), 15)
-            self.assertEqual(h.describe(event)[-1], "Cuenta CUENTA1: aviso: el envío pasaba de 2 MiB: esta vez van sin "
-                                                    "los puntos de los compañeros.")
+            self.assertEqual(h.describe(event)[-1], "Cuenta CUENTA1: aviso: el envío pasaba de 2 MiB: los puntos de "
+                                                    "escaneo de 1 compañero irán en el siguiente.")
             saved = self.state[str(self.file)]
             self.assertEqual((saved["file"], saved["payload"]), (None, None), "the file does not count as sent")
             self.assertIn("bbbb0001", saved["markets"][MIRAGE]["obs"])
@@ -1620,6 +1644,47 @@ class RelayUploadTests(Quiet):
             event = self.uploader(state={}).cycle()["events"][0]
             self.assertEqual((event.kind, event.partial), ("duplicate", False))
 
+    def test_over_2_mib_the_mates_points_go_a_few_mates_at_a_time_and_none_is_lost(self):
+        """R2-18: when every mate's points together do not fit, the points (and samples) of the mates with the oldest
+        scans wait and the next cycle sends them. Leaving out every mate's points at once kept their progress at 0, so
+        they never fitted and the file was recorded as sent without a single mate point."""
+        hist = relay_hist()
+        mates = [f"cccc000{m}" for m in range(1, 6)]               # cccc0001 has the newest scans
+
+        def points(m):
+            return ";".join(f"{NOW - 3600 * k - m},{100 + k},{300 + k},{30 + m},1800,{k % 3}" for k in range(1, 40))
+        hist["markets"][MIRAGE]["obs"] = {code: {"seen": NOW - 600 * m, "items": {
+            2589 + i: {"d": "2504,81,81,81,300,1,o", "p": points(m)} for i in range(4)}} for m, code in enumerate(mates, 1)}
+        write(self.file, saved_variables(hist))
+        complete = h.build_upload(hist, NOW)[0]
+
+        def without(codes):                                         # the upload without these mates' points
+            return {**complete, "markets": [{**complete["markets"][0], "observers": [
+                h._without_points(o) if o["obs"] in codes else o for o in complete["markets"][0]["observers"]]}]}
+        one = len(encoded(complete)) - len(encoded(without(mates[:1])))
+        with patch.object(h, "MAX_BODY_BYTES", len(encoded(without(mates))) + one * 5 // 2):   # two mates and a half
+            uploader = self.uploader()
+            events = [uploader.cycle()["events"][0] for _ in range(4)]
+        self.assertEqual([(e.kind, e.partial) for e in events],
+                         [("uploaded", True), ("uploaded", True), ("uploaded", False), ("unchanged", False)])
+        self.assertEqual(events[0].notes, ("el envío pasaba de 2 MiB: los puntos de escaneo de 3 compañeros irán en el "
+                                           "siguiente",))
+        sent = [{o["obs"]: {p[0] for s in o["items"] for p in s["points"]} for o in call["markets"][0]["observers"]
+                 if not o["self"]} for call in self.calls]
+        self.assertEqual([sorted(code for code, times in body.items() if len(times) > 1) for body in sent],
+                         [mates[:2], mates[2:4], mates[4:]], "the newest scans first, then the rest, two at a time")
+        expected = {code: {NOW - 3600 * k - m for k in range(1, 40)} for m, code in enumerate(mates, 1)}
+        self.assertEqual({code: set().union(*(body[code] for body in sent)) for code in mates}, expected,
+                         "every point of every mate reached the panel")
+        for call in self.calls:
+            for observer in call["markets"][0]["observers"][1:]:
+                for series in observer["items"]:
+                    self.assertEqual([s[0] for s in series.get("sold", [])], [p[0] for p in series["points"]],
+                                     "each point with its sample")
+        progress = self.state[str(self.file)]["markets"][MIRAGE]["obs"]
+        self.assertEqual({code: progress[code]["t"] for code in mates}, {code: NOW - 3600 - m for m, code in enumerate(mates, 1)})
+        self.assertEqual(self.state[str(self.file)]["file"], hashlib.sha256(self.file.read_bytes()).hexdigest())
+
     def test_series_and_body_limits_leave_the_mates_with_the_oldest_scans_for_later(self):
         hist = relay_hist()
         upload, seen = h.build_upload(hist, NOW)[0], h.observer_seen(hist)
@@ -1628,7 +1693,7 @@ class RelayUploadTests(Quiet):
         self.assertEqual([o["obs"] for o in json.loads(payload)["markets"][0]["observers"]], ["aaaa0001", "bbbb0004"])
         self.assertEqual(notes, ["1 compañero no cabe en este envío: irán en el siguiente"])
         steps, limit = [], len(encoded(upload)) - 1
-        for expected_notes in (["el envío pasaba de 2 MiB: esta vez van sin los puntos de los compañeros"],
+        for expected_notes in (["el envío pasaba de 2 MiB: los puntos de escaneo de 1 compañero irán en el siguiente"],
                                ["el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo"],
                                ["el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo",
                                 "1 compañero no cabe en este envío: irán en el siguiente"],
@@ -2040,6 +2105,31 @@ class FishingUploaderTests(Quiet):
         self.assertEqual([e.kind for e in pending], ["pending"])
         self.assertEqual(h.describe(pending[0]), ["Cuenta CUENTA1: WoW está guardando ForeverFishing.lua; se leerá en cuanto termine."])
 
+    def test_a_fishing_upload_that_did_not_reach_the_panel_goes_again_with_the_same_file(self):
+        """R2-13: a network error or a 429 of the fishing upload is marked as such (error.fishing) and the same
+        ForeverFishing.lua is posted again at the next attempt, as the window promises; it used to count as handled."""
+        limited = h.RetryableSyncError("El panel pide esperar antes del siguiente envío (HTTP 429).")
+        limited.cuota = True
+        failures, attempts = [h.RetryableSyncError("No se ha podido conectar con el panel."), limited], []
+
+        def flaky(*args, **kwargs):
+            attempts.append(args[2])
+            if failures:
+                raise failures.pop(0)
+            return self.fish_poster(*args, **kwargs)
+        uploader = self.uploader(flaky)
+        for expected in (["uploaded"], ["unchanged"]):
+            with self.assertRaises(h.RetryableSyncError) as raised:
+                uploader.cycle()
+            self.assertTrue(raised.exception.fishing)
+            self.assertEqual([e.kind for e in raised.exception.events], expected)
+        self.assertEqual(self.kinds(uploader), [("OroHermandad.lua", "unchanged"), ("ForeverFishing.lua", "fishing")])
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(len(set(attempts)), 1, "the same sessions every time")
+        self.assertEqual(self.kinds(uploader)[1], ("ForeverFishing.lua", "unchanged"))
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(len(self.calls), 1)
+
     def test_an_account_without_prices_or_without_forever_fishing(self):
         self.prices.unlink()
         result = self.uploader().cycle()
@@ -2218,13 +2308,24 @@ class UploadV060Tests(unittest.TestCase):
             lighter = h._without_points(observer)
             for series in lighter["items"]:
                 self.assertEqual((series["points"], "sold" in series), ([], False))
-        with patch.object(h, "MAX_BODY_BYTES", len(h.encode_json(upload)) - 50):     # the mates' points go first
+        with patch.object(h, "MAX_BODY_BYTES", len(h.encode_json(upload)) - 50):     # the oldest mates' points first
             payload, notes = h.encode_payload(upload, h.observer_seen(self.hist()))
-        sent = json.loads(payload)
-        for observer in sent["markets"][0]["observers"]:
+        sent = json.loads(payload)["markets"][0]["observers"]
+        self.assertEqual({o["obs"]: sorted(s["id"] for s in o["items"] if s["points"]) for o in sent},
+                         {"65c8ae44": [2770, 2772, 12365], "47da174e": [2770, 2772, 13446], "556e986d": [],
+                          "631b8919": []})
+        self.assertEqual({o["obs"]: sorted(s["id"] for s in o["items"] if "sold" in s) for o in sent},
+                         {"65c8ae44": [2770, 2772], "47da174e": [2770, 2772, 13446], "556e986d": [], "631b8919": []})
+        self.assertEqual(notes, ["el envío pasaba de 2 MiB: los puntos de escaneo de 2 compañeros irán en el siguiente"])
+        mates_bare = {**upload, "markets": [{**m, "observers": [o if o["self"] else h._without_points(o)
+                                                                for o in m["observers"]]} for m in upload["markets"]]}
+        with patch.object(h, "MAX_BODY_BYTES", len(h.encode_json(mates_bare)) + 10):  # every mate's points
+            payload, notes = h.encode_payload(upload, h.observer_seen(self.hist()))
+        sent = json.loads(payload)["markets"][0]["observers"]
+        for observer in sent:
             for series in observer["items"]:
                 self.assertEqual("sold" in series, observer["self"] and series["id"] in (2770, 2772))
-        self.assertEqual(notes, ["el envío pasaba de 2 MiB: esta vez van sin los puntos de los compañeros"])
+        self.assertEqual(notes, ["el envío pasaba de 2 MiB: los puntos de escaneo de 3 compañeros irán en el siguiente"])
         bare = {**upload, "markets": [{**m, "observers": [h._without_points(o) for o in m["observers"]]}
                                       for m in upload["markets"]]}
         with patch.object(h, "MAX_BODY_BYTES", len(h.encode_json(bare)) + 10):       # then this account's points
@@ -2291,6 +2392,28 @@ class StatusTests(unittest.TestCase):
         fresh = h.UploaderStatus()
         fresh.record_error(error, V06_NOW)
         self.assertEqual((fresh.aceptado, fresh.ultimo, fresh.quedan, fresh.aportan), (V06_NOW, "red", 23, None))
+
+    def test_an_error_of_the_fishing_upload_keeps_the_status_of_the_prices(self):
+        """R2-13: a network error or a 429 of ForeverFishing.lua is not a price attempt (an accepted fishing upload
+        would never clear it); a refused key is."""
+        data = v06_json("sync-response-v060.json")
+        status = h.UploaderStatus()
+        for estado in ("red", "cuota"):
+            error = h.RetryableSyncError("sin red")
+            error.cuota, error.fishing = estado == "cuota", True
+            error.events = [self.event("uploaded", data["accepted"])]
+            status.record_error(error, V06_NOW)
+            self.assertEqual(status.marker_state()["envio"], {"t": V06_NOW, "estado": "ok"}, estado)
+            error.events = []
+            self.assertFalse(status.record_error(error, V06_NOW + 60), estado)
+        status.record_error(h.RetryableSyncError("sin red"), V06_NOW + 60)       # a price upload that failed
+        self.assertEqual(status.ultimo, "red")
+        status.record_error(error, V06_NOW + 120)
+        self.assertEqual(status.ultimo, "red", "the latest price attempt stays")
+        refused = h.AuthenticationError("clave")
+        refused.fishing = True
+        self.assertTrue(status.record_error(refused, V06_NOW + 180))
+        self.assertEqual(status.ultimo, "clave")
 
     def test_the_config_copy_survives_restarts_and_bad_fields_are_ignored(self):
         status = h.UploaderStatus({"aceptado": 5, "ultimo": "ok", "suben": 2, "aportan": 7, "nueva": "0.7.0",

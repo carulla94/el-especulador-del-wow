@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import ntpath
+import os
 import queue
 import re
 import threading
@@ -54,6 +56,12 @@ BLOCKED_CONSOLE = ("Ya hay otro subidor funcionando en este PC (una ventana de c
                    "este.")
 BLOCKED_HIDDEN = ("Ya hay otro subidor funcionando en este PC (el antiguo que arranca oculto con Windows): quítalo y "
                   "vuelve a abrir este.")
+MIGRATED_AUTOSTART = "El subidor antiguo arrancaba con Windows. ¿Abrir esta ventana al iniciar Windows (minimizada)?"
+
+# Two copies of the window (a new version extracted in another folder): config["subidor"] says which one is the newest.
+OLD_COPY = ("Esta carpeta tiene la versión {esta} del subidor, pero en {carpeta} está la {otra}: cierra esta ventana y "
+            "abre aquella. El inicio con Windows y el acceso directo del escritorio no se cambian a esta carpeta.")
+SHORTCUT_MOVED = "El acceso directo del escritorio abría otra carpeta: ahora abre esta."
 
 # First run.
 WELCOME = ("Bienvenido. Basta con que una o dos personas de la hermandad tengan el subidor abierto: el addon de los "
@@ -194,6 +202,26 @@ def take_lock(home, stack, ask, *, task_installed=h.startup_task_installed, remo
             return "ok", MIGRATED
         pause(0.5)
     return "bloqueado", BLOCKED_HIDDEN
+
+
+def claim_copy(config, script, folder, version=None, exists=os.path.isfile):
+    """Whether this copy of the window may point the start with Windows and the desktop shortcut at its folder. script
+    and folder: this copy's subidor.pyw and folder (hermandad.launch_parts). config["subidor"] = {"programa",
+    "carpeta", "version"} remembers the newest copy opened (config.json is shared by every copy).
+    (True, moved, ""): this copy is recorded in config; moved says that another folder was recorded: the folder was
+    moved, or a newer or the same version was extracted elsewhere (with none recorded, False).
+    (False, False, text): another folder that still has its subidor.pyw holds a newer version. This is then the old
+    copy (opened from its old folder or an old shortcut) and must not take them back; config stays as it was."""
+    version = version or h.VERSION
+    known = config.get("subidor") if isinstance(config.get("subidor"), dict) else {}
+    other, theirs, mine = known.get("programa"), h.dotted_version(known.get("version")), h.dotted_version(version)
+    other = other if isinstance(other, str) and other else None
+    same = other is not None and ntpath.normcase(other) == ntpath.normcase(script)
+    if other is not None and not same and theirs and mine and theirs > mine and exists(other):
+        place = known.get("carpeta") if isinstance(known.get("carpeta"), str) else ntpath.dirname(other)
+        return False, False, OLD_COPY.format(esta=version, otra=known["version"], carpeta=place)
+    config["subidor"] = {"programa": script, "carpeta": folder, "version": version}
+    return True, other is not None and not same, ""
 
 
 def scan_accounts(folder):

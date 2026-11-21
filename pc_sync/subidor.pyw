@@ -17,6 +17,12 @@ import sys
 if sys.version_info < (3, 10):
     sys.exit("Necesitas Python 3.10 o superior.")
 
+# Sin .pyc junto al programa (app\__pycache__): al actualizar extrayendo el zip encima de la carpeta (Reemplazar), un
+# .pyc de la versión anterior cuyo .py nuevo tuviera la misma hora y el mismo tamaño seguiría ejecutando el código viejo.
+# Vale para «Abrir subidor.cmd», el acceso directo, el inicio con Windows y pyw -3 subidor.pyw (-E no deja usar
+# PYTHONDONTWRITEBYTECODE). Antes de importar hermandad y subidor_control.
+sys.dont_write_bytecode = True
+
 import argparse
 import contextlib
 import os
@@ -330,7 +336,9 @@ class Window:
 
 
 class App:
-    """Glue between the window, the controller, the Session in its thread and the engine."""
+    """Glue between the window, the controller, the Session in its thread and the engine. view: the class of the
+    widgets (Window; the tests give one without Tk)."""
+    view = Window
 
     def __init__(self, tk, ttk, root, home, *, protector, minimized=False):
         self.tk, self.root, self.home, self.protector = tk, root, Path(home), protector
@@ -343,7 +351,7 @@ class App:
         self.polls = 0
         self.config = {}
         self.stack = contextlib.ExitStack()
-        self.window = Window(tk, ttk, root, self)
+        self.window = self.view(tk, ttk, root, self)
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.report_callback_exception = self.callback_error
         if minimized:
@@ -367,18 +375,26 @@ class App:
             self.root.destroy()
             return False
         self.window.show_main()
-        if self.windows:                       # every start: a Run value of another folder now opens this one
-            h.repair_autostart()
-            self.window.autostart.set(h.autostart_installed())
         if outcome == "bloqueado":
+            if self.windows:
+                self.window.autostart.set(h.autostart_installed())
             self.controller.blocked(text)
         else:
-            self.locked = True
-            if text:
-                h.say(text)
-            self.load()
+            self.took_lock(text)
         self.root.after(c.POLL_MS, self.poll)
         return True
+
+    def took_lock(self, text):
+        """This window holds subidor.lock from now on: config.json is loaded and the upload starts. After removing the
+        old hidden start with Windows (MIGRATED), which started an uploader at every logon, the window offers to open
+        itself then: the Run value is only written when the user says yes."""
+        self.locked = True
+        if text:
+            h.say(text)
+        if (text == c.MIGRATED and self.windows and not h.autostart_installed()
+                and self.window.ask(c.MIGRATED_AUTOSTART)):
+            self.set_autostart(True)
+        self.load()
 
     def need_lock(self):
         """True while this window holds subidor.lock. Without it (state «bloqueado») nothing may save config.json or
@@ -391,10 +407,7 @@ class App:
                                     task_installed=lambda: h.startup_task_installed(hidden=True))
         self.window.show_main()
         if outcome == "ok":
-            self.locked = True
-            if text:
-                h.say(text)
-            self.load()
+            self.took_lock(text)
         else:
             self.controller.blocked(text)
         return False
@@ -403,6 +416,9 @@ class App:
         if not self.need_lock():
             return
         self.config = h.load_config(self.home)
+        if self.windows:                       # every start: what opens another folder now opens this one
+            self.claim_copy()
+            self.window.autostart.set(h.autostart_installed())
         missing = c.needed_steps(self.config, self.protector)
         if missing:
             self.controller.configuring()
@@ -416,6 +432,27 @@ class App:
                 if self.window.ask(c.SHORTCUT_OFFER):
                     self.create_shortcut()
         self.begin()
+
+    def claim_copy(self):
+        """The Run value and the desktop shortcut follow this copy when its folder was moved or a new version was
+        extracted elsewhere, and never go back to an older copy opened again from its old folder (c.claim_copy). The
+        copy is kept in config.json (a first run keeps it at «Empezar»)."""
+        _, script, folder = h.launch_parts()
+        before = self.config.get("subidor")
+        mine, moved, text = c.claim_copy(self.config, script, folder)
+        if not mine:
+            h.say(text)
+            return
+        h.repair_autostart()
+        if self.config.get("schema") != 1:
+            return
+        if self.config.get("subidor") != before:
+            with contextlib.suppress(OSError):
+                h.save_config(self.home, self.config)
+        if moved:
+            with contextlib.suppress(h.SyncError):
+                if h.create_shortcut(only_existing=True):
+                    h.say(c.SHORTCUT_MOVED)
 
     def begin(self, key=None):
         if not self.need_lock():

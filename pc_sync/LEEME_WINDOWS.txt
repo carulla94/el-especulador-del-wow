@@ -41,7 +41,8 @@ QUÉ HACE Y QUÉ NO
 ACTUALIZAR
 ----------
 Cierra el subidor, desbloquea el zip nuevo y extrae su carpeta encima de la anterior (Reemplazar).
-Tu clave y tu configuración se conservan.
+Tu clave y tu configuración se conservan. Si la extraes en otra carpeta, la versión nueva se queda
+con el inicio con Windows y el acceso directo del escritorio en cuanto la abres.
 
 Quien tiene el subidor actualiza primero el addon y el subidor (si no, el panel no recibe las
 ventas); después, el resto de la hermandad actualiza el addon.
@@ -50,6 +51,9 @@ ventas); después, el resto de la hermandad actualiza el addon.
 SI ALGO FALLA
 -------------
 - «Ver registro» abre %LOCALAPPDATA%\OroHermandad\registro.txt, con todo lo que ha hecho.
-- Si ya usabas el subidor antiguo que arrancaba oculto con Windows, la ventana te ofrece quitarlo.
+- Si ya usabas el subidor antiguo que arrancaba oculto con Windows, la ventana te ofrece quitarlo y
+  abrirse ella al iniciar Windows.
+- Si la ruta de esta carpeta es muy larga (más de unos 100 caracteres), Windows no puede abrir el
+  subidor al iniciar sesión: muévela a una ruta más corta, por ejemplo C:\OroHermandad.
 - «Más…» → «Borrar mis datos de este PC» borra la dirección, la carpeta, la clave cifrada y el
   inicio con Windows. Para quitar el subidor del todo, haz eso y borra esta carpeta.

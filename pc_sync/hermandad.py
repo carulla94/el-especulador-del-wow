@@ -41,6 +41,12 @@ if sys.version_info < (3, 10):
     print("Necesitas Python 3.10 o superior. Descárgalo de https://www.python.org/downloads/ y vuelve a abrir HERMANDAD.cmd.")
     sys.exit(1)
 
+if __name__ == "__main__":
+    # HERMANDAD.cmd: sin __pycache__ junto al programa. Todas las entradas del zip de descarga tienen la misma hora, y
+    # al extraer una versión nueva encima, un sincronizar.py del mismo tamaño seguiría usando el .pyc de la anterior.
+    # Importado (la ventana, las pruebas), no cambia nada: subidor.pyw ya lo hace por su cuenta.
+    sys.dont_write_bytecode = True
+
 import argparse
 import base64
 import calendar
@@ -965,13 +971,16 @@ def _without_points(observer):
 def encode_payload(upload, seen=None):
     """(payload, notes): compact UTF-8 JSON of at most 2 MiB and MAX_SERIES series. What does not fit is left for a
     later upload, and then notes is not empty (GuildUploader.handle does not record the file as sent, so the next
-    cycle sends the rest): guild mates beyond MAX_SERIES first; over 2 MiB the mates' scan points, then this
-    account's points (as before 0.4.0), then whole mates. Mates go in the order of seen ({(market, hash): newest scan
-    time}, observer_seen): the oldest scans are left out first."""
+    cycle sends the rest): guild mates beyond MAX_SERIES first; over 2 MiB the scan points of one mate after another
+    (their days still go) until it fits, then this account's points (as before 0.4.0), then whole mates. Mates go in
+    the order of seen ({(market, hash): newest scan time}, observer_seen): the oldest scans are left out first. Only
+    the mates whose points went move forward (accepted_progress), so the next upload (the same file again) carries
+    the points of the next ones until every mate's have gone. Leaving out every mate's points at once kept them all
+    at the same place, so they never fitted and never went."""
     seen = seen or {}
     mates = sorted(((seen.get((m["market"], o["obs"]), 0), o["obs"], m["market"], o)
                     for m in upload["markets"] for o in m["observers"] if not o["self"]), key=lambda x: x[:3])
-    deferred, relayed_points, own_points = set(), True, True
+    deferred, stripped, own_points = set(), set(), True
 
     def lighter():
         markets = []
@@ -981,7 +990,7 @@ def encode_payload(upload, seen=None):
                 if o["self"]:
                     observers.append(o if own_points else _without_points(o))
                 elif (m["market"], o["obs"]) not in deferred:
-                    o = o if relayed_points else _without_points(o)
+                    o = _without_points(o) if (m["market"], o["obs"]) in stripped else o
                     if o["items"]:
                         observers.append(o)
             markets.append({**m, "observers": observers})
@@ -994,8 +1003,17 @@ def encode_payload(upload, seen=None):
         deferred.add((market, code))
         total -= len(observer["items"])
     payload = encode_json(lighter())
-    if len(payload) > MAX_BODY_BYTES:
-        relayed_points = False
+    # Over 2 MiB: the points of the mate with the oldest scans wait, then the next one's, until it fits. The bytes each
+    # one saves are estimated (one encode per round, not per mate) and the result is measured again.
+    waiting = [(market, code, observer) for _, code, market, observer in mates
+               if (market, code) not in deferred and any(s["points"] for s in observer["items"])]
+    while len(payload) > MAX_BODY_BYTES and waiting:
+        excess = len(payload) - MAX_BODY_BYTES
+        while waiting and excess > 0:
+            market, code, observer = waiting.pop(0)
+            stripped.add((market, code))
+            bare = _without_points(observer)
+            excess -= len(encode_json(observer)) - (len(encode_json(bare)) if bare["items"] else -1)
         payload = encode_json(lighter())
     if len(payload) > MAX_BODY_BYTES:
         own_points = False
@@ -1017,8 +1035,9 @@ def encode_payload(upload, seen=None):
     notes = []
     if not own_points:
         notes.append("el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo")
-    elif not relayed_points:
-        notes.append("el envío pasaba de 2 MiB: esta vez van sin los puntos de los compañeros")
+    elif stripped - deferred:
+        notes.append("el envío pasaba de 2 MiB: los puntos de escaneo de "
+                     f"{plural(len(stripped - deferred), 'compañero', 'compañeros')} irán en el siguiente")
     if deferred:
         notes.append(f"{plural(len(deferred), 'compañero no cabe', 'compañeros no caben')} en este envío: irán en el siguiente")
     return payload, notes
@@ -1176,14 +1195,16 @@ MARKER_ESTADOS = ("ok", "clave", "red", "cuota", "rechazado")
 MARKER_VERSION = re.compile(r"[0-9][0-9.]{0,15}")
 MARKER_COUNT_MAX = 100_000   # suben, aportan and dia
 MARKER_LEFT_MAX = 1000       # quedan
-MARKER_REFRESH = 3600        # escrito older than this: written again (the addon says «no parece abierto» after 2 h)
+MARKER_REFRESH = 3600        # escrito older than this: written again. The game reads the marker only at login or
+                             # /reload and says «no parece abierto» if escrito was over 2 h old then
 MARKER_MIN_GAP = 60          # never written twice within a minute; a change waits («later») until then
 _MARKER_WRITTEN = re.compile(rb"\nOroHermandadSubidor = \{\n  formato = 1,\n  datos = 2,\n  escrito = ([0-9]{1,12}),\n")
 MARKER_DEFAULT_INTERFACE = "16001"
 MARKER_INTERFACE = re.compile(r"[0-9]{5,6}(?: *, *[0-9]{5,6})*")
 _TOC_INTERFACE = re.compile(r"##[ \t]*Interface[ \t]*:(.*)")
 MARKER_READ_BYTES = 64 * 1024
-MARKER_POLLS = 240           # the watch loop checks the marker again every 240 polls of 15 s (one hour)
+MARKER_POLLS = 120           # the watch loop checks the marker again every 120 polls of 15 s (half an hour): with
+                             # MARKER_REFRESH, escrito stays under 1.5 h old plus the time the cycles take
 MARKER_LINES = {
     "created": f"He creado el aviso {MARKER_SHOWN} para que Oro de Hermandad 0.4 sepa que este PC sube los precios de "
                "la hermandad y pida a tus compañeros los que te perdiste. Si el juego está abierto, sal del todo y "
@@ -1603,6 +1624,7 @@ class GuildUploader:
                 event = self.check_fishing(fishing, now)
             except (AuthenticationError, RetryableSyncError) as error:
                 error.events = events
+                error.fishing = True        # not a price upload: the status of the prices stays (UploaderStatus)
                 raise
             if event is not None:
                 events.append(event)
@@ -1652,6 +1674,9 @@ class GuildUploader:
         except RejectedUploadError as error:
             self.ignored[key] = observation.sha256
             return Event(source, "rejected", str(error))
+        except (AuthenticationError, RetryableSyncError):
+            self.settled.pop(key, None)     # not sent: the same file is read and sent again at the next attempt
+            raise
         self.remember(key, observation.sha256, digest, now)
         return Event(source, "fishing", result=result, upload={"sessions": len(sessions)})
 
@@ -1845,10 +1870,13 @@ class UploaderStatus:
 
     def record_error(self, error, now):
         """An error that stopped a cycle (run's on_error), after the events handled before it. True when something
-        changed."""
+        changed. A network error or wait of the Forever Fishing upload (error.fishing) is not a price upload, as in
+        record_result: the latest price attempt stays (an accepted fishing upload later would not clear it). A refused
+        key is the same for both."""
         before = self.to_config()
         self.record_result({"events": getattr(error, "events", ())}, now)
-        self.ultimo = error_estado(error)
+        if not getattr(error, "fishing", False) or isinstance(error, AuthenticationError):
+            self.ultimo = error_estado(error)
         return self.to_config() != before
 
     def marker_state(self):
@@ -2559,9 +2587,18 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "OroHermandadSubidor"
 SHORTCUT_NAME = "Oro de Hermandad · Subidor.lnk"
 AUTOSTART_MOVED = "El inicio con Windows apuntaba a otra carpeta: ahora abre esta."
+RUN_COMMAND_MAX = 260         # Windows only runs a Run value «no longer than 260 characters» (Run and RunOnce keys)
+AUTOSTART_TOO_LONG = ("La ruta de la carpeta del subidor es demasiado larga para el inicio con Windows. Mueve la "
+                      "carpeta a una ruta más corta (por ejemplo C:\\OroHermandad) y vuelve a intentarlo.")
+AUTOSTART_TOO_LONG_REMOVED = ("He quitado el inicio con Windows: la ruta de la carpeta del subidor es demasiado larga y "
+                              "Windows no lo abriría. Mueve la carpeta a una ruta más corta (por ejemplo C:\\OroHermandad) "
+                              "y vuelve a marcar «Abrir el subidor al iniciar Windows».")
+SHORTCUT_ABSENT = 3          # exit code of _SHORTCUT_SCRIPT when only an existing shortcut is rewritten and there is none
 _SHORTCUT_SCRIPT = ("$ErrorActionPreference = 'Stop'; "
                     "$d = [Environment]::GetFolderPath('Desktop'); "
-                    "$s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d $env:OROHERMANDAD_ACCESO)); "
+                    "$p = Join-Path $d $env:OROHERMANDAD_ACCESO; "
+                    "if ($env:OROHERMANDAD_SOLO_SI_EXISTE -and -not (Test-Path -LiteralPath $p)) { exit 3 }; "
+                    "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p); "
                     "$s.TargetPath = $env:OROHERMANDAD_PROGRAMA; "
                     "$s.Arguments = $env:OROHERMANDAD_ARGUMENTOS; "
                     "$s.WorkingDirectory = $env:OROHERMANDAD_CARPETA; "
@@ -2643,10 +2680,20 @@ def autostart_installed(registry=None):
         return False
 
 
+def run_command_fits(command):
+    """True when Windows runs this Run value: at most RUN_COMMAND_MAX characters (UTF-16 units, as Windows counts)."""
+    return len(command.encode("utf-16-le")) // 2 <= RUN_COMMAND_MAX
+
+
 def install_autostart(registry=None, command=None):
-    """Opens the window minimized when this Windows user logs on (visible on the taskbar; Task Manager lists it)."""
+    """Opens the window minimized when this Windows user logs on (visible on the taskbar; Task Manager lists it). A
+    command longer than Windows runs is refused (the checkbox would say on and nothing would open)."""
     try:
-        _run_key(registry).set(RUN_VALUE, command or autostart_command())
+        registry = _run_key(registry)
+        command = command or autostart_command()
+        if not run_command_fits(command):
+            raise SyncError(AUTOSTART_TOO_LONG)
+        registry.set(RUN_VALUE, command)
     except OSError:
         raise SyncError("Windows no ha dejado activar el inicio con Windows.") from None
 
@@ -2660,30 +2707,42 @@ def uninstall_autostart(registry=None):
 
 def repair_autostart(registry=None, command=None):
     """At every start of the window: a Run value that opens another folder (the folder was moved, or a new version
-    was extracted elsewhere) is pointed at this one; the user already chose to start with Windows. True when
-    rewritten (and said)."""
+    was extracted elsewhere) is pointed at this one; the user already chose to start with Windows. When this folder's
+    command is longer than Windows runs, the value is removed instead (it would open nothing, or an old copy) and the
+    window says why. True when the value changed (and it was said)."""
     try:
         registry = _run_key(registry)
         current, wanted = registry.get(RUN_VALUE), command or autostart_command()
-        if current is None or current == wanted:
+        if current is None or (current == wanted and run_command_fits(wanted)):
             return False
-        registry.set(RUN_VALUE, wanted)
+        if not run_command_fits(wanted):
+            registry.delete(RUN_VALUE)
+            said = AUTOSTART_TOO_LONG_REMOVED
+        else:
+            registry.set(RUN_VALUE, wanted)
+            said = AUTOSTART_MOVED
     except (OSError, SyncError):
         return False
-    say(AUTOSTART_MOVED)
+    say(said)
     return True
 
 
-def create_shortcut(app_dir=None, executable=None, runner=subprocess.run, env=None, exists=os.path.isfile):
+def create_shortcut(app_dir=None, executable=None, runner=subprocess.run, env=None, exists=os.path.isfile,
+                    only_existing=False):
     """«Oro de Hermandad · Subidor.lnk» on this user's desktop, written here (so it carries no Mark of the Web): it
     opens the window with the same pythonw.exe and arguments as the Run value, without --minimizado. PowerShell
-    gets the paths only through environment variables, never inside the command, and never shows a window."""
+    gets the paths only through environment variables, never inside the command, and never shows a window.
+    only_existing: only rewrite the shortcut that is already there (it opened another folder); returns False when
+    there is none."""
     if not _windows():
         raise SyncError("El acceso directo solo existe en Windows.")
     program, script, folder = launch_parts(app_dir, executable, exists)
     environment = dict(os.environ if env is None else env)
     environment.update({"OROHERMANDAD_ACCESO": SHORTCUT_NAME, "OROHERMANDAD_PROGRAMA": program,
                         "OROHERMANDAD_ARGUMENTOS": f'-E -s "{script}"', "OROHERMANDAD_CARPETA": folder})
+    environment.pop("OROHERMANDAD_SOLO_SI_EXISTE", None)
+    if only_existing:
+        environment["OROHERMANDAD_SOLO_SI_EXISTE"] = "1"
     shell = ntpath.join(environment.get("SystemRoot") or "C:\\Windows", "System32", "WindowsPowerShell", "v1.0",
                         "powershell.exe")
     try:
@@ -2691,6 +2750,8 @@ def create_shortcut(app_dir=None, executable=None, runner=subprocess.run, env=No
                         **_hidden(dict(env=environment, capture_output=True, stdin=subprocess.DEVNULL, timeout=60), True))
     except (OSError, subprocess.SubprocessError):
         result = None
+    if only_existing and result is not None and result.returncode == SHORTCUT_ABSENT:
+        return False
     if result is None or result.returncode != 0:
         raise SyncError("No se pudo crear el acceso directo: abre «Abrir subidor.cmd».")
     return True

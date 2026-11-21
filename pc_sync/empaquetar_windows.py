@@ -9,7 +9,8 @@ Runs on the GitHub Actions Windows runner (.github/workflows/subidor-windows.yml
    Lib/site-packages, Scripts, include, libs, Doc, Tools, tcl/nmake, the python.org installer that GitHub's runners
    leave in the folder (python-X.Y.Z-amd64.exe) and every __pycache__ (LICENSE.txt and the Tcl/Tk license files
    stay); the app files into app/; writes «Abrir subidor.cmd» and LEEME.txt (CRLF).
-2. Writes the zip in sorted order with fixed timestamps and deflate level 9: the same sources give the same bytes.
+2. Writes the zip in sorted order with a fixed timestamp per version (stamp) and deflate level 9: the same sources give
+   the same bytes.
 3. Extracts it into a fresh folder and runs the smoke tests there, all with -B and PYTHONDONTWRITEBYTECODE=1 (no .pyc
    in what players get): the runtime imports ssl, ctypes, tkinter and json; the whole pc_sync suite runs with that
    runtime; app/subidor.pyw --comprobar. Then the extracted tree must hold no __pycache__ or .pyc.
@@ -24,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -42,7 +44,8 @@ TRIMMED = ("Lib/test", "Lib/idlelib", "Lib/turtledemo", "Lib/ensurepip", "Script
            "tcl/nmake")
 EMPTIED = ("Lib/site-packages",)      # the folder stays (site.py expects it), its contents go
 SIGNED = (".exe", ".dll", ".pyd")
-STAMP = (2026, 11, 4, 0, 0, 0)
+STAMP = (2026, 11, 4, 0, 0, 0)       # el de la 0.6.0; cada versión lleva el suyo (stamp)
+VERSION_LINE = re.compile(rb'^VERSION = "([0-9]{1,6}(?:\.[0-9]{1,6}){0,3})"', re.M)
 MAX_BYTES = 30 * 1024 * 1024
 LAUNCHER = ("@echo off\r\n"
             "setlocal\r\n"
@@ -99,13 +102,33 @@ def entries(runtime, source=HERE):
     return files
 
 
+def stamp(version):
+    """The time of every entry of the zip of this version: STAMP plus 2 s per patch, 40 s per minor and 800 s per major
+    version counted from 0.6.0, within the same hour (0.6.0 -> 00:00:00, 0.6.1 -> 00:00:02, 0.7.0 -> 00:00:40; distinct
+    while patch and minor stay under 20). Explorer and 7-Zip give each extracted file that time, and Python checks a
+    .pyc only against the time and size of its .py: if two versions had the same time, a .py of the same size extracted
+    over the old folder (Reemplazar) would keep running the old .pyc of a __pycache__ there (the runtime writes them
+    for its own library). Never a whole hour apart either, so a summer time change cannot make two versions match."""
+    numbers = ([int(n) for n in version.split(".")] + [0, 0])[:3] if version else [0, 6, 0]
+    seconds = ((numbers[0] * 20 + numbers[1]) * 20 + numbers[2] - 120) % 1800 * 2
+    return STAMP[:4] + (seconds // 60, seconds % 60)
+
+
+def files_version(files):
+    """VERSION of the app/hermandad.py in files, or None."""
+    match = VERSION_LINE.search(files.get(f"{ROOT}/app/hermandad.py", b""))
+    return match.group(1).decode("ascii") if match else None
+
+
 def write_zip(files, path):
-    """The zip of files in sorted order, with fixed timestamps and attributes: the same files give the same bytes."""
+    """The zip of files in sorted order, with the time of their version (stamp) and fixed attributes: the same files
+    give the same bytes."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    when = stamp(files_version(files))
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name in sorted(files):
-            info = zipfile.ZipInfo(name, date_time=STAMP)
+            info = zipfile.ZipInfo(name, date_time=when)
             info.create_system = 0
             info.external_attr = 0
             info.compress_type = zipfile.ZIP_DEFLATED
