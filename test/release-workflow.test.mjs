@@ -529,12 +529,13 @@ test("the build script zips the TOC, the Lua files it lists, LEEME.md and CAMBIO
   assert.doesNotMatch(entries.get("OroHermandad/OroHermandad.toc")(), /\r/, "LF line endings, like the packager with -u");
 });
 
-test("no license file is added; CONTRIBUTING documents the two options and the release steps; README starts with CurseForge", () => {
+test("no license file is added; CONTRIBUTING documents the license chosen, how to change it and the release steps; README starts with CurseForge", () => {
   for (const name of ["LICENSE", "LICENSE.md", "LICENSE.txt"]) assert.ok(!fs.existsSync(path.join(root, name)), name);
   const contributing = read("CONTRIBUTING.md"), readme = read("README.md");
-  const license = contributing.slice(contributing.indexOf("## Licencia (pendiente)"));
-  assert.ok(contributing.includes("## Licencia (pendiente)"));
+  assert.ok(contributing.includes("\n## Licencia\n"));
+  const license = contributing.slice(contributing.indexOf("\n## Licencia\n"));
   assert.match(license, /Todos los derechos reservados/);
+  assert.match(license, /All Rights Reserved/);
   assert.match(license, /MIT/);
   assert.match(license, /## X-License: MIT/);
   assert.match(license, /\.pkgmeta/);
