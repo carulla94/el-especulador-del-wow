@@ -1,6 +1,6 @@
 # Instalar Oro de Hermandad
 
-Addon de WoW Forever que te dice cómo ganar oro: qué vender, fundir, fabricar o recoger, qué le sirve a tu hermandad y, desde la 0.6.0, a qué hora se vende mejor cada material. Escanea la subasta él mismo: **Auctionator ya es opcional**. Probado fuera del juego con las pruebas automáticas; las comprobaciones dentro del juego están en la lista de la versión.
+Addon de WoW Forever que te dice cómo ganar oro: qué vender, fundir, fabricar o recoger, qué le sirve a tu hermandad y, desde la 0.6.0, a qué hora se vende mejor cada material. Escanea la subasta él mismo: **Auctionator ya es opcional**. Probado con las pruebas automáticas y en el juego (cliente 1.60.1.71037, 22 de noviembre de 2026).
 
 ## 1. Instala el addon
 
