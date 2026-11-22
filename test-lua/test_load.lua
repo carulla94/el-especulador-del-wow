@@ -898,13 +898,14 @@ local function houseRows()
   Stub.ah.rows, Stub.ah.autoBump = rows, 299999
 end
 
-test("TOC 0.6.0: versión, notas, web, sin el número de CurseForge, archivos nuevos en su sitio y los mismos SavedVariables", function()
+test("TOC 0.6.0: versión, notas, web, el número de CurseForge, archivos nuevos en su sitio y los mismos SavedVariables", function()
   local toc = readFile("addon/OroHermandad/OroHermandad.toc")
   assert(toc:find("\n## Version: 0.6.0\n", 1, true), "versión")
   assert(toc:find("\n## Notes: Escanea la subasta con hora, te dice cuándo se vende mejor y te sugiere qué hacer para ganar oro "
     .. "con tus profesiones y tu hermandad. Auctionator es opcional.\n", 1, true), "notas")
   assert(toc:find("\n## X-Website: https://github.com/carulla94/el-especulador-del-wow\n", 1, true), "web")
-  assert(not toc:find("X-Curse-Project-ID", 1, true), "el número del proyecto lo pone una persona")
+  -- El número del proyecto de CurseForge (lo creó una persona): con él, «Publicar Oro de Hermandad» sube también allí.
+  assert(toc:find("\n## X-Curse-Project-ID: 1823630\n", 1, true), "número de CurseForge")
   assert(toc:find("\n## SavedVariables: OroHermandadDB, OroHermandadHist\n## SavedVariablesPerCharacter: OroHermandadCharDB\n", 1, true),
     "ningún SavedVariables nuevo")
   local files = {}

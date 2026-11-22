@@ -6,6 +6,7 @@
 ## IconTexture: Interface\Icons\INV_Misc_Coin_01
 ## Category: Profesiones
 ## X-Website: https://github.com/carulla94/el-especulador-del-wow
+## X-Curse-Project-ID: 1823630
 ## AddonCompartmentFunc: OroHermandad_OnCompartmentClick
 ## AddonCompartmentFuncOnEnter: OroHermandad_OnCompartmentEnter
 ## AddonCompartmentFuncOnLeave: OroHermandad_OnCompartmentLeave
