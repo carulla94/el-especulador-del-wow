@@ -608,9 +608,10 @@ function Data.Realm()
 end
 
 -- Un reino ya conocido que solo cambia en mayúsculas y minúsculas, con su grafía de verdad (o nil). El mercado y su
--- etiqueta en los precios compartidos distinguen mayúsculas: «camwow…» y «CAMWOW…» serían dos mercados. Por orden: los
--- que dio el juego, los de tus precios guardados (el más reciente primero), los del almacén de la hermandad y el de
--- reserva.
+-- etiqueta en los precios compartidos distinguen mayúsculas: «camwow…» y «CAMWOW…» serían dos mercados. Solo cuentan
+-- grafías que dio el juego: las que recuerda la cuenta y este personaje, las de las hermandades de la 0.5.x
+-- (guildRealms) y las de tus precios de antes de esta versión (dataRealms), más la de reserva. Nunca las claves que se
+-- crearon con un /oro reino: si no, un reino mal escrito en minúsculas «corregiría» después al que se escribe bien.
 local function knownSpelling(clean)
   local Guild = ns.Guild
   local fold = Guild and type(Guild.Fold) == "function" and Guild.Fold or string.lower
@@ -621,25 +622,15 @@ local function knownSpelling(clean)
     for faction in pairs(FACTIONS) do if same(db.realms[faction]) then return db.realms[faction] end end
   end
   if cdb and cdb.realmFrom == "juego" and same(cdb.realm) then return cdb.realm end
-  local best, bestAt
-  for key, market in pairs(savedMarkets() or {}) do
-    local realm, f
-    if type(key) == "string" then realm, f = key:match("^(.+)%-(%a+)$") end
-    if realm and FACTIONS[f] and same(realm) then
-      local at = finite(type(market) == "table" and market.updated)
-      if not best or at > bestAt or (at == bestAt and realm < best) then best, bestAt = realm, at end
+  local best
+  for _, list in ipairs({db and db.dataRealms, db and db.guildRealms}) do
+    if type(list) == "table" then
+      for _, realm in pairs(list) do
+        if same(realm) and (not best or realm < best) then best = realm end
+      end
     end
+    if best then return best end
   end
-  if best then return best end
-  local guildRealms = db and type(db.guildRealms) == "table" and db.guildRealms or {}
-  for _, realm in pairs(guildRealms) do
-    if same(realm) and (not best or realm < best) then best = realm end
-  end
-  for key in pairs(db and type(db.guilds) == "table" and db.guilds or {}) do
-    local realm = type(key) == "string" and key:match("^(.*)/[^/]+$") or nil
-    if realm and same(realm) and (not best or realm < best) then best = realm end
-  end
-  if best then return best end
   if same(Data.FALLBACK_REALM) then return Data.FALLBACK_REALM end
   return nil
 end

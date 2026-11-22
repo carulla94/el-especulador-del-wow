@@ -344,6 +344,30 @@ test("/oro reino con otras mayúsculas o con «-Alliance» pegado: la grafía de
   Stub.setRealm("Forever")
 end)
 
+test("Instalación nueva: el reino escrito en minúsculas (y ya usado al escanear) se corrige escribiéndolo bien", function()
+  Stub.setRealm("")
+  boot()
+  enterWorld()
+  Stub.printed = {}
+  slash("reino " .. OLD:lower())
+  eq(market(), OLD:lower() .. "-Alliance")
+  assert(printed("ojo: las mayúsculas cuentan"), chat())
+  scanAH()
+  assert(OroHermandadHist.markets[OLD:lower() .. "-Alliance"], "se grabó con el mal escrito")
+  -- Lo escribe exactamente como el de sus compañeros: ese manda (antes, la grafía del mal escrito lo «corregía»).
+  Stub.printed = {}
+  slash("reino " .. OLD)
+  eq(OroHermandadCharDB.realm, OLD); eq(market(), OLD_KEY)
+  -- Igual tras borrar, y al volver a entrar se queda el bueno.
+  slash("reino borrar")
+  slash("reino " .. OLD)
+  eq(market(), OLD_KEY)
+  boot(saved())
+  eq(market(), OLD_KEY, "tras volver a entrar")
+  Stub.setRealm("Forever")
+  noErrors()
+end)
+
 test("Reino de reserva: tras escanear sigue siendo «Forever» sin recordar (su «Forever-Alliance» no es un dato)", function()
   Stub.setRealm("")
   boot()
