@@ -1,6 +1,6 @@
 # Cambios de Oro de Hermandad
 
-## 0.6.0 (2026-11-20)
+## 0.6.0 (2026-11-22)
 
 - **Escáner propio de la subasta:** el addon escanea la subasta entera él mismo, con la hora de cada escaneo, en unos segundos y sin trabar el juego. Auctionator ya es opcional (si lo tienes, se siguen leyendo sus precios y su historial).
 - **Cuándo escanear:** en las opciones, «Proponerlo al abrir la subasta» (por defecto), «Escanear cada vez que abro la subasta» o «Solo con el botón»; también con `/oro escanear auto | proponer | off`. La ventana tiene una fila con el estado del escáner y el botón **Escanear**.
