@@ -436,13 +436,14 @@ test("Lo de la hermandad sigue al reino: /oro reino, /oro reino borrar y al volv
   slash("reino " .. OLD)
   eq(members().Eva and members().Eva.profs.alchemy, 90, "tras /oro reino")
   eq(OroHermandadDB.guilds["/Los Mineros"], nil); eq(OroHermandadDB.guilds["Forever/Los Mineros"], nil)
-  -- Lo guardado con «Forever» pasa al reino de verdad al volver a entrar (sin pisar lo que ya hay).
+  -- Lo que este personaje guardó con «Forever» de reserva (lo apuntó) pasa al reino de verdad al volver a entrar, junto
+  -- con lo que ya hay.
   boot({db = {guilds = {["Forever/Los Mineros"] = {members = {Eva = manual({alchemy = 90}), Ana = manual({mining = 5})}},
                         [OLD .. "/Los Mineros"] = {members = {Ana = manual({engineering = 150})}}}},
-        hist = oldHist({[OLD_KEY] = 3600})})
+        cdb = {fallbackGuild = "Los Mineros"}, hist = oldHist({[OLD_KEY] = 3600})})
   eq(ns.Guild.UpdateKey(), OLD .. "/Los Mineros")
-  eq(members().Eva.profs.alchemy, 90); eq(members().Ana.profs.engineering, 150); eq(members().Ana.profs.mining, nil)
-  eq(OroHermandadDB.guilds["Forever/Los Mineros"], nil)
+  eq(members().Eva.profs.alchemy, 90); eq(members().Ana.profs.engineering, 150); eq(members().Ana.profs.mining, 5)
+  eq(OroHermandadDB.guilds["Forever/Los Mineros"], nil); eq(OroHermandadCharDB.fallbackGuild, nil)
   -- Un amigo quitado no vuelve.
   slash("amigo borrar Eva")
   boot(saved())
@@ -462,6 +463,190 @@ test("/oro cuando tras /oro reino: el mercado nuevo se lee sin volver a entrar",
   Stub.runTimers(60)
   eq(cuandoHead():find(PENDING, 1, true), nil, "el nuevo, también")
   eq(ns.Timing.lastError, nil)
+  Stub.setRealm("Forever")
+end)
+
+---------------------------------------------------------------------------
+-- 5. Segunda revisión: juntar almacenes, «Forever» elegido y /oro reino borrar tras grabar con un reino mal escrito
+---------------------------------------------------------------------------
+test("De la 0.5.x con el reino vacío a la 0.6.0: lo de «/Hermandad» se junta con lo del reino de antes, sin perder nada", function()
+  Stub.setRealm("")
+  local t = math.floor(Stub.now)
+  boot({db = {guilds = {
+          [OLD .. "/Los Mineros"] = {members = {Ana = manual({engineering = 150}),
+                                                Luis = {roster = {level = 40, profs = {mining = 210}, seen = t - 10 * 86400}}}},
+          -- La 0.5.1 con el reino vacío: lo nuevo (Ana subió a 225 y aprendió alquimia; el roster de Luis, de hace 1 h).
+          ["/Los Mineros"] = {members = {Ana = manual({engineering = 225, alchemy = 90}),
+                                         Luis = {manual = {profs = {tailoring = 75}},
+                                                 roster = {level = 41, profs = {mining = 225}, seen = t - 3600}}}}}},
+        hist = oldHist({[OLD_KEY] = 3600})})
+  eq(realm(), OLD); eq(source(), "datos"); eq(market(), OLD_KEY)
+  eq(ns.Guild.UpdateKey(), OLD .. "/Los Mineros")
+  eq(members().Ana.profs.engineering, 225); eq(members().Ana.profs.alchemy, 90)
+  eq(members().Luis.profs.tailoring, 75); eq(members().Luis.profs.mining, 225); eq(members().Luis.level, 41)
+  eq(OroHermandadDB.guilds["/Los Mineros"], nil)
+  boot(saved())
+  eq(members().Ana.profs.engineering, 225, "tras volver a entrar"); eq(members().Ana.profs.alchemy, 90)
+  Stub.setRealm("Forever")
+end)
+
+test("«Forever» elegido con /oro reino: otro personaje de la cuenta con un reino de verdad no se lleva lo de su hermandad", function()
+  Stub.setRealm("")
+  -- El principal elige «Forever» (sus compañeros nuevos lo usan) y apunta amigos.
+  boot({hist = oldHist({[OLD_KEY] = 3600})})
+  eq(source(), "datos")
+  slash("reino forever")
+  eq(realm(), "Forever"); eq(source(), "manual")
+  slash("amigo Ana ingenieria 150")
+  ns.Guild.Handle("H2|40|mining=210|0|1", "Luis", "GUILD")
+  eq(ns.Guild.UpdateKey(), "Forever/Los Mineros")
+  local main = saved()
+  -- Un alt de la misma facción y hermandad: el reino de tus datos.
+  boot({db = main.db, hist = main.hist})
+  eq(realm(), OLD); eq(source(), "datos")
+  eq(ns.Guild.UpdateKey(), OLD .. "/Los Mineros")
+  eq(members().Ana, nil, "lo del principal no es suyo")
+  local alt = saved()
+  assert(alt.db.guilds["Forever/Los Mineros"], "sigue en su sitio")
+  -- El principal vuelve: todo sigue ahí, y lo que cambie tampoco se pierde con otra entrada del alt.
+  boot({db = alt.db, cdb = main.cdb, hist = alt.hist})
+  eq(realm(), "Forever"); eq(source(), "manual")
+  eq(members().Ana and members().Ana.profs.engineering, 150)
+  eq(members().Luis and members().Luis.profs.mining, 210)
+  slash("amigo Ana ingenieria 300")
+  main = saved()
+  boot({db = main.db, cdb = alt.cdb, hist = main.hist})
+  eq(ns.Guild.UpdateKey(), OLD .. "/Los Mineros")
+  boot({db = saved().db, cdb = main.cdb, hist = main.hist})
+  eq(members().Ana.profs.engineering, 300)
+  -- Con el de reserva (sin reino ni datos), en cambio, lo de la hermandad sí sigue al reino de verdad cuando lo hay.
+  boot()
+  eq(source(), "fijo")
+  slash("amigo Eva alquimia 90")
+  local fresh = saved()
+  Stub.setRealm("Nuevo")
+  boot(fresh)
+  eq(ns.Guild.UpdateKey(), "Nuevo/Los Mineros")
+  eq(members().Eva and members().Eva.profs.alchemy, 90)
+  eq(OroHermandadDB.guilds["Forever/Los Mineros"], nil)
+  Stub.setRealm("Forever")
+end)
+
+test("/oro reino borrar vuelve al reino de tus datos aunque ya se grabara algo con uno mal escrito; tus alts tampoco lo toman", function()
+  Stub.setRealm("")
+  local TYPO = "CAMWOWEU4Realm4"
+  boot({hist = oldHist({[OLD_KEY] = 3600})})
+  enterWorld()
+  eq(OroHermandadDB.dataRealms.Alliance, OLD, "anotado al cargar")
+  slash("reino " .. TYPO)
+  eq(market(), TYPO .. "-Alliance")
+  -- Solo abrir la subasta ya graba (los depósitos) en el mercado mal escrito, más reciente que el de siempre.
+  Stub.openAH(); Stub.runTimers(30); Stub.closeAH(); Stub.runTimers(30)
+  local typoMarket = OroHermandadHist.markets[TYPO .. "-Alliance"]
+  assert(typoMarket and typoMarket.updated > OroHermandadHist.markets[OLD_KEY].updated, "grabado y más reciente")
+  slash("reino borrar")
+  eq(realm(), OLD); eq(source(), "datos"); eq(market(), OLD_KEY)
+  ns = Stub.reload(DIR)
+  eq(realm(), OLD, "tras recargar"); eq(market(), OLD_KEY)
+  -- Con un escaneo entero grabado con el mal escrito, lo mismo; y un alt que entra por primera vez, el de siempre.
+  slash("reino " .. TYPO)
+  scanAH()
+  local sv = saved()
+  boot({db = Stub.deepCopy(sv.db), hist = Stub.deepCopy(sv.hist)})
+  eq(realm(), OLD); eq(source(), "datos"); eq(market(), OLD_KEY)
+  eq(OroHermandadCharDB.realm, OLD)
+  boot(sv)
+  eq(realm(), TYPO, "el principal sigue con el suyo hasta que lo borre"); eq(source(), "manual")
+  slash("reino borrar")
+  eq(realm(), OLD); eq(market(), OLD_KEY)
+  eq(OroHermandadDB.dataRealms.Alliance, OLD, "lo anotado no cambia")
+  -- Lo anotado se limpia al cargar (lo que no vale, fuera) y no se vuelve a anotar.
+  boot({db = {dataRealms = {Alliance = "A|B", Horde = "Forever", Neutral = OLD}}, hist = oldHist({[OLD_KEY] = 3600})})
+  eq(next(OroHermandadDB.dataRealms), nil); eq(source(), "fijo")
+  Stub.setRealm("Forever")
+end)
+
+---------------------------------------------------------------------------
+-- 6. Tercera revisión: lo de reserva es de cada personaje y lo anotado prefiere los reinos que dio el juego
+---------------------------------------------------------------------------
+test("Cuenta nueva: el principal pone el reino con /oro reino; el alt (aún con «Forever» de reserva) no pierde sus amigos", function()
+  Stub.setRealm("")
+  boot()
+  enterWorld()
+  eq(source(), "fijo")
+  eq(OroHermandadCharDB.fallbackGuild, "Los Mineros")
+  slash("reino " .. OLD)
+  slash("amigo Ana ingenieria 150")
+  scanAH()
+  eq(market(), OLD_KEY); eq(ns.Guild.UpdateKey(), OLD .. "/Los Mineros")
+  eq(OroHermandadCharDB.fallbackGuild, nil, "ya sabe su reino")
+  local main = saved()
+  -- El alt: el reino puesto a mano no es «de tus datos», así que sigue con el de reserva y apunta a sus amigos ahí.
+  boot({db = main.db, hist = main.hist})
+  enterWorld()
+  eq(realm(), "Forever"); eq(source(), "fijo")
+  slash("amigo Eva alquimia 50")
+  eq(members().Eva and members().Eva.profs.alchemy, 50)
+  local alt = saved()
+  -- Entra el principal (con su reino de verdad): lo del alt no es suyo y se queda donde está.
+  for round = 1, 2 do
+    boot({db = alt.db, cdb = main.cdb, hist = alt.hist})
+    enterWorld()
+    eq(source(), "manual"); eq(members().Ana and members().Ana.profs.engineering, 150)
+    eq(members().Eva, nil, "lo del alt no pasa al principal (" .. round .. ")")
+    main = saved()
+    boot({db = main.db, cdb = alt.cdb, hist = main.hist})
+    enterWorld()
+    eq(source(), "fijo")
+    eq(members().Eva and members().Eva.profs.alchemy, 50, "el alt sigue viendo a su amigo (" .. round .. ")")
+    alt = saved()
+  end
+  -- Cuando el alt pone el mismo reino, lo suyo se junta con lo del principal.
+  slash("reino " .. OLD)
+  eq(members().Eva and members().Eva.profs.alchemy, 50); eq(members().Ana and members().Ana.profs.engineering, 150)
+  eq(OroHermandadDB.guilds["Forever/Los Mineros"], nil)
+  Stub.setRealm("Forever")
+end)
+
+test("De la versión de pruebas con un reino mal escrito grabado: lo anotado es el reino que dio el juego, no el más reciente", function()
+  Stub.setRealm("")
+  local TYPO = "prueba"
+  local t = math.floor(Stub.now)
+  -- Lo que dejó la versión de pruebas: /oro reino prueba, abrir la subasta (graba «prueba-Alliance», más reciente) y
+  -- /oro reino borrar, que se quedó con «prueba» como «de tus datos».
+  local function testing()
+    local hist = oldHist({[OLD_KEY] = 7200, [TYPO .. "-Alliance"] = 60})
+    return {db = {guildRealms = {["Los Mineros"] = OLD},
+                  guilds = {[TYPO .. "/Los Mineros"] = {members = {Ana = manual({engineering = 150})}}}},
+            cdb = {realm = TYPO, realmFrom = "datos"}, hist = hist}
+  end
+  boot(testing())
+  eq(OroHermandadDB.dataRealms.Alliance, OLD, "el que dio el juego (el de tu hermandad en la 0.5.x)")
+  eq(realm(), TYPO, "este personaje sigue con el suyo hasta que lo borre")
+  slash("reino borrar")
+  eq(realm(), OLD); eq(source(), "datos"); eq(market(), OLD_KEY)
+  eq(ns.Guild.UpdateKey(), OLD .. "/Los Mineros")
+  eq(members().Ana and members().Ana.profs.engineering, 150, "lo de la hermandad vuelve con él")
+  -- Un alt que entra por primera vez: el de siempre.
+  local sv = testing()
+  boot({db = sv.db, hist = sv.hist})
+  eq(realm(), OLD); eq(source(), "datos"); eq(market(), OLD_KEY)
+  -- Lo mismo con el reino que dio el juego a un personaje de la otra facción (OroHermandadDB.realms).
+  sv = testing()
+  sv.db.guildRealms, sv.db.realms = {}, {Horde = OLD}
+  boot({db = sv.db, hist = sv.hist})
+  eq(OroHermandadDB.dataRealms.Alliance, OLD); eq(realm(), OLD); eq(source(), "datos")
+  -- Sin ningún reino del juego entre tus mercados, el del mercado escrito más recientemente, como antes.
+  sv = testing()
+  sv.db.guildRealms = {["Los Mineros"] = "Otro"}
+  boot({db = sv.db, hist = sv.hist})
+  eq(OroHermandadDB.dataRealms.Alliance, TYPO)
+  -- Con dos del juego, también el más reciente.
+  sv = testing()
+  sv.hist.markets["Otro-Alliance"] = {items = {}, dep = {}, updated = t - 3600}
+  sv.db.realms = {Horde = "Otro"}
+  boot({db = sv.db, hist = sv.hist})
+  eq(OroHermandadDB.dataRealms.Alliance, "Otro")
   Stub.setRealm("Forever")
 end)
 

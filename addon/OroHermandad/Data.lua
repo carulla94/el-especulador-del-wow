@@ -340,14 +340,15 @@ Data.HOUSE_PROBE_IDS = {2589, 2592, 2770, 2771, 2772}
 --   "guardado" el que el juego dio antes a este personaje;
 --   "manual"   el que pusiste a este personaje con /oro reino;
 --   "cuenta"   el que el juego dio antes a otro personaje de tu cuenta de la misma facción;
---   "datos"    el de tus precios guardados (OroHermandadHist; con varios, el del mercado escrito más recientemente) o,
---              si no hay, el que tenía tu hermandad actual en la 0.5.x (OroHermandadDB.guildRealms); se recuerda para
---              este personaje;
+--   "datos"    el de tus precios guardados (OroHermandadHist; con varios, uno que dio el juego antes que los demás y,
+--              entre iguales, el del mercado escrito más recientemente; anotado la primera vez que carga esta versión
+--              en OroHermandadDB.dataRealms, así que uno puesto con /oro reino nunca pasa a serlo) o, si no hay, el que
+--              tenía tu hermandad actual en la 0.5.x (OroHermandadDB.guildRealms); se recuerda para este personaje;
 --   "fijo"     ninguno de los anteriores: Data.FALLBACK_REALM, sin recordarlo (así gana uno de verdad en cuanto haya).
 --              Lo que se guardó con él («Forever-Alliance», «Forever/Hermandad») no cuenta como dato: es el mismo de
 --              reserva.
--- Solo guarda nombres de reino (OroHermandadCharDB.realm y realmFrom, OroHermandadDB.realms) y de hermandad
--- (OroHermandadDB.guildRealms), nunca de personajes.
+-- Solo guarda nombres de reino (OroHermandadCharDB.realm y realmFrom, OroHermandadDB.realms y dataRealms) y de
+-- hermandad (OroHermandadDB.guildRealms), nunca de personajes.
 Data.FALLBACK_REALM = "Forever"
 Data.REALM_SOURCE_TEXT = {
   juego = "el reino lo da el juego",
@@ -424,14 +425,57 @@ end
 
 local function finite(value) return (type(value) == "number" and value == value) and value or 0 end
 
--- El reino de tus precios guardados: mercados «Reino-Facción» válidos de tu facción (de cualquiera si aún no se sabe
--- la tuya), sin los del reino de reserva; con varios reinos, el del mercado escrito más recientemente (updated).
-local function realmFromData(faction)
-  local best, bestAt
+local function dataRealmOk(realm) return isClean(realm) and realm ~= Data.FALLBACK_REALM end
+
+-- Los reinos que dio el juego: a tus personajes (OroHermandadDB.realms) y a tus hermandades en la 0.5.x
+-- (OroHermandadDB.guildRealms, anotado antes de cualquier /oro reino).
+local function gameRealms()
+  local db = stores()
+  local out = {}
+  for _, known in ipairs({db and db.realms or false, db and db.guildRealms or false}) do
+    if type(known) == "table" then
+      for _, realm in pairs(known) do if dataRealmOk(realm) then out[realm] = true end end
+    end
+  end
+  return out
+end
+
+-- Facción -> reino de tus precios guardados: mercados «Reino-Facción» válidos, sin los del reino de reserva; con varios
+-- reinos de una facción, uno que dio el juego (gameRealms) antes que los demás y, entre iguales, el del mercado escrito
+-- más recientemente (updated). Así no gana uno puesto con /oro reino (mal escrito, por ejemplo) en la versión de
+-- pruebas de la 0.6.0, que podía grabar en su mercado (al abrir la subasta) después que en el de siempre.
+local function marketRealms()
+  local game = gameRealms()
+  local out, at, fromGame = {}, {}, {}
   for key, market in pairs(savedMarkets() or {}) do
     local realm, f
     if type(key) == "string" then realm, f = key:match("^(.+)%-(%a+)$") end
-    if realm and FACTIONS[f] and (f == faction or not faction) and isClean(realm) and realm ~= Data.FALLBACK_REALM then
+    if realm and FACTIONS[f] and dataRealmOk(realm) then
+      local t, g = finite(type(market) == "table" and market.updated), game[realm] == true
+      if not out[f] or (g and not fromGame[f])
+         or (g == fromGame[f] and (t > at[f] or (t == at[f] and realm < out[f]))) then
+        out[f], at[f], fromGame[f] = realm, t, g
+      end
+    end
+  end
+  return out
+end
+
+-- El reino de tus precios guardados para tu facción (de cualquiera si aún no se sabe la tuya: la del mercado escrito
+-- más recientemente). Sale de lo anotado al cargar esta versión por primera vez (OroHermandadDB.dataRealms, en
+-- Data.RealmInit): lo que se graba después ya va con el reino que usa el addon, y uno puesto con /oro reino (mal
+-- escrito, por ejemplo) no puede pasar a ser «de tus datos» ni para /oro reino borrar ni para tus otros personajes.
+-- Sin lo anotado (antes de Data.RealmInit), los mercados tal cual.
+local function realmFromData(faction)
+  local db = stores()
+  local known = db and type(db.dataRealms) == "table" and db.dataRealms or marketRealms()
+  if faction then return dataRealmOk(known[faction]) and known[faction] or nil end
+  local markets = savedMarkets() or {}
+  local best, bestAt
+  for f in pairs(FACTIONS) do
+    local realm = known[f]
+    if dataRealmOk(realm) then
+      local market = markets[realm .. "-" .. f]
       local at = finite(type(market) == "table" and market.updated)
       if not best or at > bestAt or (at == bestAt and realm < best) then best, bestAt = realm, at end
     end
@@ -518,6 +562,19 @@ function Data.RealmInit(db, cdb)
     else
       for name, realm in pairs(saved) do
         if not (goodGuildName(name) and isClean(realm) and realm ~= Data.FALLBACK_REALM) then saved[name] = nil end
+      end
+    end
+  end
+  -- Igual, el reino de tus precios guardados por facción (realmFromData): se anota una sola vez, con lo que dejó la
+  -- versión de antes (y los reinos que dio el juego, recién anotados arriba, primero: marketRealms). Lo que se graba
+  -- después con un reino puesto con /oro reino no cambia «el de tus datos».
+  if realmDB then
+    local saved = realmDB.dataRealms
+    if type(saved) ~= "table" then
+      realmDB.dataRealms = marketRealms()
+    else
+      for faction, realm in pairs(saved) do
+        if not (FACTIONS[faction] and dataRealmOk(realm)) then saved[faction] = nil end
       end
     end
   end

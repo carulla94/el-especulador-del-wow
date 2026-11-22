@@ -1062,7 +1062,7 @@ function handlers.ADDON_LOADED(name)
   SlashCmdList.OROHERMANDAD = handleSlash
 
   Prices.Init(db.prices, cdb.merchant)
-  Guild.Init(db, selfInfo)
+  Guild.Init(db, selfInfo, cdb)
   local modes = {}
   for _, key in ipairs(Engine.MODE_ORDER) do modes[#modes + 1] = {key = key, label = Engine.MODES[key].label} end
   safely("la ventana", UI.Create, {position = db.window, onMode = Core.SetMode, onRefresh = Core.Refresh,
