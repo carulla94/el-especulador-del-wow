@@ -1,10 +1,12 @@
 ## Interface: 16001
 ## Title: Oro de Hermandad
-## Notes: Te sugiere qué hacer para ganar oro según tus profesiones, las de tu hermandad y los precios de Auctionator.
+## Notes: Escanea la subasta con hora, te dice cuándo se vende mejor y te sugiere qué hacer para ganar oro con tus profesiones y tu hermandad. Auctionator es opcional.
 ## Author: Oro de Hermandad
-## Version: 0.5.1
+## Version: 0.6.0
 ## IconTexture: Interface\Icons\INV_Misc_Coin_01
 ## Category: Profesiones
+## X-Website: https://github.com/carulla94/el-especulador-del-wow
+## X-Curse-Project-ID: 1823630
 ## AddonCompartmentFunc: OroHermandad_OnCompartmentClick
 ## AddonCompartmentFuncOnEnter: OroHermandad_OnCompartmentEnter
 ## AddonCompartmentFuncOnLeave: OroHermandad_OnCompartmentLeave
@@ -22,6 +24,8 @@ Scan.lua
 Money.lua
 Guild.lua
 Relay.lua
+Scanner.lua
+Timing.lua
 UI.lua
 Tooltip.lua
 Extras.lua

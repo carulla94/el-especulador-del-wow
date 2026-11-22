@@ -19,7 +19,7 @@ class SyncTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
-        self.directory = Path(self.folder.name)
+        self.directory = Path(self.folder.name).resolve()
         self.history = self.directory / "Auctioneer_Stats_OverTime.lua"
         self.bridge = self.directory / "EspeculadorBridge.lua"
         self.history.write_text('AuctioneerStatsOverTimeData = { ["PvP EU"] = {} }', encoding="utf-8")
@@ -84,19 +84,23 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_stable_read_detects_source_replacement_without_sending(self):
-        actual_stat = Path.stat
-        calls = 0
-        def changing_stat(path, *args, **kwargs):
-            nonlocal calls
-            result = actual_stat(path, *args, **kwargs)
+        # El archivo cambia justo después de leerlo (en la comprobación final). No se cuentan las llamadas a
+        # stat: is_file() la usa o no según la versión de Python y el sistema (en Windows no).
+        actual_stat, actual_open = Path.stat, Path.open
+        state = dict(opened=False, changed=False)
+        def tracking_open(path, *args, **kwargs):
             if path == self.history:
-                calls += 1
-                if calls == 3:
-                    self.history.write_text("changed while reading", encoding="utf-8")
-                    return actual_stat(path, *args, **kwargs)
-            return result
-        with patch.object(Path, "stat", changing_stat), self.assertRaises(sync.ReadPendingError):
+                state["opened"] = True
+            return actual_open(path, *args, **kwargs)
+        def changing_stat(path, *args, **kwargs):
+            if path == self.history and state["opened"] and not state["changed"]:
+                state["changed"] = True
+                self.history.write_text("changed while reading", encoding="utf-8")
+            return actual_stat(path, *args, **kwargs)
+        with patch.object(Path, "open", tracking_open), patch.object(Path, "stat", changing_stat), \
+                self.assertRaises(sync.ReadPendingError):
             self.client().cycle()
+        self.assertTrue(state["changed"])
         self.assertEqual(self.calls, [])
 
     def test_initial_upload_includes_both_files_context_and_then_deduplicates(self):

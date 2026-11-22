@@ -1,0 +1,107 @@
+name: Subidor para Windows
+
+# Construye y prueba Subidor_Windows.zip (la ventana «Oro de Hermandad · Subidor» con el Python oficial firmado de
+# python.org dentro) y lo deja como artefacto de la ejecución. Nunca publica nada: la versión de GitHub la crea
+# publicar-oro-hermandad.yml, que llama a este flujo (workflow_call) y usa su salida `version` y el artefacto
+# `Subidor_Windows`, que contiene exactamente Subidor_Windows.zip.
+
+on:
+  push:
+    # Solo ramas: GitHub no mira paths al subir una etiqueta, y la etiqueta oro-hermandad-v* ya construye el subidor
+    # desde publicar-oro-hermandad.yml (sin esto saldría otra compilación de Windows a la vez).
+    branches:
+      - '**'
+    paths:
+      - 'pc_sync/**'
+      - '.github/workflows/subidor-windows.yml'
+  pull_request:
+    paths:
+      - 'pc_sync/**'
+      - '.github/workflows/subidor-windows.yml'
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      version:
+        description: 'Versión del subidor del zip construido (hermandad.VERSION)'
+        value: ${{ jobs.windows.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Pruebas del subidor en Linux (sin pantalla)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Preparar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      # Igual que deploy-cloudflare.yml: sin pantalla, las pruebas de la ventana Tk se saltan solas.
+      - name: Pruebas del subidor
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m unittest discover -s pc_sync -p "test_*.py"
+
+  windows:
+    name: Construir Subidor_Windows.zip
+    runs-on: windows-2025
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # Los archivos tal cual están en Git (LF): las pruebas comparan los ejemplos compartidos byte a byte.
+      - name: Sin conversión de finales de línea
+        run: git config --global core.autocrlf false
+
+      - name: Descargar el código
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      # Versión exacta: 3.13.17 es la última 3.13 con instalador oficial de Windows (las 3.13 siguientes solo
+      # publican el código fuente). Su runtime es el que va dentro del zip.
+      - name: Preparar Python 3.13.17 (oficial de python.org)
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13.17'
+          architecture: x64
+
+      - name: Pruebas del subidor en Windows (DPAPI, registro, schtasks, acceso directo y ventana de verdad)
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -B -m unittest discover -s pc_sync -p "test_*.py"
+
+      - name: Versión del subidor
+        id: version
+        shell: bash
+        run: |
+          set -eu
+          # Python en Windows escribe «\r\n» y el bash de Git conserva el «\r» en $(...): fuera.
+          version="$(cd pc_sync && python -B -c 'import hermandad; print(hermandad.VERSION)' | tr -d '\r')"
+          if ! [[ "$version" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]; then
+            echo "Versión del subidor no válida: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Construye, prueba el zip ya extraído con su propio Python (-B), comprueba las firmas Authenticode, lo
+      # construye otra vez para comprobar que sale idéntico y escribe tamaño y SHA-256 en el resumen.
+      - name: Construir y comprobar el zip
+        shell: bash
+        run: python -B pc_sync/empaquetar_windows.py --salida "$RUNNER_TEMP/Subidor_Windows.zip"
+
+      - name: Guardar el zip en la ejecución
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: Subidor_Windows
+          path: ${{ runner.temp }}/Subidor_Windows.zip
+          retention-days: 30
+          if-no-files-found: error

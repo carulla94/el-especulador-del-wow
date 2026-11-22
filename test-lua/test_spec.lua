@@ -285,6 +285,138 @@ test("Puntos: a menos de 30 min se juntan, como mucho 120, 14 días; idempotente
   eq(#Spec.DecodePoints("1793746800,900,1,1;x;1793746800,0,1,1;-1,5,5,5;1793750000,5,5"), 1)
 end)
 
+---------------------------------------------------------------------------
+-- 0.6.0: ventas en los puntos (C1), hora de España (C5) y ventas estimadas (C6)
+---------------------------------------------------------------------------
+package.path = "test-lua/?.lua;" .. package.path
+local Stub = require("wow_stub")
+local V06 = "test-lua/fixtures/v06/"
+local function readFile(path) local f = assert(io.open(path, "rb")); local text = f:read("*a"); f:close(); return text end
+local function fixture(name)
+  eq(Stub.sha256File(V06 .. name), Stub.V06_SHA256[name], name .. ": copia exacta del diseño (SHA-256)")
+  return json.decode(readFile(V06 .. name))
+end
+
+test("Copias de los datos compartidos de la 0.6.0: byte a byte las del diseño (SHA-256) y las de relay-v1 sin cambiar", function()
+  local n = 0
+  for name, hash in pairs(Stub.V06_SHA256) do eq(Stub.sha256File(V06 .. name), hash, name); n = n + 1 end
+  eq(n, 11, "las 11 copias")
+  for name, hash in pairs(Stub.RELAY_SHA256) do eq(Stub.sha256File("test-lua/fixtures/relay/" .. name), hash, name) end
+  eq(Stub.sha256File("test-lua/fixtures/legacy/Relay-0.5.1.lua"), Stub.LEGACY_RELAY_SHA256, "Relay de la 0.5.1")
+end)
+
+test("C1 points-v2: decodificar, normalizar y codificar dan exactamente los registros y el texto de cada caso", function()
+  local P = fixture("points-v2.json")
+  for _, c in ipairs(P.cases) do
+    local pts = Spec.DecodePoints(c.text)
+    eq(#pts, #c.records, c.note .. ": registros")
+    for i, r in ipairs(c.records) do
+      local p = pts[i]
+      eq(p.t, r[1], c.note); eq(p.lo, r[2], c.note); eq(p.qty, r[3], c.note); eq(p.qty5, r[4], c.note)
+      eq(p.dt, nn(r[5]), c.note .. ": dt"); eq(p.sold, nn(r[6]), c.note .. ": sold")
+    end
+    eq(Spec.EncodePoints(pts), c.encoded, c.note .. ": texto")
+    eq(Spec.EncodePoints(Spec.DecodePoints(c.encoded)), c.encoded, c.note .. ": estable")
+    -- Lo que sube el subidor (la lista sold de la serie) sale de los mismos registros.
+    local sold = {}
+    for _, p in ipairs(pts) do if p.dt then sold[#sold + 1] = {p.t, p.dt, p.sold} end end
+    eq(#sold, #c.sold, c.note .. ": sold")
+    for i, x in ipairs(c.sold) do eq(sold[i][1], x[1]); eq(sold[i][2], x[2]); eq(sold[i][3], x[3]) end
+  end
+  eq(#P.cases, 20, "20 casos")
+end)
+
+test("C1: AddPoint con venta, juntar es conmutativo y una venta no se pierde por un punto sin ella", function()
+  local t0 = 1796475000
+  local a = Spec.AddPoint({}, t0, 42, 850, 180, 1800, 30)
+  a = Spec.AddPoint(a, t0 + 600, 40, 880, 200, 3600, 5)
+  eq(Spec.EncodePoints(a), t0 .. ",40,880,200,3600,5")
+  local b = Spec.AddPoint({}, t0 + 600, 40, 880, 200, 3600, 5)
+  b = Spec.AddPoint(b, t0, 42, 850, 180, 1800, 30)
+  eq(Spec.EncodePoints(b), Spec.EncodePoints(a), "en otro orden, lo mismo")
+  local c = Spec.AddPoint(a, t0 + 900, 39, 10, 1)
+  eq(Spec.EncodePoints(c), t0 .. ",39,880,1,3600,5", "un punto sin venta no la quita")
+  eq(Spec.EncodePoints(Spec.AddPoint({}, t0, 40, 1, 1, 599, 3)), t0 .. ",40,1,1", "dt de menos: sin venta")
+  eq(Spec.EncodePoints(Spec.AddPoint({}, t0, 40, 1, 1, 1800, 1000001)), t0 .. ",40,1,1", "sold de más: sin venta")
+  eq(Spec.EncodePoints(Spec.AddPoint({}, t0, 40, 1, 1, 1800)), t0 .. ",40,1,1", "solo dt: sin venta")
+  eq(Spec.ValidSample(600, 0), true); eq(Spec.ValidSample(7200, 1000000), true); eq(Spec.ValidSample(7201, 1), false)
+end)
+
+test("C1: quien lee con la regla de la 0.5.1 (4 campos) ve los mismos t, lo, qty y qty5 en hist-v060.lua", function()
+  eq(Stub.sha256File(V06 .. "hist-v060.lua"), Stub.V06_SHA256["hist-v060.lua"])
+  local old = assert(loadfile("test-lua/fixtures/legacy/Spec-0.5.1.lua"))("OroHermandad", {})
+  eq(old.MAX_BYTES, 1280 * 1024, "es la 0.5.1")
+  local env = {}
+  local chunk = assert(loadstring(readFile(V06 .. "hist-v060.lua")))
+  setfenv(chunk, env)
+  chunk()
+  local texts, samples = 0, 0
+  local function check(text)
+    local new, before = Spec.DecodePoints(text), old.DecodePoints(text)
+    eq(#new, #before, "mismos puntos")
+    for i, p in ipairs(new) do
+      eq(before[i].t, p.t); eq(before[i].lo, p.lo); eq(before[i].qty, p.qty); eq(before[i].qty5, p.qty5)
+      eq(before[i].dt, nil, "la 0.5.1 no ve las ventas")
+      if p.dt then samples = samples + 1 end
+    end
+    -- Y al reescribirlo la 0.5.1 solo pierde las ventas (inofensivo).
+    local rewritten = old.EncodePoints(before)
+    eq(Spec.EncodePoints(Spec.DecodePoints(rewritten)), Spec.EncodePoints((function()
+      local list = {}
+      for _, p in ipairs(new) do list[#list + 1] = {t = p.t, lo = p.lo, qty = p.qty, qty5 = p.qty5} end
+      return list
+    end)()))
+    texts = texts + 1
+  end
+  for _, m in pairs(env.OroHermandadHist.markets) do
+    for _, item in pairs(m.items) do check(item.p) end
+    for _, o in pairs(m.obs or {}) do for _, item in pairs(o.items) do check(item.p) end end
+  end
+  assert(texts >= 10 and samples >= 5, texts .. " textos, " .. samples .. " ventas")
+end)
+
+-- Días desde el 1-1-1970 de una fecha civil (Howard Hinnant), para leer la fecha local del texto de cada vector.
+local function civilDays(y, m, d)
+  if m <= 2 then y = y - 1 end
+  local era = math.floor(y / 400)
+  local yoe = y - era * 400
+  local doy = math.floor((153 * ((m + 9) % 12) + 2) / 5) + d - 1
+  return era * 146097 + yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy - 719468
+end
+
+test("C5 madrid-slots: Spec.MadridSlot da el día, la hora, la franja, la celda y la fecha de los 1233 vectores", function()
+  local M = fixture("madrid-slots.json")
+  for _, v in ipairs(M.vectors) do
+    local wd, hour, block, cell, day = Spec.MadridSlot(v[1])
+    local y, m, d = v[6]:match("^(%d+)-(%d+)-(%d+)")
+    local want = civilDays(tonumber(y), tonumber(m), tonumber(d)) - 18262 -- numerada como Spec.DayIndex
+    if wd ~= v[2] or hour ~= v[3] or block ~= v[4] or cell ~= v[5] or day ~= want then
+      error(string.format("%d (%s): %s %s %s %s %s", v[1], v[6], tostring(wd), tostring(hour), tostring(block),
+        tostring(cell), tostring(day)))
+    end
+  end
+  -- En invierno la fecha es Spec.DayIndex; en verano, de 00:00 a 01:00 ya es el día siguiente.
+  eq(select(5, Spec.MadridSlot(1800000000)), Spec.DayIndex(1800000000))
+  eq(select(5, Spec.MadridSlot(1783895400)), Spec.DayIndex(1783895400) + 1, "lunes 13-7-2026 a las 00:30")
+  eq(#M.vectors, 1233)
+  eq(Spec.MadridSlot("x"), nil); eq(Spec.MadridSlot(1.5), nil)
+end)
+
+test("C6 sold-inference (versión 2): Spec.InferSold da sold y partial de cada caso", function()
+  local S = fixture("sold-inference.json")
+  eq(S.version, 2, "versión 2")
+  for _, c in ipairs(S.cases) do
+    local current = {}
+    for price, list in pairs(c.current) do current[tonumber(price)] = list end
+    local sold, partial = Spec.InferSold(c.base, current, c.dt, S.bandMin, c.own)
+    eq(sold, c.sold, c.note .. ": sold"); eq(partial, c.partial, c.note .. ": partial")
+  end
+  eq(#S.cases, 24)
+  -- Sin bandMin, los tramos por defecto; sin base, 0.
+  eq((Spec.InferSold({{100, {{1, 10}}}}, {}, 1800)), 10)
+  eq((Spec.InferSold(nil, {}, 1800)), 0)
+end)
+
 test("Depósitos: 'dur:cobre' por duración", function()
   local dep = Spec.DecodeDeposits("1:60,2:120,3:240,4:x,0:5,9:1,2:130,bad")
   eq(dep[1], 60); eq(dep[2], 130); eq(dep[3], 240); eq(dep[4], nil); eq(dep[0], nil); eq(dep[9], 1)
@@ -446,10 +578,10 @@ test("Tamaño: el estimador da exactamente el tamaño del formato de WoW", funct
   eq(Spec.EstimateSize(odd, "X"), #("X = " .. wowSerialize(odd) .. "\n"))
 end)
 
-test("Tamaño: 114 objetos x 120 días + 14 días de 4 escaneos caben en 768 KB; con 120 puntos, Shrink quita puntos primero", function()
-  -- El tope de la 0.4.0 (114 objetos); la 0.5.0 sube Spec.MAX_BYTES a 1,25 MB para sus 161 (test_history.lua).
+test("Tamaño: 114 objetos x 120 días + 14 días de 4 escaneos caben en 768 KB; con 120 puntos, Shrink acorta los días viejos antes que los puntos", function()
+  -- El tope de la 0.4.0 (114 objetos); la 0.5.0 sube Spec.MAX_BYTES a 1,25 MB y la 0.6.0 a 2 MB (test_history.lua).
   local CAP = 768 * 1024
-  assert(Spec.MAX_BYTES >= CAP, "el tope no baja")
+  eq(Spec.MAX_BYTES, 2048 * 1024, "0.6.0: 2 MB")
   local hist, now = fullHist(4)
   local size = Spec.EstimateSize(hist)
   local step, after = Spec.Shrink(hist, CAP, now)
@@ -462,12 +594,54 @@ test("Tamaño: 114 objetos x 120 días + 14 días de 4 escaneos caben en 768 KB;
   assert(size <= CAP, size)
   assert(heavySize > CAP and heavyStep >= 1 and heavyStep <= 2 and heavyAfter <= CAP)
   local item = select(2, next(heavy.markets["Mirage Raceway-Alliance"].items))
-  eq(#Spec.DecodeDays(item.d), 120, "los días no se tocan mientras basta con quitar puntos")
-  -- Si ni sin puntos cabe, se acortan los días.
+  -- 0.6.0: primero los días de más de 90 y 60 días; los puntos (lo único por horas) se quedan.
+  eq(#Spec.DecodePoints(item.p), 120, "los puntos no se tocan mientras basta con acortar los días")
+  assert(#Spec.DecodeDays(item.d) <= 90, "días acortados")
+  -- Si ni así cabe: puntos de más de 10 días, de 7, todos y, al final, días de 30.
   local tiny = fullHist(1)
   local s, final = Spec.Shrink(tiny, 150 * 1024, now)
-  assert(s >= 3 and final <= 150 * 1024, s .. " " .. final)
+  assert(s >= 5 and final <= 150 * 1024, s .. " " .. final)
   eq(select(1, Spec.Shrink(nil, 10, now)), 0)
+end)
+
+test("Shrink 0.6.0: el orden de los pasos (90 y 60 días, puntos de 10 y 7 días, sin puntos, 30 días)", function()
+  local now = 1793746800 + 200 * 86400
+  local today = Spec.DayIndex(now)
+  local function build()
+    local recs, pts = {}, {}
+    for d = today - 119, today do recs[#recs + 1] = {d = d, lo = 100, hi = 120, last = 110, qty = 50, scans = 2, src = "o"} end
+    for k = 0, 111 do pts[#pts + 1] = {t = now - k * 10800, lo = 100 + k, qty = 10, qty5 = 5, dt = 1800, sold = k} end
+    local items = {}
+    for id = 1, 40 do items[id] = {n = "x", c = "metal", v = 1, d = Spec.EncodeDays(recs), p = Spec.EncodePoints(pts)} end
+    return {schema = 2, markets = {["A-Alliance"] = {items = items, dep = {}}}}
+  end
+  local sizes, h = {}, build()
+  sizes[0] = Spec.EstimateSize(h)
+  local each = function(fn) for _, item in pairs(h.markets["A-Alliance"].items) do fn(item) end end
+  local steps = {
+    function(item) item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, 90)) end,
+    function(item) item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, 60)) end,
+    function(item) item.p = Spec.EncodePoints(Spec.PrunePoints(Spec.DecodePoints(item.p), now, 10 * 86400)) end,
+    function(item) item.p = Spec.EncodePoints(Spec.PrunePoints(Spec.DecodePoints(item.p), now, 7 * 86400)) end,
+    function(item) item.p = "" end,
+    function(item) item.d = Spec.EncodeDays(Spec.PruneDays(Spec.DecodeDays(item.d), today, 30)) end,
+  }
+  for k, apply in ipairs(steps) do each(apply); sizes[k] = Spec.EstimateSize(h) end
+  for k = 1, 6 do
+    assert(sizes[k] < sizes[k - 1], "cada paso ahorra: " .. k)
+    local fresh = build()
+    local got, size = Spec.Shrink(fresh, sizes[k], now)
+    eq(got, k, "paso " .. k); eq(size, sizes[k], "tamaño del paso " .. k)
+    local item = fresh.markets["A-Alliance"].items[1]
+    local days, points = Spec.DecodeDays(item.d), Spec.DecodePoints(item.p)
+    eq(#days, k >= 6 and 30 or k >= 2 and 60 or 90, "días tras el paso " .. k)
+    local oldest = points[1] and (now - points[1].t) or 0
+    if k <= 2 then eq(#points, 112, "puntos intactos en el paso " .. k) end
+    if k == 3 then assert(oldest < 10 * 86400 and #points > 0, "puntos de 10 días") end
+    if k == 4 then assert(oldest < 7 * 86400 and #points > 0, "puntos de 7 días") end
+    if k >= 5 then eq(#points, 0, "sin puntos") end
+    if #points > 0 then eq(points[#points].dt, 1800, "las ventas siguen en los puntos") end
+  end
 end)
 
 test("PruneHist: poda días y puntos viejos y borra objetos vacíos", function()

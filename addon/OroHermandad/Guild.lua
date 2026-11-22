@@ -28,7 +28,7 @@ local RELAY_MAX_QUEUE = 64     -- mensajes de precios (P3/Q3) en su cola, como m
 local RELAY_KINDS = {P3 = true, Q3 = true}
 
 local state = {
-  db = nil, getSelf = nil, key = nil, settled = false, legacy = nil, importedKey = nil, adopted = {},
+  db = nil, cdb = nil, getSelf = nil, key = nil, settled = false, legacy = nil, importedKey = nil, adopted = {},
   queue = {}, sending = false, owed = false,
   pending = {}, lastAnnounce = -math.huge, announceScheduled = false, forceNext = false, lastSig = nil,
   repliedTo = {}, requestedAt = -math.huge, seq = 0,
@@ -161,6 +161,15 @@ local function fold(text)
 end
 Guild.Fold = fold -- Relay.lua calcula el código de cada personaje con estas mismas minúsculas
 
+-- Tu reino y de dónde sale (Data.Realm: WoW Forever ya no lo da; el último conocido, el de tus datos guardados o
+-- «Forever», que es "fijo"). nil si no se puede saber.
+local function ownRealm()
+  if type(Data) ~= "table" or type(Data.Realm) ~= "function" then return nil end
+  local ok, realm, source = pcall(Data.Realm)
+  if ok and not secret(realm) and type(realm) == "string" and realm ~= "" then return realm, source end
+  return nil
+end
+
 -- Nombres al estilo del servidor: primera letra en mayúscula, el resto en minúscula y sin tu propio reino.
 function Guild.NormalizeName(name)
   if type(name) ~= "string" then return nil end
@@ -170,7 +179,7 @@ function Guild.NormalizeName(name)
   base = base or name
   if realm then
     realm = realm:gsub("[%s%-]", "")
-    local mine = type(GetNormalizedRealmName) == "function" and GetNormalizedRealmName() or nil
+    local mine = realm ~= "" and ownRealm() or nil
     if realm == "" or (type(mine) == "string" and fold((realm:gsub("'", ""))) == fold((mine:gsub("[%s%-']", "")))) then
       realm = nil
     end
@@ -230,6 +239,36 @@ local function adoptLegacyNames(members)
   end
 end
 
+-- OroHermandadCharDB (Guild.Init; antes, la global).
+local function charDB()
+  local cdb = state.cdb or OroHermandadCharDB
+  return type(cdb) == "table" and cdb or nil
+end
+
+-- «Forever/Hermandad» guarda lo de la hermandad con el reino de reserva («fijo»: el juego no da el reino y no hay
+-- ninguno guardado) o con «Forever» elegido a propósito (/oro reino forever, o porque lo da el juego). Lo primero es de
+-- un personaje que aún no sabe su reino: cuando lo sepa, lo suyo le sigue (adoptOtherRealms). Por eso:
+--   cada personaje apunta la hermandad que usa con el de reserva (OroHermandadCharDB.fallbackGuild) y solo él se lleva
+--   ese almacén al entrar con un reino de verdad: otro personaje de la cuenta con un reino de verdad no le quita sus
+--   amigos (si varios siguen con el de reserva, lo comparten y se lo lleva el primero que sepa su reino);
+--   el almacén usado con «Forever» elegido queda marcado (chosen = true) y ya no se mueve al entrar: es de quien lo
+--   eligió, aunque lo usen también otros con el de reserva.
+local function markFallback(key, realm, source)
+  local fallback = type(Data) == "table" and Data.FALLBACK_REALM
+  if type(fallback) ~= "string" or realm ~= fallback or type(key) ~= "string"
+     or key:sub(1, #fallback + 1) ~= fallback .. "/" then return end
+  local guildName = key:sub(#fallback + 2)
+  local cdb = charDB()
+  if source == "fijo" then
+    if cdb and cdb.fallbackGuild ~= guildName then cdb.fallbackGuild = guildName end
+    return
+  end
+  if cdb and cdb.fallbackGuild == guildName then cdb.fallbackGuild = nil end
+  local db = state.db
+  local bucket = db and type(db.guilds) == "table" and db.guilds[key]
+  if type(bucket) == "table" and bucket.chosen ~= true then bucket.chosen = true end
+end
+
 -- Miembros de la hermandad actual; nil mientras no se sabe cuál es (nada se guarda en un sitio equivocado).
 local function store()
   local db = state.db
@@ -241,12 +280,14 @@ local function store()
   bucket.members = type(bucket.members) == "table" and bucket.members or {}
   db.guilds[key] = bucket
   -- Nombres de la 0.2.0, una vez por sesión y hermandad, con tu reino ya legible (el almacén sin hermandad no es de
-  -- ningún reino: ahí no se toca nada).
-  local realm = type(GetNormalizedRealmName) == "function" and GetNormalizedRealmName() or nil
-  if key ~= NOGUILD and not state.adopted[key] and type(realm) == "string" and realm ~= "" then
+  -- ningún reino: ahí no se toca nada). Con el reino de reserva («Forever», "fijo") tampoco: no es seguro que sea el
+  -- tuyo de antes.
+  local realm, source = ownRealm()
+  if key ~= NOGUILD and not state.adopted[key] and realm and source ~= "fijo" then
     state.adopted[key] = true
     adoptLegacyNames(bucket.members)
   end
+  markFallback(key, realm, source)
   return bucket.members
 end
 
@@ -300,7 +341,88 @@ local function migrateLegacy()
   if state.db then state.db.guild = nil end
 end
 
--- Clave de la hermandad actual (reino normalizado + nombre). nil si estás en una pero aún no ha cargado.
+local function seenAt(part)
+  local seen = type(part) == "table" and part.seen
+  return (type(seen) == "number" and seen == seen) and seen or 0
+end
+
+-- Lo que se sabe de alguien en otro almacén de la misma hermandad (from) se junta con lo de este (into), parte por
+-- parte: las profesiones a mano, todas (si una está en los dos, la de más nivel); lo del addon y lo del roster, lo
+-- visto más recientemente.
+local function mergeFriend(into, from)
+  if type(from.manual) == "table" then
+    if type(into.manual) ~= "table" then
+      into.manual = from.manual
+    elseif type(from.manual.profs) == "table" then
+      into.manual.profs = type(into.manual.profs) == "table" and into.manual.profs or {}
+      local profs = into.manual.profs
+      for prof, rank in pairs(from.manual.profs) do
+        local have, new = tonumber(profs[prof]), tonumber(rank)
+        if profs[prof] == nil or (new and new == new and not (have and have >= new)) then profs[prof] = rank end
+      end
+    end
+  end
+  for _, part in ipairs({"addon", "roster"}) do
+    if type(from[part]) == "table" and (type(into[part]) ~= "table" or seenAt(from[part]) > seenAt(into[part])) then
+      into[part] = from[part]
+    end
+  end
+end
+
+-- Lo de la hermandad guardado con otro reino (old) pasa al almacén de ahora (key): quien no estaba, tal cual; quien ya
+-- estaba, junto con lo de allí (mergeFriend). El de antes se quita (si se quedara, un amigo quitado con /oro amigo
+-- borrar volvería de allí).
+local function adoptBucket(old, key)
+  local db = state.db
+  local bucket = db and type(db.guilds) == "table" and db.guilds[old]
+  if key == old or type(bucket) ~= "table" then return end
+  db.guilds[old] = nil
+  local target = db.guilds[key]
+  if type(target) ~= "table" then
+    bucket.chosen = nil -- con la clave nueva se vuelve a decidir (markFallback)
+    db.guilds[key] = bucket
+    return
+  end
+  target.members = type(target.members) == "table" and target.members or {}
+  for name, friend in pairs(type(bucket.members) == "table" and bucket.members or {}) do
+    if type(name) == "string" and type(friend) == "table" then
+      local existing = findName(target.members, name)
+      if existing and type(target.members[existing]) == "table" then
+        mergeFriend(target.members[existing], friend)
+      else
+        target.members[existing or name] = friend
+      end
+    end
+  end
+end
+
+-- La misma hermandad con otro reino (WoW Forever ya no lo da; Data.Realm). Sus datos siguen al reino de ahora:
+--   «/Hermandad»: lo de la 0.5.x mientras el juego daba el reino vacío y el addon aún no lo resolvía;
+--   «Forever/Hermandad», cuando ya hay uno de verdad (de /oro reino, del juego o de tus datos), solo si este personaje
+--   lo usó con el reino de reserva («fijo»; markFallback) y ningún personaje lo usa con «Forever» elegido; lo apuntado
+--   en el personaje se quita igual (ya sabe su reino);
+--   la clave de antes en esta sesión: /oro reino (o borrar), o el juego o tus datos dan el reino a media sesión.
+local function adoptOtherRealms(guildName, key, source)
+  adoptBucket("/" .. guildName, key)
+  local fallback = type(Data) == "table" and Data.FALLBACK_REALM
+  local cdb = charDB()
+  if source and source ~= "fijo" and type(fallback) == "string" and cdb and cdb.fallbackGuild ~= nil then
+    local fallbackKey = fallback .. "/" .. guildName
+    local saved = state.db and type(state.db.guilds) == "table" and state.db.guilds[fallbackKey]
+    if cdb.fallbackGuild == guildName and type(saved) == "table" and saved.chosen ~= true then
+      adoptBucket(fallbackKey, key)
+    end
+    cdb.fallbackGuild = nil
+  end
+  local prev = state.key
+  local suffix = "/" .. guildName
+  if type(prev) == "string" and prev ~= NOGUILD and prev ~= key and prev:sub(-#suffix) == suffix then
+    adoptBucket(prev, key)
+  end
+end
+
+-- Clave de la hermandad actual (reino + nombre; el reino, el de Data.Realm). nil si estás en una pero aún no ha
+-- cargado.
 function Guild.UpdateKey()
   local key = NOGUILD
   if type(IsInGuild) == "function" and IsInGuild() and type(GetGuildInfo) == "function" then
@@ -309,8 +431,10 @@ function Guild.UpdateKey()
       if state.key == NOGUILD then state.key = nil end -- aún no ha cargado: se conserva solo una hermandad ya conocida
       return state.key
     end
-    local realm = type(GetNormalizedRealmName) == "function" and GetNormalizedRealmName() or ""
+    local realm, source = ownRealm()
     key = (realm or "") .. "/" .. guildName
+    adoptOtherRealms(guildName, key, source)
+    markFallback(key, realm, source)
     state.settled = true -- con el nombre de la hermandad legible, la identidad es fiable
   end
   state.key = key
@@ -619,9 +743,15 @@ end
 ---------------------------------------------------------------------------
 -- API del addon
 ---------------------------------------------------------------------------
-function Guild.Init(db, getSelf)
+function Guild.Init(db, getSelf, cdb)
   state.db, state.getSelf = db, getSelf
+  state.cdb = type(cdb) == "table" and cdb or nil
   db.guilds = type(db.guilds) == "table" and db.guilds or {}
+  -- La hermandad que este personaje usa con el reino de reserva (markFallback): un nombre, o nada.
+  cdb = charDB()
+  if cdb and cdb.fallbackGuild ~= nil and (type(cdb.fallbackGuild) ~= "string" or cdb.fallbackGuild == "") then
+    cdb.fallbackGuild = nil
+  end
   -- Formato de la versión 0.1 (sin separar por hermandad): se migra al conocer la hermandad (ver migrateLegacy).
   if type(db.guild) == "table" then state.legacy = db.guild else db.guild = nil end
   if type(C_ChatInfo) == "table" and type(C_ChatInfo.RegisterAddonMessagePrefix) == "function" then

@@ -1,0 +1,420 @@
+# Publica una versión de Oro de Hermandad: la versión de GitHub con OroHermandad.zip y Subidor_Windows.zip (los enlaces
+# «última versión» del panel y de INSTALAR_ORO_DE_HERMANDAD.md) y, cuando el TOC lleva su ID, el archivo de CurseForge
+# (y el de Wago). Nunca se lanza solo: siempre lo lanza una persona, de una de estas dos formas:
+#   - Actions → «Publicar Oro de Hermandad» → Run workflow, con la rama main y la versión del TOC (por ejemplo 0.6.0);
+#   - o subiendo la etiqueta: git tag -a oro-hermandad-v0.6.0 -m "Oro de Hermandad 0.6.0" && git push origin oro-hermandad-v0.6.0
+# Antes de publicar nada comprueba que la etiqueta, el TOC, Core.VERSION e History.lua dicen la misma versión, que
+# addon/OroHermandad/CAMBIOS.md tiene su sección, que pasan las pruebas y que el zip de CurseForge es exactamente el
+# de scripts/build-oro-hermandad.mjs (nada de la web, las pruebas o el subidor del PC).
+# El subidor para Windows se construye con .github/workflows/subidor-windows.yml. Si esa compilación falla (o se pide
+# «reusar_subidor»), la versión sale igual con el Subidor_Windows.zip de la versión anterior, sin cambios: el addon no
+# espera al subidor. «solo_subidor» (versiones 0.6.x del subidor) solo cambia Subidor_Windows.zip en la última versión.
+# CurseForge va el último: si falla, «Re-run failed jobs» lo repite sin tocar lo ya publicado en GitHub. Si lo que
+# falló es la compilación de Windows, la versión ya ha salido con el subidor anterior: «Re-run failed jobs» la compila
+# otra vez y, si sale, cambia el subidor de la versión; CurseForge y Wago no se suben dos veces (cada uno mira si ya se
+# subió en otra ejecución o intento de este flujo en el mismo commit, también tras un «Run workflow» nuevo de una
+# versión ya publicada). También vale lanzar el flujo con «solo_subidor».
+# Cancelar la ejecución detiene la publicación (lo ya publicado se queda): ningún trabajo sigue tras un «Cancel».
+name: Publicar Oro de Hermandad
+
+on:
+  push:
+    tags:
+      - 'oro-hermandad-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versión del TOC, por ejemplo 0.6.0, o 0.6.1-beta1 de prueba (lánzalo desde main; con «solo_subidor» no se usa)'
+        required: false
+        type: string
+      reusar_subidor:
+        description: 'No compilar el subidor: adjuntar sin cambios el Subidor_Windows.zip de la última versión'
+        required: false
+        type: boolean
+        default: false
+      solo_subidor:
+        description: 'Solo el subidor: compilarlo y cambiarlo en la última versión (tiene que ser más nuevo); el addon no se toca'
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: publicar-oro-hermandad
+  cancel-in-progress: false
+
+env:
+  ETIQUETA: ${{ github.event_name == 'push' && github.ref_name || format('oro-hermandad-v{0}', inputs.version) }}
+  # Las mismas opciones en las tres pasadas del empaquetador: finales de línea LF (como build-oro-hermandad.mjs) y en
+  # CurseForge el nombre «oro-hermandad-vX.Y.Z», sin «-forever» detrás.
+  EMPAQUETADOR_OPCIONES: -u -n "{package-name}-{project-version}:{project-version}"
+  # La línea del subidor en las notas de la versión de GitHub (grep -E). La lee la siguiente publicación para reutilizar
+  # el zip sin cambios (comprobando su SHA-256) y «solo_subidor» para saber qué versión hay.
+  LINEA_SUBIDOR: '^Subidor para Windows ([0-9]+(\.[0-9]+){1,3})( \(sin cambios\))?: Subidor_Windows\.zip \(SHA-256 ([0-9a-f]{64})\)$'
+  AVISO_DESBLOQUEAR: 'Antes de extraer el subidor: clic derecho en el zip → Propiedades → «Desbloquear».'
+
+jobs:
+  # 1. Lo barato primero: versión, notas, pruebas y el zip del addon. Nada se publica aquí.
+  comprobar:
+    name: Comprobar y empaquetar el addon
+    if: ${{ !inputs.solo_subidor }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Comprobar que se publica algo que ya está en main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_SHA no está en main" >&2; exit 1; }
+
+      - name: Comprobar la versión y sacar sus notas de CAMBIOS.md
+        run: |
+          set -eu
+          version="${ETIQUETA#oro-hermandad-v}"
+          # X.Y.Z o, para una versión de prueba, X.Y.Z-alphaN o X.Y.Z-betaN: GitHub la marca como «prerelease» por el
+          # guion y el empaquetador la sube a CurseForge y Wago como alpha o beta solo por esas palabras. Con otra forma
+          # (0.6.1-rc1, 0.6.1beta1) no estarían de acuerdo: una de prueba saldría como normal en un sitio o en el otro.
+          formato='^[0-9]+(\.[0-9]+){1,3}(-(alpha|beta)[0-9]*)?$'
+          [[ "$version" =~ $formato ]] || { echo "«$ETIQUETA» no es oro-hermandad-vX.Y.Z (ni X.Y.Z-alphaN o X.Y.Z-betaN, de prueba)" >&2; exit 1; }
+          toc=$(tr -d '\r' < addon/OroHermandad/OroHermandad.toc | sed -n 's/^## Version: *//p')
+          core=$(tr -d '\r' < addon/OroHermandad/Core.lua | sed -n 's/^Core\.VERSION = "\(.*\)"$/\1/p')
+          hist=$(tr -d '\r' < addon/OroHermandad/History.lua | sed -n 's/^local version = "\(.*\)"$/\1/p')
+          for pair in "el TOC:$toc" "Core.VERSION:$core" "History.lua:$hist"; do
+            if [ "${pair#*:}" != "$version" ]; then
+              echo "La etiqueta dice $version pero ${pair%%:*} dice «${pair#*:}»" >&2; exit 1
+            fi
+          done
+          tr -d '\r' < addon/OroHermandad/CAMBIOS.md | awk -v v="$version" '/^## / { if (found) exit; if ($2 == v) { found = 1; next } } found { print } END { if (!found) exit 1 }' \
+            > .notas-version.md || { echo "CAMBIOS.md no tiene la sección «## $version»" >&2; exit 1; }
+          grep -q '[^[:space:]]' .notas-version.md || { echo "La sección «## $version» de CAMBIOS.md está vacía" >&2; exit 1; }
+
+      # Al lanzarlo a mano la etiqueta aún no existe: se crea aquí, solo en esta máquina, para que el empaquetador sepa
+      # la versión; en GitHub la crea «gh release create» más abajo, en este mismo commit.
+      - name: Etiqueta local (solo al lanzarlo a mano)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -eu
+          if existing=$(git rev-parse -q --verify "refs/tags/$ETIQUETA^{commit}"); then
+            [ "$existing" = "$GITHUB_SHA" ] || { echo "La etiqueta $ETIQUETA ya existe en otro commit" >&2; exit 1; }
+          else
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              tag -a "$ETIQUETA" -m "Oro de Hermandad ${ETIQUETA#oro-hermandad-v}"
+          fi
+
+      - name: Instalar Lua 5.1 (la versión de WoW)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lua5.1
+
+      - name: Pruebas del addon
+        run: sh test-lua/run.sh
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24.16.0'
+          package-manager-cache: false
+
+      # Sin ninguna clave: -d no sube nada (CurseForge y Wago van en sus propios trabajos, al final).
+      - name: Empaquetar como en CurseForge, sin subir
+        uses: BigWigsMods/packager@01e8631a69c69d7654c788d152630d5fed9e3812 # v2.7.0
+        with:
+          args: -d ${{ env.EMPAQUETADOR_OPCIONES }}
+          pandoc: false
+
+      - name: Comprobar que el zip es el addon y nada más
+        run: |
+          set -eu
+          shopt -s nullglob
+          zips=(.release/OroHermandad-*.zip)
+          [ "${#zips[@]}" -eq 1 ] || { echo "Esperaba un zip en .release y hay ${#zips[@]}" >&2; exit 1; }
+          node scripts/build-oro-hermandad.mjs "$RUNNER_TEMP/esperado.zip"
+          unzip -q "$RUNNER_TEMP/esperado.zip" -d "$RUNNER_TEMP/esperado"
+          unzip -q "${zips[0]}" -d "$RUNNER_TEMP/curseforge"
+          diff -r "$RUNNER_TEMP/esperado" "$RUNNER_TEMP/curseforge"
+          mkdir -p "$RUNNER_TEMP/publicar"
+          cp "${zips[0]}" "$RUNNER_TEMP/publicar/OroHermandad.zip"
+          cp .notas-version.md "$RUNNER_TEMP/publicar/notas-version.md"
+
+      # Artefacto OroHermandad: OroHermandad.zip y las notas de esta versión, para el trabajo que publica.
+      - name: Guardar el zip y las notas en la ejecución
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: OroHermandad
+          path: ${{ runner.temp }}/publicar/
+          if-no-files-found: error
+
+  # 2. El subidor para Windows (contrato C10: salida «version» y artefacto Subidor_Windows con Subidor_Windows.zip).
+  subidor:
+    name: Subidor para Windows
+    needs: comprobar
+    if: ${{ !cancelled() && !inputs.reusar_subidor && (inputs.solo_subidor || needs.comprobar.result == 'success') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/subidor-windows.yml
+
+  # 3. La versión de GitHub, con los dos zips. Sale aunque el subidor falle: entonces lleva el anterior, sin cambios.
+  github:
+    name: Publicar en GitHub
+    needs: [comprobar, subidor]
+    if: ${{ !cancelled() && !inputs.solo_subidor && needs.comprobar.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SUBIDOR_RESULTADO: ${{ needs.subidor.result }}
+      SUBIDOR_VERSION: ${{ needs.subidor.outputs.version }}
+    steps:
+      # gh (ya instalado en la máquina) lee los artefactos de esta misma ejecución: sin más acciones de terceros.
+      - name: Traer el zip del addon y sus notas
+        run: |
+          set -euo pipefail
+          gh run download "$GITHUB_RUN_ID" --name OroHermandad --dir "$RUNNER_TEMP/addon"
+          for file in OroHermandad.zip notas-version.md; do
+            [ -s "$RUNNER_TEMP/addon/$file" ] || { echo "Falta $file en el artefacto OroHermandad" >&2; exit 1; }
+          done
+
+      - name: Traer el subidor nuevo
+        if: ${{ needs.subidor.result == 'success' }}
+        run: |
+          set -euo pipefail
+          case "$SUBIDOR_VERSION" in ""|*[!0-9.]*) echo "El subidor no dio una versión válida: «$SUBIDOR_VERSION»" >&2; exit 1 ;; esac
+          gh run download "$GITHUB_RUN_ID" --name Subidor_Windows --dir "$RUNNER_TEMP/subidor"
+          [ "$(ls -A "$RUNNER_TEMP/subidor")" = "Subidor_Windows.zip" ] || { echo "El artefacto Subidor_Windows tiene que llevar solo Subidor_Windows.zip" >&2; exit 1; }
+          sha=$(sha256sum "$RUNNER_TEMP/subidor/Subidor_Windows.zip" | cut -d ' ' -f 1)
+          linea="Subidor para Windows $SUBIDOR_VERSION: Subidor_Windows.zip (SHA-256 $sha)"
+          printf '%s\n' "$linea" | grep -Eq "$LINEA_SUBIDOR" || { echo "Línea del subidor no válida: $linea" >&2; exit 1; }
+          printf '%s\n' "$linea" > "$RUNNER_TEMP/linea-subidor.txt"
+
+      # La compilación de Windows falló, se quedó sin tiempo o se pidió «reusar_subidor»: el zip de la última versión,
+      # tal cual. (Si alguien cancela la ejecución, este trabajo ni empieza: !cancelled().)
+      - name: Reutilizar el subidor de la última versión
+        if: ${{ needs.subidor.result != 'success' }}
+        run: |
+          set -euo pipefail
+          echo "El subidor no se ha compilado ($SUBIDOR_RESULTADO): se adjunta el de la última versión, sin cambios."
+          anterior=$(gh release view --json tagName --jq .tagName) || { echo "No hay ninguna versión anterior de la que sacar el subidor" >&2; exit 1; }
+          gh release view "$anterior" --json body --jq .body | tr -d '\r' > "$RUNNER_TEMP/notas-anteriores.md"
+          linea=$(grep -E "$LINEA_SUBIDOR" "$RUNNER_TEMP/notas-anteriores.md" | head -n 1) || true
+          [ -n "$linea" ] || { echo "Las notas de $anterior no tienen la línea del subidor: la primera versión necesita compilarlo" >&2; exit 1; }
+          version=$(printf '%s\n' "$linea" | sed -E "s/$LINEA_SUBIDOR/\1/")
+          esperado=$(printf '%s\n' "$linea" | sed -E "s/$LINEA_SUBIDOR/\4/")
+          mkdir -p "$RUNNER_TEMP/subidor"
+          gh release download "$anterior" --pattern Subidor_Windows.zip --dir "$RUNNER_TEMP/subidor" \
+            || { echo "$anterior no tiene Subidor_Windows.zip" >&2; exit 1; }
+          sha=$(sha256sum "$RUNNER_TEMP/subidor/Subidor_Windows.zip" | cut -d ' ' -f 1)
+          [ "$sha" = "$esperado" ] || { echo "El Subidor_Windows.zip de $anterior no es el de sus notas (SHA-256 $sha, esperaba $esperado)" >&2; exit 1; }
+          printf 'Subidor para Windows %s (sin cambios): Subidor_Windows.zip (SHA-256 %s)\n' "$version" "$sha" > "$RUNNER_TEMP/linea-subidor.txt"
+
+      - name: Crear la versión de GitHub con los dos zips
+        run: |
+          set -euo pipefail
+          version="${ETIQUETA#oro-hermandad-v}"
+          linea=$(cat "$RUNNER_TEMP/linea-subidor.txt")
+          { cat "$RUNNER_TEMP/addon/notas-version.md"; printf '\n%s\n\n%s\n' "$linea" "$AVISO_DESBLOQUEAR"; } > "$RUNNER_TEMP/notas.md"
+          extra=()
+          # Con guion solo pasan -alphaN y -betaN («Comprobar la versión»): lo mismo que el empaquetador sube de prueba.
+          case "$version" in *-*) extra=(--prerelease) ;; esac
+          if gh release view "$ETIQUETA" > /dev/null 2>&1; then
+            # Ya existe (se repite el trabajo o se creó a mano): se cambian los dos zips y la línea del subidor de sus notas.
+            gh release upload "$ETIQUETA" "$RUNNER_TEMP/addon/OroHermandad.zip" "$RUNNER_TEMP/subidor/Subidor_Windows.zip" --clobber
+            gh release view "$ETIQUETA" --json body --jq .body | tr -d '\r' > "$RUNNER_TEMP/notas-actuales.md"
+            n=$(grep -nE "$LINEA_SUBIDOR" "$RUNNER_TEMP/notas-actuales.md" | head -n 1 | cut -d : -f 1) || true
+            if [ -n "$n" ]; then
+              LINEA="$linea" awk -v n="$n" 'NR == n { print ENVIRON["LINEA"]; next } { print }' "$RUNNER_TEMP/notas-actuales.md" > "$RUNNER_TEMP/notas-nuevas.md"
+            else
+              { cat "$RUNNER_TEMP/notas-actuales.md"; printf '\n%s\n' "$linea"; } > "$RUNNER_TEMP/notas-nuevas.md"
+            fi
+            gh release edit "$ETIQUETA" --notes-file "$RUNNER_TEMP/notas-nuevas.md"
+          else
+            gh release create "$ETIQUETA" "$RUNNER_TEMP/addon/OroHermandad.zip" "$RUNNER_TEMP/subidor/Subidor_Windows.zip" --target "$GITHUB_SHA" \
+              --title "Oro de Hermandad $version" --notes-file "$RUNNER_TEMP/notas.md" "${extra[@]}"
+          fi
+
+  # «solo_subidor»: un subidor 0.6.x nuevo sin versión nueva del addon. Cambia Subidor_Windows.zip en la última versión y
+  # su línea en las notas; falla si no es más nuevo que el que hay. Sin comprobaciones del addon ni CurseForge.
+  subidor-suelto:
+    name: Cambiar el subidor de la última versión
+    needs: subidor
+    # !cancelled(): «comprobar» no se ejecuta con solo_subidor, y sin una condición así GitHub saltaría también este
+    # trabajo (always() seguiría aunque alguien cancelara la ejecución).
+    if: ${{ !cancelled() && inputs.solo_subidor && needs.subidor.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SUBIDOR_VERSION: ${{ needs.subidor.outputs.version }}
+    steps:
+      - name: Subir el subidor nuevo a la última versión
+        run: |
+          set -euo pipefail
+          # Solo un subidor ya fusionado: el zip de la versión de GitHub es lo que descarga la hermandad.
+          [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "Lanza «solo_subidor» desde main (ahora: $GITHUB_REF)" >&2; exit 1; }
+          case "$SUBIDOR_VERSION" in ""|*[!0-9.]*) echo "El subidor no dio una versión válida: «$SUBIDOR_VERSION»" >&2; exit 1 ;; esac
+          etiqueta=$(gh release view --json tagName --jq .tagName)
+          gh release view "$etiqueta" --json body --jq .body | tr -d '\r' > "$RUNNER_TEMP/notas-actuales.md"
+          n=$(grep -nE "$LINEA_SUBIDOR" "$RUNNER_TEMP/notas-actuales.md" | head -n 1 | cut -d : -f 1) || true
+          [ -n "$n" ] || { echo "Las notas de $etiqueta no tienen la línea del subidor" >&2; exit 1; }
+          linea=$(sed -n "${n}p" "$RUNNER_TEMP/notas-actuales.md")
+          anterior=$(printf '%s\n' "$linea" | sed -E "s/$LINEA_SUBIDOR/\1/")
+          mayor=$(printf '%s\n%s\n' "$anterior" "$SUBIDOR_VERSION" | sort -V | tail -n 1)
+          if [ "$SUBIDOR_VERSION" = "$anterior" ] || [ "$mayor" != "$SUBIDOR_VERSION" ]; then
+            echo "El subidor compilado ($SUBIDOR_VERSION) no es más nuevo que el de $etiqueta ($anterior): sube VERSION en pc_sync/hermandad.py" >&2; exit 1
+          fi
+          gh run download "$GITHUB_RUN_ID" --name Subidor_Windows --dir "$RUNNER_TEMP/subidor"
+          [ "$(ls -A "$RUNNER_TEMP/subidor")" = "Subidor_Windows.zip" ] || { echo "El artefacto Subidor_Windows tiene que llevar solo Subidor_Windows.zip" >&2; exit 1; }
+          sha=$(sha256sum "$RUNNER_TEMP/subidor/Subidor_Windows.zip" | cut -d ' ' -f 1)
+          nueva="Subidor para Windows $SUBIDOR_VERSION: Subidor_Windows.zip (SHA-256 $sha)"
+          LINEA="$nueva" awk -v n="$n" 'NR == n { print ENVIRON["LINEA"]; next } { print }' "$RUNNER_TEMP/notas-actuales.md" > "$RUNNER_TEMP/notas-nuevas.md"
+          gh release upload "$etiqueta" "$RUNNER_TEMP/subidor/Subidor_Windows.zip" --clobber
+          gh release edit "$etiqueta" --notes-file "$RUNNER_TEMP/notas-nuevas.md"
+          echo "$etiqueta: subidor $anterior → $SUBIDOR_VERSION (SHA-256 $sha)"
+
+  # 4. Las tiendas, solo después de una versión de GitHub publicada.
+  curseforge:
+    name: Subir a CurseForge
+    needs: github
+    if: ${{ !cancelled() && needs.github.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: publicar-addon
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # Nunca dos veces la misma versión. «Re-run failed jobs» (o «Re-run all jobs») tras un fallo de la compilación de
+      # Windows repite también este trabajo, y un «Run workflow» nuevo de una versión ya publicada (o la etiqueta subida
+      # además de lanzarlo a mano) es otra ejecución en el mismo commit, que es la misma versión (C9). Se miran todas las
+      # ejecuciones de este flujo en este commit, esta incluida, con todos sus intentos: si en alguna terminó bien el paso
+      # que sube, no se sube otra vez. Si GitHub no contesta, el paso falla (mejor ninguna subida que dos). El token de
+      # gh (solo lectura) solo está en este paso, nunca en el del empaquetador.
+      - name: ¿Ya se subió esta versión?
+        id: antes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ejecuciones=$({ printf '%s\n' "$GITHUB_RUN_ID"
+            gh api "repos/$GH_REPO/actions/workflows/publicar-oro-hermandad.yml/runs?head_sha=$GITHUB_SHA&per_page=100" --paginate \
+              --jq '.workflow_runs[].id'; } | sort -un)
+          while IFS= read -r ejecucion; do
+            subido=$(gh api "repos/$GH_REPO/actions/runs/$ejecucion/jobs?filter=all&per_page=100" --paginate \
+              --jq '.jobs[] | select(.name == "Subir a CurseForge") | (.steps // [])[] | select(.name == "Empaquetar y subir a CurseForge" and .conclusion == "success") | .name')
+            if [ -n "$subido" ]; then
+              echo "::notice::Esta versión ya se subió a CurseForge en la ejecución $ejecucion de este flujo: no se sube otra vez."
+              echo "ya=1" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done <<< "$ejecuciones"
+
+      - name: Descargar el código de la etiqueta
+        if: steps.antes.outputs.ya != '1'
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: refs/tags/${{ env.ETIQUETA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Notas de la versión y comprobar el ID y la clave
+        if: steps.antes.outputs.ya != '1'
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          set -eu
+          version="${ETIQUETA#oro-hermandad-v}"
+          tr -d '\r' < addon/OroHermandad/CAMBIOS.md | awk -v v="$version" '/^## / { if (found) exit; if ($2 == v) { found = 1; next } } found { print } END { if (!found) exit 1 }' \
+            > .notas-version.md
+          if ! tr -d '\r' < addon/OroHermandad/OroHermandad.toc | grep -q '^## X-Curse-Project-ID: *[0-9][0-9]*$'; then
+            echo "::notice::El TOC no tiene ## X-Curse-Project-ID: esta versión no se sube a CurseForge."
+          elif [ -z "$CF_API_TOKEN" ]; then
+            echo "Falta el secreto CF_API_TOKEN en el entorno publicar-addon" >&2; exit 1
+          fi
+
+      # -a 0: aquí solo CurseForge (Wago va en su propio trabajo). Sin ID en el TOC, el empaquetador no sube nada.
+      - name: Empaquetar y subir a CurseForge
+        if: steps.antes.outputs.ya != '1'
+        uses: BigWigsMods/packager@01e8631a69c69d7654c788d152630d5fed9e3812 # v2.7.0
+        with:
+          args: -a 0 ${{ env.EMPAQUETADOR_OPCIONES }}
+          pandoc: false
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+
+  wago:
+    name: Subir a Wago
+    needs: github
+    if: ${{ !cancelled() && needs.github.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: publicar-addon
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # Nunca dos veces la misma versión: como en CurseForge (todas las ejecuciones de este flujo en este commit, con
+      # todos sus intentos, y el paso que sube a Wago). El token de gh solo está en este paso.
+      - name: ¿Ya se subió esta versión?
+        id: antes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ejecuciones=$({ printf '%s\n' "$GITHUB_RUN_ID"
+            gh api "repos/$GH_REPO/actions/workflows/publicar-oro-hermandad.yml/runs?head_sha=$GITHUB_SHA&per_page=100" --paginate \
+              --jq '.workflow_runs[].id'; } | sort -un)
+          while IFS= read -r ejecucion; do
+            subido=$(gh api "repos/$GH_REPO/actions/runs/$ejecucion/jobs?filter=all&per_page=100" --paginate \
+              --jq '.jobs[] | select(.name == "Subir a Wago") | (.steps // [])[] | select(.name == "Empaquetar y subir a Wago" and .conclusion == "success") | .name')
+            if [ -n "$subido" ]; then
+              echo "::notice::Esta versión ya se subió a Wago en la ejecución $ejecucion de este flujo: no se sube otra vez."
+              echo "ya=1" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done <<< "$ejecuciones"
+
+      - name: Descargar el código de la etiqueta
+        if: steps.antes.outputs.ya != '1'
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: refs/tags/${{ env.ETIQUETA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Notas de la versión y comprobar el ID y la clave
+        if: steps.antes.outputs.ya != '1'
+        env:
+          WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
+        run: |
+          set -eu
+          version="${ETIQUETA#oro-hermandad-v}"
+          tr -d '\r' < addon/OroHermandad/CAMBIOS.md | awk -v v="$version" '/^## / { if (found) exit; if ($2 == v) { found = 1; next } } found { print } END { if (!found) exit 1 }' \
+            > .notas-version.md
+          if ! tr -d '\r' < addon/OroHermandad/OroHermandad.toc | grep -q '^## X-Wago-ID: *[A-Za-z0-9]\{8\}$'; then
+            echo "::notice::El TOC no tiene ## X-Wago-ID: esta versión no se sube a Wago."
+          elif [ -z "$WAGO_API_TOKEN" ]; then
+            echo "Falta el secreto WAGO_API_TOKEN en el entorno publicar-addon" >&2; exit 1
+          fi
+
+      # -p 0: aquí solo Wago. Sin X-Wago-ID en el TOC, el empaquetador no sube nada.
+      - name: Empaquetar y subir a Wago
+        if: steps.antes.outputs.ya != '1'
+        uses: BigWigsMods/packager@01e8631a69c69d7654c788d152630d5fed9e3812 # v2.7.0
+        with:
+          args: -p 0 ${{ env.EMPAQUETADOR_OPCIONES }}
+          pandoc: false
+        env:
+          WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}

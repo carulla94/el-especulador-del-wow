@@ -175,14 +175,39 @@ function Extras.RegisterSettings(core)
       Settings.CreateSlider(category, budgetSetting, options,
         "Oro máximo para comprar chollos (cada uno usa como mucho la cuarta parte). En 0, el 25 % del oro que llevas.")
     end)
+    local function sectionHeader(title, text)
+      if layout and type(layout.AddInitializer) == "function" and type(CreateSettingsListSectionHeaderInitializer) == "function" then
+        layout:AddInitializer(CreateSettingsListSectionHeaderInitializer(title, text))
+      end
+    end
+    -- Escáner de la subasta (0.6.0, Scanner.lua): cuándo escanear y si se apuntan tus ventas. Sin Scanner.lua (un
+    -- /reload tras actualizar) no sale.
+    pcall(function()
+      if not (core.ScannerLoaded and core.ScannerLoaded()) then return end
+      sectionHeader("Escáner de la subasta")
+      local scanSetting = Settings.RegisterProxySetting(category, "OroHermandad_ScanMode", Settings.VarType.String,
+        "Escanear la subasta", "propose", function() return core.ScannerMode() end,
+        function(value) core.SetScannerMode(value) end)
+      Settings.CreateDropdown(category, scanSetting, function()
+        local container = Settings.CreateControlTextContainer()
+        container:Add("propose", "Proponerlo al abrir la subasta")
+        container:Add("auto", "Escanear cada vez que abro la subasta")
+        container:Add("off", "Solo con el botón")
+        return container:GetData()
+      end, "Un escaneo completo tarda unos segundos y no se nota en el juego. La subasta deja uno cada 15 minutos por "
+        .. "cuenta; si Auctionator ya escanea la subasta entera al abrirla, se usa el suyo.")
+      local salesSetting = Settings.RegisterProxySetting(category, "OroHermandad_ScanSales", Settings.VarType.Boolean,
+        "Apuntar mis ventas para «Cuándo vender»", true, function() return core.ScannerSales() end,
+        function(value) core.SetScannerSales(value) end)
+      Settings.CreateCheckbox(category, salesSetting, "Solo en este PC: tus ventas no se comparten ni se suben.")
+    end)
     -- Precios compartidos con la hermandad: solo un texto (se cambia con /oro compartir y /oro subidor).
     pcall(function()
-      if layout and type(layout.AddInitializer) == "function" and type(CreateSettingsListSectionHeaderInitializer) == "function" then
-        layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Precios compartidos con la hermandad",
-          "Al terminar un escaneo completo se comparten, sin que se vea en el chat, el precio más bajo y las unidades de "
-            .. "la lista fija; los compañeros nunca salen con su nombre. /oro compartir off deja de compartir los tuyos. "
-            .. "/oro subidor on|off|auto: el PC que sube los precios al panel pide los que se perdió."))
-      end
+      sectionHeader("Precios compartidos con la hermandad",
+        "Al terminar un escaneo completo se comparten, sin que se vea en el chat, el precio más bajo y las unidades de "
+          .. "la lista fija; los compañeros nunca salen con su nombre. Los escaneos llevan también una estimación de "
+          .. "cuántas unidades se vendieron entre dos escaneos (sin nombres). /oro compartir off deja de compartir los "
+          .. "tuyos. /oro subidor on|off|auto: el PC que sube los precios al panel pide los que se perdió.")
     end)
     Settings.RegisterAddOnCategory(category)
     state.categoryID = category:GetID()

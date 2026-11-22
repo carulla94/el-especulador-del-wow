@@ -8,10 +8,15 @@
  *
  * Upload contract (pc_sync/hermandad.py -> POST /api/guild/sync, Authorization: Bearer gld_...), two schemas:
  *   schema 1 (uploader 0.3): {schema: 1, addon, markets: [{market: "<Reino>-Alliance|Horde", cut: bp|null, items: [{id,
- *    name, cat, vendor, days: [[d, lo, hi, last, qty, scans, "o"|"a"]], points: [[t, lo, qty, qty5]]}],
+ *    name, cat, vendor, days: [[d, lo, hi, last, qty, scans, "o"|"a"]], points: [[t, lo, qty, qty5]], sold?}],
  *    deposits: [[id, dur, copper]]}]}
  *   schema 2 (uploader 0.4, relay-v1): {schema: 2, addon, markets: [{market, cut, items: [{id, name, cat, vendor}],
- *    deposits, observers: [{obs: "<8 hex>"|null, self: true|false, aliases?: ["<8 hex>"], items: [{id, days, points}]}]}]}
+ *    deposits, observers: [{obs: "<8 hex>"|null, self: true|false, aliases?: ["<8 hex>"], items: [{id, days, points,
+ *    sold?}]}]}]}
+ * Since the 0.6.0 uploader a series (an item of schema 1, an observer's item of schema 2) may carry sold: [[t, dt,
+ * units]], the sell-through estimate the addon made between two full scans of the same person, one entry per point of
+ * the series that has one (t is the point's time, dt the seconds since that person's previous scan). Older uploaders
+ * never send it and older servers ignore it; it is stored with its point (guild_obs_point.dt and .sold).
  * In schema 2 the self observer is the uploader's own characters (obs and aliases are their codes) and every other
  * observer is a guild mate whose whole Auctionator scans the uploader's addon received over the hidden addon channel.
  * An observer code is a pseudonymous FNV-1a hash of guild and character computed in the game: names never reach
@@ -24,13 +29,18 @@
  * The whole body is validated before anything is written, and an identical body is recognised by its SHA-256. */
 import {DAY0, LAUNCH, GUARD_DAYS, BUDGET, CUT_BP, PRICE_MAX, CATEGORIES, VERSION, median, quantile, dayIndex, mergeDay, dayValue,
   baseline, assess, flip, deltas, weekday, texts, idiv} from "./especular.mjs";
-import {buildTiming, TIMING, TIMING_VERSION} from "./timing.mjs";
+import {buildTiming, TIMING, TIMING_VERSION, SALES} from "./timing.mjs";
 import {FISHING, validateFishing, fishingReport} from "./fishing.mjs";
 
 export const GUILD_ID = "guild-forever-eu-v1";
 export const GUILD_COOKIE = "__Host-especulador_hermandad";
 export const SESSION_SECONDS = 7 * 86400;
 export const KEY_PATTERN = /^gld_[A-Za-z0-9_-]{43}$/;
+/** The newest uploader (pc_sync/hermandad.py VERSION) the panel offers: every sync answer says it (subidor.ultima) and
+ * the 0.6.0 window tells its user when theirs is older. Raise it only in a pull request of its own, after the new
+ * Subidor_Windows.zip is attached to the latest GitHub release, so no window announces a version that cannot be
+ * downloaded yet. */
+export const LATEST_UPLOADER = "0.6.0";
 export const LIMITS = Object.freeze({
   body: 2 * 1024 * 1024, adminBody: 4096, loginBody: 2048,
   keys: 50, members: 50, markets: 20, itemsPerMarket: 300,
@@ -125,13 +135,26 @@ const isMate = person => person >= RELAYED_SLOT_BASE;
 const sameDay = (a, b) => a.lo === b.lo && a.hi === b.hi && a.last === b.last && a.qty === b.qty && a.scans === b.scans && a.src === b.src;
 /** What a day aggregate depends on: a relayed day is only rewritten when one of these changes. */
 const samePrice = (a, b) => a.lo === b.lo && a.hi === b.hi && a.qty === b.qty && a.src === b.src;
-/** The addon's merge of two points of one observer at the same time: lo = min, qty = max, qty5 of the cheaper one. */
+/** The addon's merge of two points of one observer at the same time: lo = min, qty = max, qty5 of the cheaper one, and
+ * the sell-through sample with the larger dt (equal dt: the larger sold); a point without a sample never removes one.
+ * dt and sold are null without a sample (stored rows of older uploads, points sent without one). */
 function mergePoint(a, b) {
-  if (!a) return {t: b.t, lo: b.lo, qty: b.qty, qty5: b.qty5};
+  if (!a) return {t: b.t, lo: b.lo, qty: b.qty, qty5: b.qty5, dt: b.dt ?? null, sold: b.sold ?? null};
   const qty5 = b.lo < a.lo ? b.qty5 : b.lo === a.lo ? Math.max(a.qty5, b.qty5) : a.qty5;
-  return {t: a.t, lo: Math.min(a.lo, b.lo), qty: Math.max(a.qty, b.qty), qty5};
+  const ad = a.dt ?? null, bd = b.dt ?? null;
+  const sample = bd !== null && (ad === null || bd > ad || (bd === ad && b.sold > a.sold)) ? b : a;
+  return {t: a.t, lo: Math.min(a.lo, b.lo), qty: Math.max(a.qty, b.qty), qty5, dt: sample.dt ?? null, sold: sample.sold ?? null};
 }
-const samePoint = (a, b) => a.lo === b.lo && a.qty === b.qty && a.qty5 === b.qty5;
+const samePoint = (a, b) => a.lo === b.lo && a.qty === b.qty && a.qty5 === b.qty5 && (a.dt ?? null) === (b.dt ?? null)
+  && (a.sold ?? null) === (b.sold ?? null);
+/** The markets named in a body that was accepted before (a duplicate), for the sync answer's estado; [] if unreadable. */
+function marketsNamed(raw) {
+  try {
+    const markets = parseObject(raw).markets;
+    if (!Array.isArray(markets)) return [];
+    return [...new Set(markets.map(m => m?.market).filter(m => typeof m === "string" && MARKET_PATTERN.test(m)))].slice(0, LIMITS.marketsPerUpload);
+  } catch { return []; }
+}
 /** A validated market of either schema as the store ingests it: item metadata, deposits and observers. Schema 1 has
  * one observer, the uploader's own characters, without codes. */
 function observersOf(m) {
@@ -351,6 +374,24 @@ export function validateUpload(data, {today, nowSec}) {
       return {t, lo, qty: quantity, qty5};
     });
   };
+  // The sell-through samples of a series (uploader 0.6.0): at most one per point sent, [t, dt, units] with t the time of
+  // one of those points, in ascending order. They ride on their points as {dt, sold}. Absent: no samples.
+  const soldOf = (list, points, at) => {
+    if (list === undefined) return points;
+    const what = "cada venta es [t, dt, unidades] de un punto de la serie";
+    if (!Array.isArray(list) || list.length > points.length) bad(at, what);
+    const byTime = new Map(points.map(p => [p.t, p]));
+    let previous = -Infinity;
+    list.forEach((r, ri) => {
+      const here = `${at}, venta n.º ${ri + 1}`;
+      if (!Array.isArray(r) || r.length !== 3) bad(here, what);
+      const [t, dt, units] = r;
+      if (!Number.isSafeInteger(t) || t <= previous || !byTime.has(t) || !isInt(dt, SALES.dtMin, SALES.dtMax) || !isInt(units, 0, LIMITS.qtyMax)) bad(here, what);
+      previous = t;
+      Object.assign(byTime.get(t), {dt, sold: units});
+    });
+    return points;
+  };
   const code = value => typeof value === "string" && OBSERVER_PATTERN.test(value);
   const markets = data.markets.map((m, mi) => {
     let where = `mercado n.º ${mi + 1}`;
@@ -375,7 +416,7 @@ export function validateUpload(data, {today, nowSec}) {
       // Schema 2 keeps the metadata here and the series in observers.
       if (relay) return {id: item.id, name: item.name, cat: item.cat, vendor: item.vendor};
       return {id: item.id, name: item.name, cat: item.cat, vendor: item.vendor,
-        days: daysOf(item.days, at, LIMITS.daysPerItem, true), points: pointsOf(item.points, at, LIMITS.pointsPerItem)};
+        days: daysOf(item.days, at, LIMITS.daysPerItem, true), points: soldOf(item.sold, pointsOf(item.points, at, LIMITS.pointsPerItem), at)};
     });
     const deposits = m.deposits === undefined ? [] : m.deposits;
     if (!Array.isArray(deposits) || deposits.length > LIMITS.itemsPerUpload * 9) bad(where, `deposits debe ser una lista de ${LIMITS.itemsPerUpload * 9} depósitos como máximo`);
@@ -420,7 +461,7 @@ export function validateUpload(data, {today, nowSec}) {
         inSeries.add(s.id);
         if (++series > LIMITS.seriesPerUpload) bad("", `el envío no puede llevar más de ${LIMITS.seriesPerUpload} series`);
         return {id: s.id, days: daysOf(s.days, at, isOwn ? LIMITS.daysPerItem : LIMITS.relayDaysPerItem, isOwn),
-          points: pointsOf(s.points, at, isOwn ? LIMITS.pointsPerItem : LIMITS.relayPointsPerItem)};
+          points: soldOf(s.sold, pointsOf(s.points, at, isOwn ? LIMITS.pointsPerItem : LIMITS.relayPointsPerItem), at)};
       });
       const observer = {obs: o.obs, self: o.self, aliases, items: list};
       if (o.self) own = observer; else mates.push([oi, observer]);
@@ -524,6 +565,7 @@ export class GuildStore {
         last_seen INTEGER NOT NULL, last_by INTEGER NOT NULL, PRIMARY KEY (market, slot))`
     ]) this.sql.exec(statement);
     this.migrate();
+    this.addColumns();
   }
   /** Database schema 1 -> 2, once and atomically: every row an upload writes records its uploader (uploaded_by; NULL
    * on older rows means the slot's own member). Additive only: no row or column is changed or removed, so data
@@ -537,6 +579,17 @@ export class GuildStore {
       this.run("ALTER TABLE guild_obs_point ADD COLUMN uploaded_by INTEGER");
       this.run("UPDATE guild_meta SET value='2' WHERE key='schema'");
     });
+  }
+  /** Columns added after schema 2, each only when missing (PRAGMA table_info), so opening the database again changes
+   * nothing: dt and sold of guild_obs_point (0.6.0), the sell-through sample of a point. Rows written before keep NULL
+   * (no sample) and every older uploader keeps working. */
+  addColumns() {
+    const missing = () => {
+      const have = new Set(this.rows("PRAGMA table_info(guild_obs_point)").map(r => r.name));
+      return ["dt", "sold"].filter(name => !have.has(name));
+    };
+    if (!missing().length) return;
+    this.transaction(() => { for (const name of missing()) this.run(`ALTER TABLE guild_obs_point ADD COLUMN ${name} INTEGER`); });
   }
 
   /** Every statement runs to the end and its cursor.rowsWritten (Cloudflare's billed rows, index entries included) is
@@ -774,7 +827,7 @@ export class GuildStore {
       added: new Set(), observers: new Map(), codes: null, fresh: 0, bindRows: 0, rebind: new Map()};
     const relay = upload.schema === 2, report = {rowsChanged: 0, markets: []}, plans = [];
     for (const m of upload.markets) {
-      const entry = {market: m.market, items: 0, days: 0, points: 0, deposits: 0, skippedItems: [], skipped: null,
+      const entry = {market: m.market, items: 0, days: 0, points: 0, deposits: 0, sold: 0, skippedItems: [], skipped: null,
         ...(relay ? {observers: 0, skippedObservers: [], selfConflicts: []} : {})};
       report.markets.push(entry);
       const plan = this.openMarket(observersOf(m), entry, scope);
@@ -923,7 +976,7 @@ export class GuildStore {
     return out;
   }
   storedPoints(plan, slot, id, from, to) {
-    const out = new Map(this.rows("SELECT t,lo,qty,qty5 FROM guild_obs_point WHERE market=? AND member_id=? AND item_id=? AND t>=? AND t<=?",
+    const out = new Map(this.rows("SELECT t,lo,qty,qty5,dt,sold FROM guild_obs_point WHERE market=? AND member_id=? AND item_id=? AND t>=? AND t<=?",
       plan.m.market, slot, id, from, to).map(r => [r.t, r]));
     for (const [t, r] of out) plan.storedPoints.set(`${slot}|${id}|${t}`, r);
     return out;
@@ -976,7 +1029,8 @@ export class GuildStore {
           plan.days.push({slot: memberId, id: item.id, ...merged});
         }
       }
-      // Points: the addon's merge for the same time (lo = min, qty = max, qty5 of the cheaper point).
+      // Points: the addon's merge for the same time (lo = min, qty = max, qty5 of the cheaper point, the longer sample).
+      // A resent point whose sample changes is one more update, counted like any changed point.
       if (mine.points.length) {
         const stored = this.storedPoints(plan, memberId, item.id, mine.points[0].t, mine.points.at(-1).t);
         for (const point of mine.points) {
@@ -1111,9 +1165,10 @@ export class GuildStore {
     // 14 days and 200 points per slot and item; only points of today change today's summary.
     const pointItems = new Map();
     for (const x of plan.finalPoints) {
-      this.run(`INSERT INTO guild_obs_point(market,member_id,item_id,t,lo,qty,qty5,uploaded_by) VALUES (?,?,?,?,?,?,?,?)
-        ON CONFLICT(market,member_id,item_id,t) DO UPDATE SET lo=excluded.lo,qty=excluded.qty,qty5=excluded.qty5,uploaded_by=excluded.uploaded_by`,
-        market, slotOf(x), x.id, x.t, x.lo, x.qty, x.qty5, member.memberId);
+      this.run(`INSERT INTO guild_obs_point(market,member_id,item_id,t,lo,qty,qty5,uploaded_by,dt,sold) VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(market,member_id,item_id,t) DO UPDATE SET lo=excluded.lo,qty=excluded.qty,qty5=excluded.qty5,uploaded_by=excluded.uploaded_by,
+        dt=excluded.dt,sold=excluded.sold`,
+        market, slotOf(x), x.id, x.t, x.lo, x.qty, x.qty5, member.memberId, x.dt ?? null, x.sold ?? null);
       pointItems.set(slotOf(x) + ":" + x.id, [slotOf(x), x.id]);
       if (x.t >= dayStart(T)) shown++;
     }
@@ -1137,7 +1192,8 @@ export class GuildStore {
     this.run(`INSERT INTO guild_member_markets(market,member_id,cut,addon,last_upload_at,since) VALUES (?,?,?,?,?,?)
       ON CONFLICT(market,member_id) DO UPDATE SET cut=excluded.cut,addon=excluded.addon,last_upload_at=excluded.last_upload_at`,
       market, member.memberId, plan.cut, addon, nowSec, plan.since);
-    Object.assign(entry, {days: plan.finalDays.length, points: plan.finalPoints.length, deposits: plan.deposits.length});
+    Object.assign(entry, {days: plan.finalDays.length, points: plan.finalPoints.length, deposits: plan.deposits.length,
+      sold: plan.finalPoints.filter(x => (x.dt ?? null) !== null).length});
     shown += plan.inserts.length + plan.updates.length + plan.deposits.length;
     if (shown > 0 || (known?.cut ?? null) !== plan.cut) this.run("DELETE FROM guild_summary_cache WHERE market=?", market);
     return plan.inserts.length + plan.updates.length + plan.vendors.length + plan.finalDays.length + plan.finalPoints.length + plan.deposits.length;
@@ -1312,8 +1368,8 @@ export class GuildStore {
     }
     if (!this.marketKnown(market)) return null;
     const persons = this.persons();
-    const points = this.rows("SELECT item_id,member_id,t,lo,qty FROM guild_obs_point WHERE market=? AND t>=?", market, nowSec - TIMING.days * 86400)
-      .map(r => ({item_id: r.item_id, person: personOf(persons, r.member_id), t: r.t, lo: r.lo, qty: r.qty}));
+    const points = this.rows("SELECT item_id,member_id,t,lo,qty,dt,sold FROM guild_obs_point WHERE market=? AND t>=?", market, nowSec - TIMING.days * 86400)
+      .map(r => ({item_id: r.item_id, person: personOf(persons, r.member_id), t: r.t, lo: r.lo, qty: r.qty, dt: r.dt, sold: r.sold}));
     const days = this.rows("SELECT item_id,day,v FROM guild_day_agg WHERE market=? AND day>=? AND day<=?", market,
       T - TIMING.dayValues - TIMING.halfWindow, T);
     const payload = JSON.stringify({market, rules: TIMING_VERSION, computedAt: iso(nowSec), ...buildTiming({points, days, T})});
@@ -1594,7 +1650,10 @@ export class GuildMarket {
     // From here on everything is synchronous, so a concurrent revocation or retry of the same body cannot interleave.
     key = store.keyByHash(hash);
     if (!key || key.revoked) return json({error: "La clave de la hermandad se ha revocado durante el envío."}, 401);
-    if (store.uploadExists(key.memberId, digest)) return json({accepted: true, duplicate: true, rowsChanged: 0, day: T, message: "Este envío ya se había recibido: sin cambios."});
+    if (store.uploadExists(key.memberId, digest)) {
+      return json({accepted: true, duplicate: true, rowsChanged: 0, day: T, message: "Este envío ya se había recibido: sin cambios.",
+        ...this.syncState(marketsNamed(raw), T, nowSec)});
+    }
     const upload = validateUpload(parseObject(raw), {today: T, nowSec});
     const used = store.uploadsOn(key.memberId, T);
     if (used >= LIMITS.uploadsPerDay) return json({error: `Ya has hecho ${LIMITS.uploadsPerDay} envíos hoy, el máximo diario. Vuelve a intentarlo mañana.`}, 429);
@@ -1609,7 +1668,17 @@ export class GuildMarket {
     const changes = report.rowsChanged;
     return json({accepted: true, duplicate: false, day: T, rowsChanged: changes, markets: report.markets,
       uploadsToday: used + 1, uploadsLeft: LIMITS.uploadsPerDay - used - 1,
-      message: changes ? `Envío aceptado: ${plural(changes, "cambio", "cambios")}.` : "Envío aceptado: sin cambios."});
+      message: changes ? `Envío aceptado: ${plural(changes, "cambio", "cambios")}.` : "Envío aceptado: sin cambios.",
+      ...this.syncState(upload.markets.map(m => m.market), T, nowSec)});
+  }
+  /** What the 0.6.0 uploader shows in its window and writes into the addon's marker, on every accepted answer: per market
+   * of the upload, the members who uploaded in 14 days (suben) and the persons who fed prices in 14 days (aportan), as
+   * the panel strip counts them, and the newest uploader the panel offers. Older uploaders ignore both. */
+  syncState(markets, T, nowSec) {
+    return {estado: {mercados: markets.map(market => {
+      const fresh = this.store.freshness(market, T, nowSec);
+      return {market, suben: fresh.contributors, aportan: fresh.observers};
+    })}, subidor: {ultima: LATEST_UPLOADER}};
   }
 
   /** POST /api/guild/fishing: the Forever Fishing sessions the uploader read (src/fishing.mjs). */

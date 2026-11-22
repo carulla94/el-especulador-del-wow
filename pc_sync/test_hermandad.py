@@ -8,6 +8,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -157,7 +159,9 @@ class Quiet(unittest.TestCase):
         self.addCleanup(redirect.__exit__, None, None, None)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        self.tmp = Path(folder.name)
+        # resolve(): en Windows la carpeta temporal puede venir con el nombre corto 8.3 (RUNNER~1) y el
+        # subidor guarda rutas resueltas (nombre largo); así las comparaciones de las pruebas coinciden.
+        self.tmp = Path(folder.name).resolve()
 
 
 # -----------------------------------------------------------------------------------------------------------
@@ -448,7 +452,10 @@ class SourceTests(Quiet):
             self.assertEqual(h.detect_wow_folders(env), [(program_files / "World of Warcraft").resolve()])
         with patch.object(h, "_windows", return_value=False), patch.object(Path, "home", return_value=self.tmp):
             (self.tmp / "Games").mkdir()
-            os.symlink(root, self.tmp / "Games" / "World of Warcraft")
+            try:
+                os.symlink(root, self.tmp / "Games" / "World of Warcraft", target_is_directory=True)
+            except (OSError, NotImplementedError) as error:
+                self.skipTest(f"sin enlaces simbólicos aquí: {error}")
             self.assertEqual(h.detect_wow_folders({}), [root.resolve()])
 
 
@@ -1066,7 +1073,7 @@ class CliTests(Quiet):
             self.assertEqual(task["Actions/Exec/Arguments"], f'"{HERE / "hermandad.py"}" --segundo-plano')
             self.assertEqual(task["Actions/Exec/WorkingDirectory"], str(HERE))
             # Paths with XML characters stay intact, and without USERNAME the task has no fixed user.
-            odd = self.tmp / "Tom & Jerry <1>"
+            odd = self.tmp / ("Tom & Jerry's <1>" if os.name != "nt" else "Tom & Jerry's 1")   # < > not on Windows
             odd.mkdir()
             (odd / "hermandad.py").write_text("")
             with patch.object(h, "TASK_COMMAND_MAX", 10_000):          # whatever the length of the temporary folder
@@ -1110,9 +1117,11 @@ class CliTests(Quiet):
         before = self.wow_files(marker)
         self.assertEqual(self.main(["--once"], answers=[URL, ""]), 0)
         self.assertEqual(len(self.calls), 1)
+        # 0.6.0: the CLI writes marker v2 too (same TOC; the Lua file carries the status after the first cycle).
+        status = {"escrito": NOW, "version": "0.6.0", "envio": {"t": NOW, "estado": "ok"}}
         self.assertEqual({p.name: p.read_bytes() for p in marker.iterdir()},
-                         {name: (FIXTURES / "companion" / h.MARKER_FOLDER / name).read_bytes()
-                          for name in (h.MARKER_TOC, h.MARKER_LUA)})
+                         {h.MARKER_TOC: (FIXTURES / "companion" / h.MARKER_FOLDER / h.MARKER_TOC).read_bytes(),
+                          h.MARKER_LUA: h.marker_lua(status)})
         self.assertEqual(self.wow_files(marker), before)
         self.assertEqual(self.output.getvalue().count(h.MARKER_LINES["created"]), 1)
         self.assertIn("(un /reload no basta)", h.MARKER_LINES["created"])
@@ -1178,9 +1187,16 @@ class CliTests(Quiet):
                 if polls > 6:
                     raise h.AuthenticationError("parar")
                 return {"status": "ok", "events": []}
-        self.assertEqual(h.MARKER_POLLS * h.POLL_SECONDS, 3600)
+        self.assertEqual(h.MARKER_POLLS * h.POLL_SECONDS, 1800)
+        # Revisado cada media hora y reescrito a la hora: el aviso nunca llega a las 2 h con el subidor abierto
+        # (también con una espera larga por medio: RunForTheWindowTests, test_a_long_429_...).
+        self.assertLessEqual(h.MARKER_REFRESH + h.MARKER_POLLS * h.POLL_SECONDS, 5400)
+        now = [0]
+
+        def sleep(seconds):
+            now[0] += seconds
         with patch.object(h, "MARKER_POLLS", 2):
-            self.assertEqual(h.run(Uploader(), sleep=lambda s: None, marker=marker), 2)
+            self.assertEqual(h.run(Uploader(), sleep=sleep, marker=marker, clock=lambda: now[0]), 2)
         self.assertEqual(asked, [0, 2, 4, 6])
         out = self.output.getvalue()
         self.assertEqual((out.count(h.MARKER_LINES["denied"]), out.count(h.MARKER_LINES["created"])), (1, 1))
@@ -1228,6 +1244,28 @@ class PackagingTests(unittest.TestCase):
             self.assertIn(needle, text)
         self.assertNotIn("gld_", text)
 
+    def test_the_console_uploader_never_writes_pyc_next_to_itself(self):
+        """R2-10 (console download): every entry of Sincronizador_PC.zip has the same time, so a __pycache__ next to
+        hermandad.py would keep running the old sincronizar.py of the same size after extracting a new version over
+        it. Run as a script, hermandad.py writes no .pyc; imported (the window, these tests), it changes nothing."""
+        with tempfile.TemporaryDirectory() as folder:
+            app, cache = Path(folder).resolve() / "Sincronizador_PC", Path(folder).resolve() / "pyc"
+            app.mkdir()
+            for name in ("hermandad.py", "sincronizar.py"):
+                shutil.copyfile(HERE / name, app / name)
+            # pycache_prefix: whatever is written goes there, never next to the library of the Python that runs this.
+            result = subprocess.run([sys.executable, "-E", "-s", "-X", f"pycache_prefix={cache}", str(app / "hermandad.py"),
+                                     "--help"], cwd=str(app), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+            self.assertFalse((app / "__pycache__").exists())
+            written = sorted(p.name.split(".")[0] for p in cache.rglob("*.pyc"))
+            self.assertNotIn("sincronizar", written)
+            imported = subprocess.run([sys.executable, "-E", "-s", "-X", f"pycache_prefix={cache}", "-c",
+                                       "import sys, hermandad; print(sys.dont_write_bytecode)"], cwd=str(app),
+                                      stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+            self.assertEqual(imported.stdout.strip(), "False", imported.stderr[-2000:])
+
     def test_downloads_zip_ships_the_guild_uploader(self):
         script = (HERE.parent / "scripts" / "prepare-downloads.mjs").read_text(encoding="utf-8")
         line = next(line for line in script.splitlines() if "Sincronizador_PC.zip" in line)
@@ -1258,8 +1296,8 @@ class PackagingTests(unittest.TestCase):
             self.assertNotIn(promise, source)
         for needle in ("pseudonymous, not anonymous", "Interface/AddOns/OroHermandad_Subidor", "Character names never leave"):
             self.assertIn(needle, h.__doc__)
-        self.assertEqual(h.VERSION, "0.5.0")
-        self.assertEqual(h.USER_AGENT, "OroHermandadPC/0.5.0")
+        self.assertEqual(h.VERSION, "0.6.0")
+        self.assertEqual(h.USER_AGENT, "OroHermandadPC/0.6.0")
         out = io.StringIO()
         with contextlib.redirect_stdout(out), tempfile.TemporaryDirectory() as home:
             self.assertEqual(h.main(["--quitar-aviso"], home=home, protector=None), 0)
@@ -1593,8 +1631,8 @@ class RelayUploadTests(Quiet):
             self.assertEqual(series_of(first, "bbbb0001")[2589]["points"], [], "the mates' points stay out")
             self.assertEqual(series_of(first)[2589]["points"], [[NOW - 7200, 80, 350, 40]], "this account's stay in")
             self.assertEqual(len(series_of(first)[2589]["days"]), 15)
-            self.assertEqual(h.describe(event)[-1], "Cuenta CUENTA1: aviso: el envío pasaba de 2 MiB: esta vez van sin "
-                                                    "los puntos de los compañeros.")
+            self.assertEqual(h.describe(event)[-1], "Cuenta CUENTA1: aviso: el envío pasaba de 2 MiB: los puntos de "
+                                                    "escaneo de 1 compañero irán en el siguiente.")
             saved = self.state[str(self.file)]
             self.assertEqual((saved["file"], saved["payload"]), (None, None), "the file does not count as sent")
             self.assertIn("bbbb0001", saved["markets"][MIRAGE]["obs"])
@@ -1611,6 +1649,47 @@ class RelayUploadTests(Quiet):
             event = self.uploader(state={}).cycle()["events"][0]
             self.assertEqual((event.kind, event.partial), ("duplicate", False))
 
+    def test_over_2_mib_the_mates_points_go_a_few_mates_at_a_time_and_none_is_lost(self):
+        """R2-18: when every mate's points together do not fit, the points (and samples) of the mates with the oldest
+        scans wait and the next cycle sends them. Leaving out every mate's points at once kept their progress at 0, so
+        they never fitted and the file was recorded as sent without a single mate point."""
+        hist = relay_hist()
+        mates = [f"cccc000{m}" for m in range(1, 6)]               # cccc0001 has the newest scans
+
+        def points(m):
+            return ";".join(f"{NOW - 3600 * k - m},{100 + k},{300 + k},{30 + m},1800,{k % 3}" for k in range(1, 40))
+        hist["markets"][MIRAGE]["obs"] = {code: {"seen": NOW - 600 * m, "items": {
+            2589 + i: {"d": "2504,81,81,81,300,1,o", "p": points(m)} for i in range(4)}} for m, code in enumerate(mates, 1)}
+        write(self.file, saved_variables(hist))
+        complete = h.build_upload(hist, NOW)[0]
+
+        def without(codes):                                         # the upload without these mates' points
+            return {**complete, "markets": [{**complete["markets"][0], "observers": [
+                h._without_points(o) if o["obs"] in codes else o for o in complete["markets"][0]["observers"]]}]}
+        one = len(encoded(complete)) - len(encoded(without(mates[:1])))
+        with patch.object(h, "MAX_BODY_BYTES", len(encoded(without(mates))) + one * 5 // 2):   # two mates and a half
+            uploader = self.uploader()
+            events = [uploader.cycle()["events"][0] for _ in range(4)]
+        self.assertEqual([(e.kind, e.partial) for e in events],
+                         [("uploaded", True), ("uploaded", True), ("uploaded", False), ("unchanged", False)])
+        self.assertEqual(events[0].notes, ("el envío pasaba de 2 MiB: los puntos de escaneo de 3 compañeros irán en el "
+                                           "siguiente",))
+        sent = [{o["obs"]: {p[0] for s in o["items"] for p in s["points"]} for o in call["markets"][0]["observers"]
+                 if not o["self"]} for call in self.calls]
+        self.assertEqual([sorted(code for code, times in body.items() if len(times) > 1) for body in sent],
+                         [mates[:2], mates[2:4], mates[4:]], "the newest scans first, then the rest, two at a time")
+        expected = {code: {NOW - 3600 * k - m for k in range(1, 40)} for m, code in enumerate(mates, 1)}
+        self.assertEqual({code: set().union(*(body[code] for body in sent)) for code in mates}, expected,
+                         "every point of every mate reached the panel")
+        for call in self.calls:
+            for observer in call["markets"][0]["observers"][1:]:
+                for series in observer["items"]:
+                    self.assertEqual([s[0] for s in series.get("sold", [])], [p[0] for p in series["points"]],
+                                     "each point with its sample")
+        progress = self.state[str(self.file)]["markets"][MIRAGE]["obs"]
+        self.assertEqual({code: progress[code]["t"] for code in mates}, {code: NOW - 3600 - m for m, code in enumerate(mates, 1)})
+        self.assertEqual(self.state[str(self.file)]["file"], hashlib.sha256(self.file.read_bytes()).hexdigest())
+
     def test_series_and_body_limits_leave_the_mates_with_the_oldest_scans_for_later(self):
         hist = relay_hist()
         upload, seen = h.build_upload(hist, NOW)[0], h.observer_seen(hist)
@@ -1619,7 +1698,7 @@ class RelayUploadTests(Quiet):
         self.assertEqual([o["obs"] for o in json.loads(payload)["markets"][0]["observers"]], ["aaaa0001", "bbbb0004"])
         self.assertEqual(notes, ["1 compañero no cabe en este envío: irán en el siguiente"])
         steps, limit = [], len(encoded(upload)) - 1
-        for expected_notes in (["el envío pasaba de 2 MiB: esta vez van sin los puntos de los compañeros"],
+        for expected_notes in (["el envío pasaba de 2 MiB: los puntos de escaneo de 1 compañero irán en el siguiente"],
                                ["el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo"],
                                ["el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo",
                                 "1 compañero no cabe en este envío: irán en el siguiente"],
@@ -1892,9 +1971,6 @@ class MarkerTests(Quiet):
         self.assertTrue((self.addons / "OroHermandad" / "OroHermandad.toc").is_file())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 # -----------------------------------------------------------------------------------------------------------
 # Forever Fishing: a synthetic ForeverFishing.lua in the layout of the addon (never a real one).
@@ -2034,6 +2110,31 @@ class FishingUploaderTests(Quiet):
         self.assertEqual([e.kind for e in pending], ["pending"])
         self.assertEqual(h.describe(pending[0]), ["Cuenta CUENTA1: WoW está guardando ForeverFishing.lua; se leerá en cuanto termine."])
 
+    def test_a_fishing_upload_that_did_not_reach_the_panel_goes_again_with_the_same_file(self):
+        """R2-13: a network error or a 429 of the fishing upload is marked as such (error.fishing) and the same
+        ForeverFishing.lua is posted again at the next attempt, as the window promises; it used to count as handled."""
+        limited = h.RetryableSyncError("El panel pide esperar antes del siguiente envío (HTTP 429).")
+        limited.cuota = True
+        failures, attempts = [h.RetryableSyncError("No se ha podido conectar con el panel."), limited], []
+
+        def flaky(*args, **kwargs):
+            attempts.append(args[2])
+            if failures:
+                raise failures.pop(0)
+            return self.fish_poster(*args, **kwargs)
+        uploader = self.uploader(flaky)
+        for expected in (["uploaded"], ["unchanged"]):
+            with self.assertRaises(h.RetryableSyncError) as raised:
+                uploader.cycle()
+            self.assertTrue(raised.exception.fishing)
+            self.assertEqual([e.kind for e in raised.exception.events], expected)
+        self.assertEqual(self.kinds(uploader), [("OroHermandad.lua", "unchanged"), ("ForeverFishing.lua", "fishing")])
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(len(set(attempts)), 1, "the same sessions every time")
+        self.assertEqual(self.kinds(uploader)[1], ("ForeverFishing.lua", "unchanged"))
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(len(self.calls), 1)
+
     def test_an_account_without_prices_or_without_forever_fishing(self):
         self.prices.unlink()
         result = self.uploader().cycle()
@@ -2071,3 +2172,698 @@ class FishingUploaderTests(Quiet):
                 builder.return_value.open.side_effect = HTTPError(URL, code, "x", {}, io.BytesIO(b""))
                 with self.assertRaises(h.RetryableSyncError):
                     h.post_guild(URL, KEY, b"{}")
+
+
+
+# -----------------------------------------------------------------------------------------------------------
+# 0.6.0: sell-through samples (points-v2), the upload's sold lists, the sync answer, marker v2, run() for the
+# window, the lock owner and the output sink. Shared fixtures in fixtures/v06 (byte-identical copies).
+# -----------------------------------------------------------------------------------------------------------
+V06 = HERE / "fixtures" / "v06"
+V06_SHA256 = {
+    "hist-v060.lua": "3d20bd7406e13f6221a20df82ecfb046862205f73dd633af36633239c6705d32",
+    "marker-v2.json": "a694e8f457aad01829b0a728f001ec911b246d48fa8ec097dd844dc37d244f49",
+    "marker-v2/first-run.lua": "f9fd2d0cb4a6b188f21f5e0a193cb29c0fbdd524b0dee2c9977f1e29f672a201",
+    "marker-v2/full.lua": "ee02a9f95c35ad03e415e8695d4442967e8a33c4023a55b34100ef1ce93f76fc",
+    "marker-v2/key-refused.lua": "0296f99f53d599aa684cdc0061b3948d5cd58dd245171e510cd283caf0d73d0f",
+    "marker-v2/never-accepted.lua": "8ff69012b1d25c4310d04e92b1b5020d4a66524700e2aec3539563417e07490e",
+    "points-v2.json": "0014ae349a489d0353aaf65e8763e1df104897dbaef61067e7fd83b2ee6ac937",
+    "sync-response-v060.json": "5a21be63a5c66c2f7e776da1a4cc292056e1ac7372a922ff7d74d8fa69cf73b9",
+    "upload-v060.json": "0ae2cffb6273e06e3477652244eda0dc30c35eca82eb65888a3f42fdcbf78e8c",
+}
+V06_NOW = 1796479200
+# Names inside hist-v060.lua that must never leave the PC: guild, members and every OroHermandadDB key of 0.6.0.
+V06_SECRETS = ("Los Errantes", "Ána", "Борис", "lastAsk", "subidor", "sales", "scanPrices", "scanner", "buys",
+               "recordedDay", "5f3a9c21", "200001")
+
+
+def v06(name):
+    return (V06 / name).read_bytes()
+
+
+def v06_json(name):
+    return json.loads(v06(name).decode("utf-8"))
+
+
+class V06FixtureTests(unittest.TestCase):
+    def test_the_shared_fixtures_are_byte_identical_copies(self):
+        found = sorted(p.relative_to(V06).as_posix() for p in V06.rglob("*") if p.is_file())
+        self.assertEqual(found, sorted(V06_SHA256))
+        for name, digest in V06_SHA256.items():
+            self.assertEqual(hashlib.sha256(v06(name)).hexdigest(), digest, name)
+
+    def test_relay_fixtures_are_unchanged(self):
+        for name, digest in FIXTURE_SHA256.items():
+            self.assertEqual(hashlib.sha256(fixture(name)).hexdigest(), digest, name)
+
+
+class PointSampleTests(unittest.TestCase):
+    """Contract points-v2 (C1): t,lo,qty,qty5[,dt,sold]."""
+
+    def test_every_case_of_points_v2(self):
+        data = v06_json("points-v2.json")
+        self.assertGreaterEqual(len(data["cases"]), 20)
+        for case in data["cases"]:
+            with self.subTest(case["note"]):
+                self.assertEqual(h.decode_point_samples(case["text"]), case["sold"])
+                self.assertEqual(h._point_records(case["text"]), case["records"])
+
+    def test_decode_points_keeps_returning_the_four_columns_as_before(self):
+        for case in v06_json("points-v2.json")["cases"]:
+            with self.subTest(case["note"]):
+                points = h.decode_points(case["text"])
+                self.assertTrue(all(isinstance(p, tuple) and len(p) == 4 for p in points))
+                self.assertEqual([list(p) for p in points], [r[:4] for r in case["records"]])
+
+    def test_non_text_and_broken_records(self):
+        for value in (None, 12, "", ";;", "x,1,2,3,1800,4"):
+            self.assertEqual(h.decode_point_samples(value), [])
+        self.assertEqual(h.decode_point_samples(f"{NOW},40,880,200,7200,1000000"), [[NOW, 7200, 1000000]])
+        self.assertEqual(h.decode_point_samples(f"{NOW},40,880,200,599,4;{NOW + 3600},40,880,200,1800,1000001"), [])
+        self.assertEqual(h.decode_point_samples(f"{NOW},40,880,200,-1800,4"), [])
+
+
+class UploadV060Tests(unittest.TestCase):
+    """Contract C3: hist-v060.lua -> upload-v060.json, sold lists only for the points sent."""
+
+    def hist(self):
+        return h.extract_hist(v06("hist-v060.lua").decode("utf-8"))
+
+    def test_the_upload_is_exactly_the_shared_fixture(self):
+        upload, notes = h.build_upload(self.hist(), V06_NOW)
+        self.assertEqual((upload, notes), (v06_json("upload-v060.json"), []))
+        payload, more = h.encode_payload(upload, h.observer_seen(self.hist()))
+        self.assertEqual((payload + b"\n", more), (v06("upload-v060.json"), []))
+        for market in upload["markets"]:
+            for observer in market["observers"]:
+                for series in observer["items"]:
+                    self.assertEqual(list(series)[:3], ["id", "days", "points"])
+                    if "sold" in series:
+                        self.assertEqual(list(series), ["id", "days", "points", "sold"])
+                        self.assertTrue(series["sold"])
+                        self.assertLessEqual({s[0] for s in series["sold"]}, {p[0] for p in series["points"]})
+
+    def test_the_local_tables_of_0_6_0_are_never_built_or_sent(self):
+        text = v06("hist-v060.lua").decode("utf-8")
+        self.assertIn("scanPrices", text)
+        self.assertIn('["buys"]', text)
+        found = h.read_globals(text, {"OroHermandadHist"})
+        self.assertEqual(list(found), ["OroHermandadHist"])
+        for word in V06_SECRETS:
+            self.assertNotIn(word, repr(found), word)
+        payload = h.encode_payload(h.build_upload(self.hist(), V06_NOW)[0])[0].decode("utf-8")
+        for word in V06_SECRETS:
+            self.assertNotIn(word, payload, word)
+
+    def test_without_samples_the_upload_is_the_0_5_x_one(self):
+        upload = h.build_upload(self.hist(), V06_NOW)[0]
+        stripped = json.loads(json.dumps(upload))
+        for market in stripped["markets"]:
+            for observer in market["observers"]:
+                for series in observer["items"]:
+                    series.pop("sold", None)
+        hist = self.hist()
+        for market in hist["markets"].values():
+            for item in list(market.get("items", {}).values()) + [i for o in market.get("obs", {}).values()
+                                                               for i in o["items"].values()]:
+                item["p"] = ";".join(",".join(r.split(",")[:4]) for r in item["p"].split(";") if r)
+        self.assertEqual(h.build_upload(hist, V06_NOW)[0], stripped)
+        for lua_name, now, json_name in FIXTURE_UPLOADS:            # the 0.4.0 hists still give exactly their uploads
+            self.assertEqual(h.build_upload(h.extract_hist(fixture(lua_name).decode("utf-8")), CONSTANTS[now])[0],
+                             fixture_json(json_name))
+
+    def test_a_resent_item_only_carries_the_samples_of_the_points_it_sends(self):
+        hist = self.hist()
+        key = "GritodeGuerra-Alliance"
+        sent = {key: {"day": 2530, "t": 1796476000, "items": [2770, 2772, 12365], "obs": {
+            "47da174e": {"day": 2530, "t": 1796474400, "items": [2770, 2772, 13446]}}}}
+        upload = h.build_upload(hist, V06_NOW, sent)[0]
+        mine = series_of(upload["markets"][0])
+        self.assertEqual(mine[2770]["points"], [[1796475600, 40, 880, 200], [1796478300, 39, 860, 210]])
+        self.assertEqual(mine[2770]["sold"], [[1796478300, 2700, 25]])
+        self.assertEqual(mine[2772]["sold"], [[1796478300, 2700, 0]])
+        mate = series_of(upload["markets"][0], "47da174e")
+        self.assertEqual(mate[13446]["sold"], [[1796477400, 3000, 2]])
+        one = h._series(2770, [], [[1796475600, 40, 880, 200]], None, [[1796478300, 2700, 25]])
+        self.assertNotIn("sold", one)                               # the sample's point is not sent: no list
+
+    def test_points_dropped_for_size_take_their_samples_with_them(self):
+        upload = h.build_upload(self.hist(), V06_NOW)[0]
+        for observer in upload["markets"][0]["observers"]:
+            lighter = h._without_points(observer)
+            for series in lighter["items"]:
+                self.assertEqual((series["points"], "sold" in series), ([], False))
+        with patch.object(h, "MAX_BODY_BYTES", len(h.encode_json(upload)) - 50):     # the oldest mates' points first
+            payload, notes = h.encode_payload(upload, h.observer_seen(self.hist()))
+        sent = json.loads(payload)["markets"][0]["observers"]
+        self.assertEqual({o["obs"]: sorted(s["id"] for s in o["items"] if s["points"]) for o in sent},
+                         {"65c8ae44": [2770, 2772, 12365], "47da174e": [2770, 2772, 13446], "556e986d": [],
+                          "631b8919": []})
+        self.assertEqual({o["obs"]: sorted(s["id"] for s in o["items"] if "sold" in s) for o in sent},
+                         {"65c8ae44": [2770, 2772], "47da174e": [2770, 2772, 13446], "556e986d": [], "631b8919": []})
+        self.assertEqual(notes, ["el envío pasaba de 2 MiB: los puntos de escaneo de 2 compañeros irán en el siguiente"])
+        mates_bare = {**upload, "markets": [{**m, "observers": [o if o["self"] else h._without_points(o)
+                                                                for o in m["observers"]]} for m in upload["markets"]]}
+        with patch.object(h, "MAX_BODY_BYTES", len(h.encode_json(mates_bare)) + 10):  # every mate's points
+            payload, notes = h.encode_payload(upload, h.observer_seen(self.hist()))
+        sent = json.loads(payload)["markets"][0]["observers"]
+        for observer in sent:
+            for series in observer["items"]:
+                self.assertEqual("sold" in series, observer["self"] and series["id"] in (2770, 2772))
+        self.assertEqual(notes, ["el envío pasaba de 2 MiB: los puntos de escaneo de 3 compañeros irán en el siguiente"])
+        bare = {**upload, "markets": [{**m, "observers": [h._without_points(o) for o in m["observers"]]}
+                                      for m in upload["markets"]]}
+        with patch.object(h, "MAX_BODY_BYTES", len(h.encode_json(bare)) + 10):       # then this account's points
+            payload, notes = h.encode_payload(upload, h.observer_seen(self.hist()))
+        self.assertNotIn(b'"sold"', payload)
+        self.assertEqual(notes, ["el envío pasaba de 2 MiB: esta vez van solo los días, sin los puntos de escaneo"])
+
+
+class SyncAnswerTests(unittest.TestCase):
+    """Contract C4: what the uploader keeps from /api/guild/sync."""
+
+    def test_marker_from_every_answer_of_the_fixture(self):
+        data = v06_json("sync-response-v060.json")
+        for name in ("accepted", "duplicate", "oldPanel"):
+            self.assertEqual(h.marker_from(data[name]), data["markerFrom"][name], name)
+
+    def test_ties_ranges_and_versions(self):
+        answer = {"accepted": True, "uploadsLeft": 3, "day": 2531, "estado": {"mercados": [
+            {"market": "Zul-Horde", "suben": 1, "aportan": 4}, {"market": "Ana-Alliance", "suben": 2, "aportan": 4},
+            {"market": "Mal-Alliance", "suben": 9, "aportan": -1}, "x", {"aportan": 99}]},
+            "subidor": {"ultima": "0.10.0"}}
+        self.assertEqual(h.marker_from(answer), {"suben": 2, "aportan": 4, "nueva": "0.10.0", "quedan": 3, "dia": 2531})
+        for latest in ("0.6.0", "0.5.9", "0.6.0-beta", "1.0.0|cff", None, 7):
+            self.assertIsNone(h.marker_from({"subidor": {"ultima": latest}})["nueva"], latest)
+        for left, day in ((1001, 2530), (3, None), (None, 2530), (-1, 2530), (3, 100001)):
+            info = h.marker_from({"accepted": True, "uploadsLeft": left, "day": day})
+            self.assertEqual((info["quedan"], info["dia"]), (None, None), (left, day))
+        self.assertEqual(h.marker_from("roto"), {"suben": None, "aportan": None, "nueva": None, "quedan": None, "dia": None})
+
+
+class StatusTests(unittest.TestCase):
+    def source(self, name=h.SOURCE_NAME):
+        return h.Source("CUENTA1", Path("WoW") / name)
+
+    def event(self, kind, result=None, name=h.SOURCE_NAME):
+        return h.Event(self.source(name), kind, result=result)
+
+    def test_answers_errors_and_the_quedan_dia_pair(self):
+        data = v06_json("sync-response-v060.json")
+        status = h.UploaderStatus()
+        self.assertEqual(status.marker_state(), {"version": "0.6.0"})
+        self.assertTrue(status.record_result({"events": [self.event("uploaded", data["accepted"])]}, V06_NOW - 300))
+        self.assertEqual(status.marker_state(), {"version": "0.6.0", "envio": {"t": V06_NOW - 300, "estado": "ok"},
+                                                 "suben": 2, "aportan": 7, "quedan": 21, "dia": 2530})
+        self.assertTrue(status.record_result({"events": [self.event("duplicate", data["duplicate"])]}, V06_NOW))
+        self.assertEqual((status.quedan, status.dia, status.nueva, status.aceptado), (21, 2530, "0.6.1", V06_NOW),
+                         "a duplicate answer keeps the previous pair")
+        self.assertFalse(status.record_result({"events": [self.event("unchanged")]}, V06_NOW + 60))
+        self.assertTrue(status.record_error(h.AuthenticationError("clave"), V06_NOW + 60))
+        self.assertEqual(status.marker_state()["envio"], {"t": V06_NOW, "estado": "clave"})
+        limited = h.RetryableSyncError("429")
+        limited.cuota = True
+        status.record_error(limited, V06_NOW)
+        self.assertEqual(status.ultimo, "cuota")
+        status.record_error(h.RetryableSyncError("sin red"), V06_NOW)
+        self.assertEqual(status.ultimo, "red")
+        status.record_result({"events": [self.event("rejected"), self.event("rejected", name=h.FISHING_NAME)]}, V06_NOW)
+        self.assertEqual(status.ultimo, "rechazado")
+        fishing_only = h.UploaderStatus()
+        self.assertFalse(fishing_only.record_result({"events": [self.event("rejected", name=h.FISHING_NAME),
+                                                                self.event("fishing", {}, name=h.FISHING_NAME)]}, 1))
+        error = h.RetryableSyncError("sin red")
+        error.events = [self.event("uploaded", data["oldPanel"])]
+        fresh = h.UploaderStatus()
+        fresh.record_error(error, V06_NOW)
+        self.assertEqual((fresh.aceptado, fresh.ultimo, fresh.quedan, fresh.aportan), (V06_NOW, "red", 23, None))
+
+    def test_an_error_of_the_fishing_upload_keeps_the_status_of_the_prices(self):
+        """R2-13: a network error or a 429 of ForeverFishing.lua is not a price attempt (an accepted fishing upload
+        would never clear it); a refused key is."""
+        data = v06_json("sync-response-v060.json")
+        status = h.UploaderStatus()
+        for estado in ("red", "cuota"):
+            error = h.RetryableSyncError("sin red")
+            error.cuota, error.fishing = estado == "cuota", True
+            error.events = [self.event("uploaded", data["accepted"])]
+            status.record_error(error, V06_NOW)
+            self.assertEqual(status.marker_state()["envio"], {"t": V06_NOW, "estado": "ok"}, estado)
+            error.events = []
+            self.assertFalse(status.record_error(error, V06_NOW + 60), estado)
+        status.record_error(h.RetryableSyncError("sin red"), V06_NOW + 60)       # a price upload that failed
+        self.assertEqual(status.ultimo, "red")
+        status.record_error(error, V06_NOW + 120)
+        self.assertEqual(status.ultimo, "red", "the latest price attempt stays")
+        refused = h.AuthenticationError("clave")
+        refused.fishing = True
+        self.assertTrue(status.record_error(refused, V06_NOW + 180))
+        self.assertEqual(status.ultimo, "clave")
+
+    def test_the_config_copy_survives_restarts_and_bad_fields_are_ignored(self):
+        status = h.UploaderStatus({"aceptado": 5, "ultimo": "ok", "suben": 2, "aportan": 7, "nueva": "0.7.0",
+                                   "quedan": 21, "dia": 2530})
+        self.assertEqual(h.UploaderStatus(status.to_config()).to_config(), status.to_config())
+        broken = h.UploaderStatus({"aceptado": "ayer", "ultimo": "boom", "suben": -1, "aportan": 10**9,
+                                   "nueva": "0.5.0", "quedan": 5})
+        self.assertEqual((broken.to_config(), broken.marker_state()), ({}, {"version": "0.6.0"}))
+        self.assertEqual(h.UploaderStatus("roto").to_config(), {})
+
+    def test_load_config_ignores_a_malformed_estado(self):
+        with tempfile.TemporaryDirectory() as home:
+            for estado, kept in (([1, 2], False), ("x", False), ({"ultimo": "ok"}, True)):
+                Path(home, "config.json").write_text(json.dumps({"schema": 1, "estado": estado}), encoding="utf-8")
+                self.assertEqual("estado" in h.load_config(home), kept, estado)
+
+
+class MarkerV2Tests(Quiet):
+    """Contract C7: the uploader writes marker v2 (exact bytes) and rewrites it only when it should."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp / "World of Warcraft"
+        self.addons = self.root / "_forever_" / "Interface" / "AddOns"
+        (self.addons / "OroHermandad").mkdir(parents=True)
+        (self.addons / "OroHermandad" / "OroHermandad.toc").write_bytes(b"## Interface: 16001\n")
+        self.lua = self.addons / h.MARKER_FOLDER / h.MARKER_LUA
+
+    def test_golden_bytes_of_every_write_case(self):
+        data = v06_json("marker-v2.json")
+        self.assertEqual(tuple(data["estados"]), h.MARKER_ESTADOS)
+        for case in data["write"]:
+            with self.subTest(case["file"]):
+                self.assertEqual(h.marker_lua(case["state"]), v06(case["file"]))
+                self.assertEqual(h.marker_files("16001", case["state"])[h.MARKER_LUA], v06(case["file"]))
+                self.assertEqual(h.marker_files("16001", case["state"])[h.MARKER_TOC], COMPANION[h.MARKER_TOC])
+                self.assertEqual(h.marker_written(v06(case["file"])), case["state"]["escrito"])
+        self.assertEqual(h.marker_files(), COMPANION, "without a status: the v1 file, as 0.5.0")
+        self.assertIsNone(h.marker_written(COMPANION[h.MARKER_LUA]))
+
+    def test_only_numbers_in_range_and_fixed_words_reach_the_game(self):
+        evil = {"escrito": "1; os.exit()", "version": '0.6.0"} os.exit() --', "envio": {"t": 5, "estado": "ok\nx = 1"},
+                "suben": 100001, "aportan": True, "quedan": 1001, "dia": 2530, "extra": "nunca"}
+        text = h.marker_lua(evil).decode("ascii")
+        self.assertEqual(text, h.MARKER_HEAD + 'OroHermandadSubidor = {\n  formato = 1,\n  datos = 2,\n  escrito = 0,\n'
+                               '  version = "0.6.0",\n}\n')
+        self.assertEqual(h.marker_lua({"escrito": 7, "quedan": 3}), h.marker_lua({"escrito": 7}))
+        self.assertEqual(h.marker_lua({"escrito": 7, "quedan": 0, "dia": 0, "suben": 0, "aportan": 0}).decode().count(" = 0,"), 4)
+
+    def test_rewrite_policy_content_change_one_hour_and_one_minute(self):
+        state = {"version": "0.6.0"}
+        self.assertEqual(h.ensure_marker(self.root, state, now=V06_NOW), "created")
+        self.assertEqual(self.lua.read_bytes(), v06("marker-v2/first-run.lua"))
+        with patch.object(h, "_replace_file", side_effect=AssertionError("no debe reescribir")):
+            self.assertEqual(h.ensure_marker(self.root, state, now=V06_NOW + 3599), "ok")
+        full = {k: v for k, v in v06_json("marker-v2.json")["write"][0]["state"].items() if k != "escrito"}
+        with patch.object(h, "_replace_file", side_effect=AssertionError("no antes de un minuto")):
+            self.assertEqual(h.ensure_marker(self.root, full, now=V06_NOW + 59), "later")
+        self.assertEqual(h.ensure_marker(self.root, full, now=V06_NOW + 60), "refreshed")
+        self.assertEqual(self.lua.read_bytes(), h.marker_lua({**full, "escrito": V06_NOW + 60}))
+        self.assertEqual(h.ensure_marker(self.root, full, now=V06_NOW + 60 + 3600), "refreshed")
+        self.assertEqual(h.marker_written(self.lua.read_bytes()), V06_NOW + 3660)
+        self.assertEqual(h.ensure_marker(self.root, full, now=V06_NOW), "refreshed", "a clock moved back rewrites")
+        self.lua.write_bytes(COMPANION[h.MARKER_LUA])                       # the 0.5.0 uploader's v1 file
+        self.assertEqual(h.ensure_marker(self.root, full, now=V06_NOW + 10), "updated")
+        self.assertEqual(self.lua.read_bytes(), h.marker_lua({**full, "escrito": V06_NOW + 10}))
+        (self.addons / h.MARKER_FOLDER / h.MARKER_TOC).unlink()
+        self.assertEqual(h.ensure_marker(self.root, state, now=V06_NOW + 11), "created", "no minute rule without TOC")
+        self.assertEqual(self.lua.read_bytes(), h.marker_lua({**state, "escrito": V06_NOW + 11}))
+        for status in ("refreshed", "later"):
+            self.assertNotIn(status, h.MARKER_LINES)                      # never said
+
+    def test_unsafe_paths_are_still_refused_with_a_status(self):
+        outside = self.tmp / "fuera"
+        outside.mkdir()
+        try:
+            os.symlink(outside, self.addons / h.MARKER_FOLDER, target_is_directory=True)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"sin enlaces simbólicos aquí: {error}")
+        self.assertEqual(h.ensure_marker(self.root, {"version": "0.6.0"}, now=V06_NOW), "unsafe")
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(h.ensure_marker(self.tmp / "nada", {}, now=V06_NOW), "unknown")
+
+
+class FakeEvent:
+    """A threading.Event stand-in for run(): records the waits and answers from a script."""
+
+    def __init__(self, answers=()):
+        self.flag, self.waits, self.answers = False, [], list(answers)
+
+    def is_set(self):
+        return self.flag
+
+    def set(self):
+        self.flag = True
+
+    def clear(self):
+        self.flag = False
+
+    def wait(self, timeout=None):
+        self.waits.append(round(timeout))
+        if self.answers:
+            answer = self.answers.pop(0)
+            if callable(answer):
+                answer()
+                return self.flag
+            self.flag = answer or self.flag
+            return answer
+        return False
+
+
+class RunForTheWindowTests(Quiet):
+    def uploader(self, script):
+        """A fake uploader whose cycles follow script: a result dict, an exception or a callable."""
+        class Uploader:
+            folder = Path("WoW")
+            calls = 0
+
+            def cycle(inner):
+                inner.calls += 1
+                step = script.pop(0) if script else {"status": "ok", "events": []}
+                if callable(step):
+                    step = step()
+                if isinstance(step, Exception):
+                    raise step
+                return step
+        return Uploader()
+
+    def test_stop_ends_the_loop_with_0_and_every_wait_listens_to_wake(self):
+        stop, wake = FakeEvent(), FakeEvent()
+        results, errors = [], []
+        script = [{"status": "ok", "events": []}, h.RetryableSyncError("sin red"), {"status": "ok", "events": []},
+                  lambda: stop.set() or {"status": "ok", "events": []}]
+        uploader = self.uploader(script)
+        code = h.run(uploader, stop=stop, wake=wake, on_result=results.append,
+                     on_error=lambda error, delay: errors.append((str(error), delay)))
+        self.assertEqual(code, 0)
+        self.assertEqual(uploader.calls, 4)
+        self.assertEqual(len(results), 3)
+        self.assertEqual(errors, [("sin red", 60)])
+        self.assertEqual(wake.waits[:3], [15, 60, 15])
+        out = self.output.getvalue()
+        self.assertIn("Nuevo intento dentro de 60 segundos.", out)
+        self.assertNotIn("Ctrl+C", out)
+
+    def test_wake_cuts_the_poll_and_the_network_wait_but_not_the_one_the_panel_asked_for(self):
+        stop = FakeEvent()
+        limited = h.RetryableSyncError("429")
+        limited.retry_after, limited.cuota = 900, True
+        wake = FakeEvent([True, True, False, True, lambda: stop.set()])
+        script = [{"status": "ok", "events": []}, h.RetryableSyncError("sin red"), limited]
+        self.assertEqual(h.run(self.uploader(script), stop=stop, wake=wake), 0)
+        # poll woken (15), network wait woken (60), 429 wait: woken but kept waiting (900, then the rest), stopped.
+        self.assertEqual(wake.waits[:3], [15, 60, 900])
+        self.assertGreaterEqual(len(wake.waits), 4)
+        self.assertLessEqual(wake.waits[3], 900)
+
+    def test_a_refused_key_calls_on_error_without_delay_and_ends_with_2(self):
+        errors, marks = [], []
+        stop, wake = FakeEvent(), FakeEvent()
+        code = h.run(self.uploader([h.AuthenticationError("clave revocada")]), marker=lambda: marks.append(1) or "ok",
+                     stop=stop, wake=wake, on_error=lambda error, delay: errors.append((type(error).__name__, delay)))
+        self.assertEqual((code, errors, marks), (2, [("AuthenticationError", None)], [1]))
+
+    def test_with_a_status_the_marker_follows_it_and_a_later_answer_is_asked_again(self):
+        answers, asked = ["later", "refreshed", "ok"], []
+        stop, wake = FakeEvent(), FakeEvent()
+        upload = h.Event(h.Source("C", Path("OroHermandad.lua")), "uploaded", result={"accepted": True}, upload={"markets": []})
+        script = [{"status": "ok", "events": [upload]}, {"status": "ok", "events": []},
+                  lambda: stop.set() or {"status": "ok", "events": [upload]}]
+        uploader = self.uploader(script)
+
+        def marker():
+            asked.append(uploader.calls)
+            return answers.pop(0) if answers else "ok"
+        self.assertEqual(h.run(uploader, marker=marker, stop=stop, wake=wake, on_result=lambda result: None), 0)
+        # After the first cycle (not before it), again at the next poll while «later», then after the next upload.
+        self.assertEqual(asked, [1, 1, 3])
+
+    def test_the_console_loop_is_unchanged_without_events(self):
+        waits = []
+        uploader = self.uploader([{"status": "ok", "events": []}, h.RetryableSyncError("sin red"),
+                                  h.AuthenticationError("fin")])
+        self.assertEqual(h.run(uploader, sleep=waits.append), 2)
+        self.assertEqual(waits, [15, 60])
+        self.assertIn("Nuevo intento dentro de 60 segundos. Ctrl+C para cerrar.", self.output.getvalue())
+
+    def test_once_reports_errors_to_on_error(self):
+        errors = []
+        code = h.run(self.uploader([h.RetryableSyncError("sin red")]), once=True,
+                     on_error=lambda error, delay: errors.append(delay))
+        self.assertEqual((code, errors), (1, [None]))
+
+    def ticking(self, window):
+        """(clock list from V06_NOW, run's arguments that move it on): the console's sleep, or the window's stop and
+        wake (each wait of wake lasts its whole time)."""
+        now = [V06_NOW]
+        if not window:
+            return now, {"sleep": lambda seconds: now.__setitem__(0, now[0] + seconds), "clock": lambda: now[0]}
+
+        class Ticking(FakeEvent):
+            def wait(inner, timeout=None):
+                now[0] += timeout
+                return super().wait(timeout)
+        return now, {"stop": FakeEvent(), "wake": Ticking(), "clock": lambda: now[0]}
+
+    def marker_file(self, now, status):
+        """A marker of the real UploaderStatus and _marker_lua_for, in memory: (marker(), writes as (seconds since
+        V06_NOW, bytes), ages, age()). ages: the age of escrito just before every check (the oldest it gets: only a
+        check changes it) and at every call of age() (the tests call it at every cycle)."""
+        writes, ages = [], []
+
+        def age():
+            if writes:
+                ages.append(now[0] - h.marker_written(writes[-1][1]))
+
+        def marker():
+            age()
+            data, _ = h._marker_lua_for(writes[-1][1] if writes else None, status.marker_state(), int(now[0]))
+            if data is None:
+                return "later"
+            if writes and data == writes[-1][1]:
+                return "ok"
+            writes.append((now[0] - V06_NOW, data))
+            return "refreshed"
+        return marker, writes, ages, age
+
+    def test_a_long_429_then_a_fishing_retry_never_lets_the_marker_get_two_hours_old(self):
+        """R3: the marker check was counted in polls. A 429 of an hour (the guild's daily write budget, sent at 23:01
+        UTC for Forever Fishing) was not counted, and the accepted retry after 00:00 UTC («fishing») does not check
+        it: escrito reached 2.5 h and the game said «El subidor del PC no parece abierto» with the uploader open."""
+        source = h.Source("CUENTA", Path("OroHermandad.lua"))
+        fishing = h.Source("CUENTA", Path("ForeverFishing.lua"))
+        for window in (False, True):
+            with self.subTest(window=window):
+                now, arguments = self.ticking(window)
+                status = h.UploaderStatus({"aceptado": V06_NOW - 86400, "ultimo": "ok"})
+                marker, writes, ages, age = self.marker_file(now, status)
+                seen = {}
+
+                def cycle():
+                    age()
+                    elapsed = now[0] - V06_NOW
+                    if elapsed > 12000:
+                        seen["ultimo"] = status.ultimo
+                        return h.AuthenticationError("fin de la prueba")
+                    if elapsed >= 3495 and "429" not in seen:                 # escrito is 58 min old
+                        seen["429"] = elapsed
+                        limited = h.RetryableSyncError("El panel pide esperar (HTTP 429).")
+                        limited.retry_after, limited.cuota, limited.fishing = 3600, True, True
+                        limited.events = [h.Event(source, "unchanged")]
+                        return limited
+                    if "429" in seen and "pesca" not in seen:
+                        seen["pesca"] = elapsed
+                        return {"status": "ok", "events": [h.Event(source, "unchanged"),
+                                                           h.Event(fishing, "fishing", result={"accepted": True})]}
+                    return {"status": "ok", "events": [h.Event(source, "unchanged")]}
+                code = h.run(self.uploader([cycle] * 2000), marker=marker,
+                             on_result=lambda result: status.record_result(result, now[0]),
+                             on_error=lambda error, delay: status.record_error(error, now[0]), **arguments)
+                self.assertEqual(code, 2)
+                self.assertEqual((seen["429"], seen["pesca"], seen["ultimo"]), (3495, 3495 + 3600, "ok"))
+                self.assertTrue(any(seen["429"] < t < seen["pesca"] for t, _ in writes), "rewritten during the hour")
+                self.assertGreater(len(ages), 500)
+                self.assertLessEqual(max(ages), 5400 + h.POLL_SECONDS)
+
+    def test_a_status_change_that_has_to_wait_is_written_during_a_long_wait(self):
+        """A 429 of the panel (cuota) half a minute after an accepted upload: the marker answers «later» (never twice
+        within a minute). It was asked again only after the hour of the wait; now on the next poll inside it."""
+        source = h.Source("CUENTA", Path("OroHermandad.lua"))
+        uploaded = h.Event(source, "uploaded", result={"accepted": True, "duplicate": False}, upload={"markets": []})
+        for window in (False, True):
+            with self.subTest(window=window):
+                now, arguments = self.ticking(window)
+                status = h.UploaderStatus({"aceptado": V06_NOW - 86400, "ultimo": "ok"})
+                marker, writes, _, _ = self.marker_file(now, status)
+                limited = h.RetryableSyncError("El panel pide esperar (HTTP 429).")
+                limited.retry_after, limited.cuota = 3600, True
+                script = [{"status": "ok", "events": [uploaded]}, {"status": "ok", "events": []},
+                          {"status": "ok", "events": []}, limited, h.AuthenticationError("fin de la prueba")]
+                code = h.run(self.uploader(script), marker=marker,
+                             on_result=lambda result: status.record_result(result, now[0]),
+                             on_error=lambda error, delay: status.record_error(error, now[0]), **arguments)
+                self.assertEqual(code, 2)
+                self.assertEqual(writes[1][0], 45 + h.POLL_SECONDS, "cuota written 15 s into the hour")
+                self.assertIn(b'estado = "cuota"', writes[1][1])
+
+
+class OutputSinkTests(unittest.TestCase):
+    def test_the_sink_gets_every_line_and_the_console_or_file_still_does(self):
+        lines = []
+        previous = h.set_output_sink(lines.append)
+        self.addCleanup(h.set_output_sink, previous)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            h.say("uno")
+            h.say("dos", stamp=False)
+        self.assertEqual(len(lines), 2)
+        self.assertRegex(lines[0], r"^\[[0-9]{2}:[0-9]{2}:[0-9]{2}\] uno$")
+        self.assertEqual(lines[1], "dos")
+        self.assertEqual(out.getvalue().splitlines(), lines)
+        with tempfile.TemporaryDirectory() as folder:
+            log = Path(folder) / "registro.txt"
+            h.set_log_file(log)
+            try:
+                with contextlib.redirect_stdout(out):
+                    h.say("tres")
+            finally:
+                h.set_log_file(None)
+            self.assertTrue(log.read_text(encoding="utf-8").rstrip().endswith("tres"))
+        self.assertEqual(len(lines), 3)
+        h.set_output_sink(lambda line: 1 / 0)                         # a broken sink never stops the uploader
+        with contextlib.redirect_stdout(out):
+            h.say("cuatro")
+        self.assertIn("cuatro", out.getvalue())
+
+
+class LockHolderTests(Quiet):
+    def test_the_lock_still_yields_a_bool_and_says_who_holds_it(self):
+        home = self.tmp / "home"
+        self.assertIsNone(h.lock_holder(home))
+        with h.instance_lock(home, "ventana") as locked:
+            self.assertIs(locked, True)
+            holder = h.lock_holder(home)
+            self.assertEqual((holder["pid"], holder["modo"]), (os.getpid(), "ventana"))
+            self.assertLessEqual(abs(holder["desde"] - time.time()), 5)
+            with h.instance_lock(home) as again:
+                self.assertIs(again, False)
+            self.assertEqual(h.lock_holder(home)["modo"], "ventana", "a failed try never touches the holder file")
+        self.assertFalse((home / h.LOCK_HOLDER).exists())
+        with h.instance_lock(home) as locked:
+            self.assertEqual(h.lock_holder(home)["modo"], "consola")
+        with h.instance_lock(home, "otro") as locked:
+            self.assertEqual(h.lock_holder(home)["modo"], "consola")
+
+    def test_malformed_holder_files(self):
+        home = self.tmp
+        for text in ("{roto", "[]", '{"pid": 1, "modo": "x", "desde": 1}', '{"pid": 0, "modo": "ventana", "desde": 1}',
+                     '{"pid": 1, "modo": "ventana", "desde": -1}', '{"pid": "1", "modo": "ventana", "desde": 1}'):
+            (home / h.LOCK_HOLDER).write_text(text, encoding="utf-8")
+            self.assertIsNone(h.lock_holder(home), text)
+        (home / h.LOCK_HOLDER).write_bytes(b"\xff\xfe")
+        self.assertIsNone(h.lock_holder(home))
+        (home / h.LOCK_HOLDER).write_text('{"pid": 7, "modo": "segundo-plano", "desde": 3, "x": 1}', encoding="utf-8")
+        self.assertEqual(h.lock_holder(home, alive=lambda pid, since: True), {"pid": 7, "modo": "segundo-plano", "desde": 3})
+        self.assertIsNone(h.lock_holder(home, alive=lambda pid, since: False), "a holder that is not running")
+
+    def test_a_holder_file_left_by_a_process_that_ended_is_ignored(self):
+        ended = subprocess.Popen([sys.executable, "-c", "pass"])
+        ended.wait()
+        since = int(time.time())
+        self.assertTrue(h.process_alive(os.getpid(), since), "this process")
+        self.assertFalse(h.process_alive(ended.pid, since), "a process that ended")
+        (self.tmp / h.LOCK_HOLDER).write_text(json.dumps({"pid": ended.pid, "modo": "ventana", "desde": since}),
+                                              encoding="utf-8")
+        self.assertIsNone(h.lock_holder(self.tmp))
+        (self.tmp / h.LOCK_HOLDER).write_text(json.dumps({"pid": os.getpid(), "modo": "ventana", "desde": since}),
+                                              encoding="utf-8")
+        self.assertEqual(h.lock_holder(self.tmp)["modo"], "ventana")
+
+    def test_the_cli_and_the_startup_task_write_their_mode(self):
+        modes = []
+        real = h.instance_lock
+
+        def spy(directory, modo="consola"):
+            modes.append(modo)
+            return real(directory, modo)
+        with patch.object(h, "instance_lock", spy):
+            h.main(["--segundo-plano"], home=self.tmp / "h1", protector=h.TestOnlyProtector())
+            h.main(["--once"], home=self.tmp / "h2", protector=h.TestOnlyProtector(), ask=lambda prompt: "",
+                   ask_secret=lambda prompt: "", detect=lambda: [])
+        self.assertEqual(modes, ["segundo-plano", "consola"])
+
+
+class AddonNoticeTests(Quiet):
+    def test_old_addons_get_a_notice_once_per_file_and_version(self):
+        self.assertEqual(h.addon_notice("JUSEP", "0.5.1"), "La cuenta JUSEP tiene el addon 0.5.1: actualízalo a la 0.6.0 "
+                                                            "para que el panel reciba las ventas.")
+        for version in ("0.6.0", "0.6.1", "1.0", "0.6.0-beta", "", None):
+            self.assertEqual(h.addon_notice("JUSEP", version), "", version)
+        hist = sample_hist()
+        hist["addon"] = "0.5.1"
+        path = self.tmp / "WoW" / "_forever_" / "WTF" / "Account" / "JUSEP" / "SavedVariables" / "OroHermandad.lua"
+        write(path, saved_variables(hist))
+        calls = []
+        uploader = h.GuildUploader(URL, KEY, self.tmp / "WoW", poster=lambda *a, **k: calls.append(1) or
+                                   {"accepted": True, "duplicate": False}, clock=lambda: NOW)
+        event = uploader.cycle()["events"][0]
+        self.assertEqual((event.kind, event.addon), ("uploaded", "0.5.1"))
+        self.assertIn("JUSEP tiene el addon 0.5.1", event.notice)
+        self.assertNotIn(event.notice, h.describe(event), "describe() keeps its 0.5.0 lines")
+        hist["markets"]["Mirage Raceway-Alliance"]["updated"] += 1
+        write(path, saved_variables(hist), age=30)
+        again = uploader.cycle()["events"][0]
+        self.assertEqual((again.addon, again.notice), ("0.5.1", ""), "the same version is not said twice")
+        hist["addon"] = "0.6.0"
+        write(path, saved_variables(hist), age=20)
+        self.assertEqual(uploader.cycle()["events"][0].notice, "")
+        say_lines = io.StringIO()
+        with contextlib.redirect_stdout(say_lines):
+            h.say_event(event)
+        self.assertEqual(say_lines.getvalue().count("tiene el addon 0.5.1"), 1)
+
+    def test_the_empty_text_points_to_the_addon_scanner(self):
+        hist = {"schema": 2, "addon": "0.6.0", "markets": {}}
+        path = self.tmp / "WoW" / "_forever_" / "WTF" / "Account" / "A" / "SavedVariables" / "OroHermandad.lua"
+        write(path, saved_variables(hist))
+        event = h.GuildUploader(URL, KEY, self.tmp / "WoW", poster=None, clock=lambda: NOW).cycle()["events"][0]
+        self.assertEqual(event.kind, "empty")
+        self.assertEqual(event.message, "todavía no hay precios para enviar. Abre la subasta y pulsa «Escanear» en Oro "
+                                        "de Hermandad (o juega mientras lo hace un compañero con el addon), y sal del "
+                                        "juego (o usa /reload).")
+        self.assertNotIn("Auctionator", event.message)
+
+
+class CliStatusTests(CliTests):
+    """The command line keeps its texts and also writes marker v2 and the status in config.json."""
+
+    def test_the_cli_keeps_the_status_and_the_marker_shows_it(self):
+        marker = self.install_addon()
+
+        def poster(url, key, payload, timeout):
+            self.calls.append(payload)
+            return {"accepted": True, "duplicate": False, "rowsChanged": 4, "uploadsLeft": 21, "day": 2504,
+                    "estado": {"mercados": [{"market": "Mirage Raceway-Alliance", "suben": 2, "aportan": 7}]}}
+        self.assertEqual(self.main(["--once"], answers=[URL, ""], poster=poster), 0)
+        config = json.loads((self.home / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["estado"], {"aceptado": NOW, "ultimo": "ok", "suben": 2, "aportan": 7, "quedan": 21,
+                                            "dia": 2504})
+        self.assertEqual((marker / h.MARKER_LUA).read_bytes(), h.marker_lua(
+            {"escrito": NOW, "version": "0.6.0", "envio": {"t": NOW, "estado": "ok"}, "suben": 2, "aportan": 7,
+             "quedan": 21, "dia": 2504}))
+        self.assertNotIn(KEY, (self.home / "config.json").read_text(encoding="utf-8").replace(
+            config["key"]["data"], ""))
+
+        def refused(url, key, payload, timeout):
+            raise h.AuthenticationError("El panel ha rechazado tu clave.")
+        hist = sample_hist()
+        hist["markets"]["Mirage Raceway-Alliance"]["items"][2589]["p"] += f";{NOW - 60},81,300,30"
+        write(self.file, saved_variables(hist), age=10)
+        self.assertEqual(self.main(["--once"], secret=None, poster=refused, clock=lambda: NOW + 120), 2)
+        self.assertEqual(json.loads((self.home / "config.json").read_text(encoding="utf-8"))["estado"]["ultimo"], "clave")
+        self.assertEqual(h.marker_written((marker / h.MARKER_LUA).read_bytes()), NOW + 120)
+        self.assertIn(b'envio = {t = %d, estado = "clave"}' % NOW, (marker / h.MARKER_LUA).read_bytes())
+
+
+if __name__ == "__main__":
+    unittest.main()

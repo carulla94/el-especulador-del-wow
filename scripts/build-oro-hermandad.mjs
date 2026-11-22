@@ -1,7 +1,8 @@
 /** Empaqueta el addon Oro de Hermandad en un zip (solo biblioteca estándar de Node).
  * Uso: node scripts/build-oro-hermandad.mjs [ruta-de-salida.zip]  (por defecto dist-addon/OroHermandad.zip, que Git
  * ignora: los ZIP generados no se suben al repositorio). No va en public/: esa carpeta es la de la web y lo que hay
- * en ella se publica al desplegar. El zip sale igual en Windows y en Linux. */
+ * en ella se publica al desplegar. El zip sale igual en Windows y en Linux. Lleva el TOC, los .lua que lista el TOC,
+ * LEEME.md y CAMBIOS.md, y nada más: es exactamente lo que el empaquetador de CurseForge saca con .pkgmeta. */
 import fs from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
@@ -48,7 +49,12 @@ const listed = toc.split(/\r?\n/).map(line => line.trim()).filter(line => line.e
 for (const file of listed) {
   if (!fs.existsSync(path.join(source, file))) throw new Error(`El TOC lista ${file}, que no existe.`);
 }
-const files = ["OroHermandad.toc", ...listed, "LEEME.md"];
+// CAMBIOS.md (las notas de cada versión) va también en el zip de CurseForge (.pkgmeta): los dos zips tienen que salir
+// iguales, y lo comprueban .github/workflows/oro-hermandad.yml en cada cambio y publicar-oro-hermandad.yml antes de publicar.
+const files = ["OroHermandad.toc", ...listed, "LEEME.md", "CAMBIOS.md"];
+for (const file of ["LEEME.md", "CAMBIOS.md"]) {
+  if (!fs.existsSync(path.join(source, file))) throw new Error(`Falta addon/OroHermandad/${file}.`);
+}
 // Texto con saltos LF y sin BOM: un checkout de Windows (core.autocrlf) o un editor no cambian el zip.
 const text = body => Buffer.from(body.toString("utf8").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n"), "utf8");
 const entries = files.map(file => {
