@@ -621,5 +621,72 @@ test("Recibir otra vez el mismo anuncio no cuenta como cambio", function()
   assert(G.Handle("H2|41|engineering=200|0|4", "Pedro-Forever", "GUILD"), "ya no tiene recetas")
 end)
 
+---------------------------------------------------------------------------
+-- 0.6.0: WoW Forever ya no da el reino (Data.Realm)
+---------------------------------------------------------------------------
+test("Reino vacío: el almacén de la hermandad sigue en el del reino de antes y lo guardado en «/Hermandad» pasa a él", function()
+  local OLD = "CAMWOWEU4Realm4PvP"
+  local store = {guilds = {
+    [OLD .. "/Los Mineros"] = {members = {Ana = {manual = {profs = {engineering = 150}}},
+                                          ["Bea-" .. OLD] = {manual = {profs = {tailoring = 60}}}}},
+    -- Lo que se guardó mientras el juego daba el reino vacío y el addon no lo resolvía.
+    ["/Los Mineros"] = {members = {Eva = {manual = {profs = {alchemy = 90}}}, ana = {manual = {profs = {mining = 5}}}}},
+  }}
+  Stub.setRealm("")
+  with({OroHermandadHist = {schema = 2, markets = {[OLD .. "-Alliance"] = {items = {}, dep = {}, updated = time()}}}}, function()
+    local G = freshGuild(store)
+    eq(G.UpdateKey(), OLD .. "/Los Mineros", "la clave de antes")
+    local m = G.Members()
+    eq(m.Ana.profs.engineering, 150, "lo de antes, en su sitio")
+    eq(m.Ana.profs.mining, nil, "sin pisar a Ana")
+    eq(m.Eva.profs.alchemy, 90, "lo guardado sin reino se une")
+    eq(store.guilds["/Los Mineros"], nil, "y ya no queda aparte")
+    eq(m.Bea.profs.tailoring, 60, "los nombres de la 0.2.0 con tu reino de antes se unen")
+    eq(G.NormalizeName("Ana-" .. OLD), "Ana", "tu reino de antes se quita del nombre")
+  end)
+  -- Sin reino ni datos: «Forever» (fijo). Lo de «/Hermandad» también pasa; los nombres de la 0.2.0 no se tocan (no es
+  -- seguro que «Forever» sea tu reino de antes).
+  local loose = {guilds = {["/Los Mineros"] = {members = {Eva = {manual = {profs = {alchemy = 90}}}}},
+                           ["Forever/Los Mineros"] = {members = {["Ana-Forever"] = {manual = {profs = {engineering = 150}}}}}}}
+  local G = freshGuild(loose)
+  eq(G.UpdateKey(), "Forever/Los Mineros")
+  G.Members()
+  assert(loose.guilds["Forever/Los Mineros"].members["Ana-Forever"], "con el reino de reserva no se renombra")
+  assert(loose.guilds["Forever/Los Mineros"].members.Eva, "lo de «/Los Mineros» pasa")
+  eq(loose.guilds["/Los Mineros"], nil)
+  Stub.setRealm("Forever")
+end)
+
+test("El reino cambia a media sesión (/oro reino, o el juego lo da tarde): lo de la hermandad pasa al reino nuevo", function()
+  local store = {guilds = {}}
+  local G = freshGuild(store)
+  Stub.setRealm("")
+  local ok, err = pcall(function()
+    eq(G.UpdateKey(), "Forever/Los Mineros")
+    assert(G.SetManual("Ana", "engineering", 150))
+    assert(G.Handle("H2|40|mining=210|0|1", "Luis", "GUILD"))
+    Stub.setRealm("Nuevo")
+    eq(G.UpdateKey(), "Nuevo/Los Mineros")
+    local m = G.Members()
+    eq(m.Ana and m.Ana.profs.engineering, 150, "el amigo a mano sigue")
+    eq(m.Luis and m.Luis.profs.mining, 210, "y lo que anunció un compañero")
+    eq(store.guilds["Forever/Los Mineros"], nil, "sin dejar el de antes aparte")
+    -- Otra vez, a un reino donde ya había alguien: no se le pisa.
+    store.guilds["Otro/Los Mineros"] = {members = {Ana = {manual = {profs = {tailoring = 60}}}}}
+    Stub.setRealm("Otro")
+    eq(G.UpdateKey(), "Otro/Los Mineros")
+    m = G.Members()
+    eq(m.Ana.profs.tailoring, 60, "sin pisar"); eq(m.Ana.profs.engineering, nil)
+    eq(m.Luis.profs.mining, 210)
+    eq(store.guilds["Nuevo/Los Mineros"], nil)
+    -- Otra hermandad no se toca.
+    store.guilds["Otro/Los Otros"] = {members = {Eva = {manual = {profs = {alchemy = 90}}}}}
+    G.UpdateKey()
+    assert(store.guilds["Otro/Los Otros"].members.Eva)
+  end)
+  Stub.setRealm("Forever")
+  assert(ok, err)
+end)
+
 realPrint(string.format("hermandad: %d pruebas correctas, %d fallidas", passed, failed))
 os.exit(failed == 0 and 0 or 1)

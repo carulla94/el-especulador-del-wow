@@ -1575,7 +1575,15 @@ local function probeLines()
 
   section(function()
     local raw = rawMarketKey()
-    add("Mercado: " .. tostring(raw) .. (validMarketKey(raw) and "" or " (no válido: falta el reino o la facción; no se graba nada)"))
+    if not validMarketKey(raw) then
+      add("Mercado: " .. tostring(raw) .. " (no válido: falta el reino o la facción; no se graba nada)")
+    else
+      -- De dónde sale el reino (Data.Realm): WoW Forever ya no lo da.
+      local okRealm, realm, source = pcall(Data.Realm)
+      local why = okRealm and type(realm) == "string" and raw:sub(1, #realm + 1) == realm .. "-"
+                  and Data.REALM_SOURCE_TEXT and Data.REALM_SOURCE_TEXT[source] or nil
+      add("Mercado: " .. raw .. (why and (" (" .. why .. ")") or ""))
+    end
     local list = History.WatchList()
     local fixed = 0
     for _, w in ipairs(list) do if w.fixed then fixed = fixed + 1 end end

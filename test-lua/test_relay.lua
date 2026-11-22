@@ -104,6 +104,8 @@ local function jumpTo(t) run(t - unix()) end
 -- El juego visto desde el cliente actual.
 _G.UnitName = function() return current and current.name end
 _G.GetNormalizedRealmName = function() return current and current.realm end
+_G.GetRealmName = function() return current and current.realm end
+_G.GetPlayerInfoByGUID = function() return nil, nil, nil, nil, nil, nil, current and current.realm end
 _G.UnitFactionGroup = function() return current and current.faction end
 _G.IsInGuild = function() return current ~= nil and current.guild ~= nil end
 _G.GetGuildInfo = function() if current and current.guild then return current.guild, "Miembro", 3, current.guildRealm end end
@@ -176,7 +178,7 @@ _G.C_ChatInfo.SendAddonMessage = function(prefix, msg, channel, target)
   local entry = {from = c, msg = msg, channel = channel, target = target, at = Stub.gameTime}
   net.log[#net.log + 1] = entry
   c.sent[#c.sent + 1] = entry
-  local from = c.name .. "-" .. c.realm
+  local from = c.name .. "-" .. (c.senderRealm or c.realm) -- senderRealm: el servidor te nombra con otro reino
   if channel == "WHISPER" then
     deliver(dest, prefix, msg, channel, from, entry)
   elseif channel == "GUILD" then
@@ -204,7 +206,8 @@ end
 -- subidor), random, db/cdb/hist (lo que el juego cargaría del archivo), members (compañeros ya conocidos: sin sonido),
 -- skip (archivos del TOC que no se cargan).
 local function newClient(o)
-  local c = {name = o.name, realm = o.realm or C.guildRealm, faction = o.faction or "Alliance", online = true,
+  local c = {name = o.name, realm = o.realm or C.guildRealm, senderRealm = o.senderRealm, faction = o.faction or "Alliance",
+             online = true,
              guild = o.guild == false and nil or (o.guild or C.guildName), guildRealm = o.guildRealm,
              marker = o.marker, random = o.random, restricted = {}, results = {}, sent = {}, refused = {}, frames = {}}
   local db = o.db or {}
@@ -2218,6 +2221,97 @@ test("En directo y /reload: un anuncio a medias, o uno grabado justo al salir, v
   run(1800)
   eq(#sentBy(c, "^P3|"), 0, "una vez")
   logout(c); logout(mate)
+end)
+
+---------------------------------------------------------------------------
+-- 0.6.0: WoW Forever ya no da el reino (las tres funciones del juego dan "")
+---------------------------------------------------------------------------
+test("Reino vacío: dos 0.6.0 comparten (remitente «Nombre-» y «Nombre») y tu código es el que calculan los demás", function()
+  -- Los dos tienen la OroHermandadHist de antes (cuando el juego daba el reino): los dos usan ese reino (Data.Realm,
+  -- "datos"), el mismo mercado y el mismo código para cada uno. El servidor los nombra «Nombre-» (sin reino).
+  local OLD, guild = "CAMWOWEU4Realm4PvP", "Los Sin Reino"
+  local key = OLD .. "-Alliance"
+  local function oldHist() return {schema = 2, addon = "0.5.1", markets = {[key] = {items = {}, dep = {}, updated = unix() - 86400}}} end
+  local a = newClient({name = "Sinreino", realm = "", guild = guild, hist = oldHist(), members = false})
+  local b = newClient({name = "Otra", realm = "", guild = guild, hist = oldHist(), members = false})
+  login(a, 30); login(b, 30)
+  current = a
+  eq(a.History.CurrentMarket(), key)
+  local own = a.Relay.OwnHash()
+  current = b
+  eq(b.History.CurrentMarket(), key)
+  assert(own, "con código propio (sin reino, antes no había)")
+  eq(b.Relay.Hash("Sinreino-"), own, "«Nombre-»: el mismo código que calcula él")
+  eq(b.Relay.Hash("Sinreino"), own, "«Nombre»: también")
+  eq(b.Relay.Hash("sinreino-" .. OLD), own, "y con el reino de antes")
+  current = nil
+  -- Sinreino escanea: su P3 sale a la hermandad como «Sinreino-» y Otra lo guarda con su código.
+  quiet("sin reino", function()
+    scan(a, {[2772] = {100, 20, 10}, [2770] = {30, 40, 40}})
+    run(30)
+  end)
+  local live = sentBy(a, "^P3|", "GUILD")
+  eq(#live, 1, "un P3 a la hermandad")
+  assert(has(live[1].msg, a.Relay.MarketTag(key)), "con la etiqueta del mercado de siempre")
+  local got = obsOf(b, own, key)
+  assert(got, "Otra lo guarda")
+  eq(got.items[2772] ~= nil, true, "con el hierro")
+  -- La hermandad le devuelve su propio P3 («Sinreino-»): es suyo, no de un compañero.
+  local mine = hist(a).markets[key]
+  eq(mine.obs, nil, "su eco no se guarda como de otro")
+  assert(has(mine.self or "", own), "su código, en self")
+  -- Un compañero que el servidor nombra sin guion («Tercero»): también se acepta, con su código de siempre.
+  current = b
+  local third = b.Relay.Hash("Tercero")
+  eq(third, b.Relay.Hash("Tercero-" .. OLD))
+  current = nil
+  inject(b, R.PackP3(9, R.MarketTag(key), unix() - 30, {{2772, 95, 5, 5}})[1], "GUILD", "Tercero")
+  run(20)
+  assert(obsOf(b, third, key), "lo de «Tercero» se guarda")
+  eq(b.Relay.lastError, nil); eq(a.Relay.lastError, nil)
+  logout(a); logout(b)
+end)
+
+test("Reino vacío y el servidor te nombra con otro reino («Nombre-Oculto»): tu eco sigue siendo tuyo", function()
+  -- Instalaciones nuevas sin datos: Data.Realm da «Forever» (fijo), pero el servidor nombra a cada uno con un reino que
+  -- el juego ya no enseña. El eco de la hermandad de tu propio escaneo no puede guardarse como de un compañero (Especular
+  -- y el panel contarían tus precios dos veces).
+  local hidden, guild, key = "CAMWOWEU4Realm4PvP", "Los Nuevos", "Forever-Alliance"
+  local a = newClient({name = "Nuevo", realm = "", senderRealm = hidden, guild = guild, members = false})
+  local b = newClient({name = "Nueva", realm = "", senderRealm = hidden, guild = guild, members = false})
+  login(a, 30); login(b, 30)
+  current = a
+  eq(a.History.CurrentMarket(), key)
+  local own = a.Relay.OwnHash()
+  current = nil
+  quiet("remitente con otro reino", function()
+    scan(a, {[2772] = {100, 20, 10}, [2770] = {30, 40, 40}})
+    run(30)
+  end)
+  eq(#sentBy(a, "^P3|", "GUILD"), 1, "un P3 a la hermandad")
+  local mine = hist(a).markets[key]
+  eq(mine.obs, nil, "su eco no se guarda como de otro")
+  assert(has(mine.self or "", own), "su código, en self")
+  -- Nueva lo guarda, con el código del nombre que da el servidor.
+  current = b
+  local h = b.Relay.Hash("Nuevo-" .. hidden)
+  current = nil
+  local got = obsOf(b, h, key)
+  assert(got and got.items[2772], "Nueva lo guarda")
+  -- Directamente: tu nombre con cualquier reino (o en otras mayúsculas) es tuyo; el de otro, no.
+  local msg = R.PackP3(9, R.MarketTag(key), unix() - 30, {{2772, 95, 5, 5}})[1]
+  current = a
+  local ok1, why1 = a.Relay.OnMessage(msg, "Nuevo-OtroReino", "GUILD")
+  local ok2, why2 = a.Relay.OnMessage(msg, "nuevo-" .. hidden, "GUILD")
+  current = nil
+  eq(ok1, false); eq(why1, "propio"); eq(ok2, false); eq(why2, "propio")
+  inject(a, msg, "GUILD", "Tercero-" .. hidden)
+  run(20)
+  current = a
+  assert(obsOf(a, a.Relay.Hash("Tercero-" .. hidden), key), "lo de otro compañero sí se guarda")
+  current = nil
+  eq(a.Relay.lastError, nil); eq(b.Relay.lastError, nil)
+  logout(a); logout(b)
 end)
 
 test("Ningún error interno ni nada de precios enviado con los mensajes restringidos en toda la sesión", function()

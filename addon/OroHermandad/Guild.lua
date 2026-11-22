@@ -161,6 +161,15 @@ local function fold(text)
 end
 Guild.Fold = fold -- Relay.lua calcula el código de cada personaje con estas mismas minúsculas
 
+-- Tu reino y de dónde sale (Data.Realm: WoW Forever ya no lo da; el último conocido, el de tus datos guardados o
+-- «Forever», que es "fijo"). nil si no se puede saber.
+local function ownRealm()
+  if type(Data) ~= "table" or type(Data.Realm) ~= "function" then return nil end
+  local ok, realm, source = pcall(Data.Realm)
+  if ok and not secret(realm) and type(realm) == "string" and realm ~= "" then return realm, source end
+  return nil
+end
+
 -- Nombres al estilo del servidor: primera letra en mayúscula, el resto en minúscula y sin tu propio reino.
 function Guild.NormalizeName(name)
   if type(name) ~= "string" then return nil end
@@ -170,7 +179,7 @@ function Guild.NormalizeName(name)
   base = base or name
   if realm then
     realm = realm:gsub("[%s%-]", "")
-    local mine = type(GetNormalizedRealmName) == "function" and GetNormalizedRealmName() or nil
+    local mine = realm ~= "" and ownRealm() or nil
     if realm == "" or (type(mine) == "string" and fold((realm:gsub("'", ""))) == fold((mine:gsub("[%s%-']", "")))) then
       realm = nil
     end
@@ -241,9 +250,10 @@ local function store()
   bucket.members = type(bucket.members) == "table" and bucket.members or {}
   db.guilds[key] = bucket
   -- Nombres de la 0.2.0, una vez por sesión y hermandad, con tu reino ya legible (el almacén sin hermandad no es de
-  -- ningún reino: ahí no se toca nada).
-  local realm = type(GetNormalizedRealmName) == "function" and GetNormalizedRealmName() or nil
-  if key ~= NOGUILD and not state.adopted[key] and type(realm) == "string" and realm ~= "" then
+  -- ningún reino: ahí no se toca nada). Con el reino de reserva («Forever», "fijo") tampoco: no es seguro que sea el
+  -- tuyo de antes.
+  local realm, source = ownRealm()
+  if key ~= NOGUILD and not state.adopted[key] and realm and source ~= "fijo" then
     state.adopted[key] = true
     adoptLegacyNames(bucket.members)
   end
@@ -300,7 +310,39 @@ local function migrateLegacy()
   if state.db then state.db.guild = nil end
 end
 
--- Clave de la hermandad actual (reino normalizado + nombre). nil si estás en una pero aún no ha cargado.
+-- Lo de la hermandad guardado con otro reino (old) pasa al almacén de ahora (key), sin pisar a nadie que ya esté allí, y
+-- el de antes se quita (si se quedara, un amigo quitado con /oro amigo borrar volvería de allí).
+local function adoptBucket(old, key)
+  local db = state.db
+  local bucket = db and type(db.guilds) == "table" and db.guilds[old]
+  if key == old or type(bucket) ~= "table" then return end
+  db.guilds[old] = nil
+  local target = db.guilds[key]
+  if type(target) ~= "table" then db.guilds[key] = bucket; return end
+  target.members = type(target.members) == "table" and target.members or {}
+  for name, friend in pairs(type(bucket.members) == "table" and bucket.members or {}) do
+    if type(name) == "string" and not findName(target.members, name) then target.members[name] = friend end
+  end
+end
+
+-- La misma hermandad con otro reino (WoW Forever ya no lo da; Data.Realm). Sus datos siguen al reino de ahora:
+--   «/Hermandad»: lo de la 0.5.x mientras el juego daba el reino vacío y el addon aún no lo resolvía;
+--   «Forever/Hermandad»: lo guardado con el reino de reserva («fijo»), cuando ya hay uno de verdad (de /oro reino, del
+--   juego o de tus datos);
+--   la clave de antes en esta sesión: /oro reino (o borrar), o el juego o tus datos dan el reino a media sesión.
+local function adoptOtherRealms(guildName, key, source)
+  adoptBucket("/" .. guildName, key)
+  local fallback = type(Data) == "table" and Data.FALLBACK_REALM
+  if source and source ~= "fijo" and type(fallback) == "string" then adoptBucket(fallback .. "/" .. guildName, key) end
+  local prev = state.key
+  local suffix = "/" .. guildName
+  if type(prev) == "string" and prev ~= NOGUILD and prev ~= key and prev:sub(-#suffix) == suffix then
+    adoptBucket(prev, key)
+  end
+end
+
+-- Clave de la hermandad actual (reino + nombre; el reino, el de Data.Realm). nil si estás en una pero aún no ha
+-- cargado.
 function Guild.UpdateKey()
   local key = NOGUILD
   if type(IsInGuild) == "function" and IsInGuild() and type(GetGuildInfo) == "function" then
@@ -309,8 +351,9 @@ function Guild.UpdateKey()
       if state.key == NOGUILD then state.key = nil end -- aún no ha cargado: se conserva solo una hermandad ya conocida
       return state.key
     end
-    local realm = type(GetNormalizedRealmName) == "function" and GetNormalizedRealmName() or ""
+    local realm, source = ownRealm()
     key = (realm or "") .. "/" .. guildName
+    adoptOtherRealms(guildName, key, source)
     state.settled = true -- con el nombre de la hermandad legible, la identidad es fiable
   end
   state.key = key

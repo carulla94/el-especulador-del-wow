@@ -151,16 +151,26 @@ local function fold(text) return Guild.Fold(text) end
 local function canonRealm(realm) return fold((realm:gsub("[%s%-']", ""))) end
 
 -- Texto del que sale el código: reino de la hermandad / hermandad | personaje-reino, todo en minúsculas. El nombre se
--- parte en el primer guion; sin guion, el reino es el tuyo.
-function Relay.Canonical(guildRealm, guildName, sender, ownRealm)
+-- parte en el primer guion; sin guion, o con el reino vacío («Nombre-», como puede darlo WoW Forever, que ya no da
+-- reinos), el reino es el tuyo.
+local function splitSender(sender, ownRealm)
   local name, realm = sender:match("^([^%-]+)%-(.*)$")
-  if not name then name, realm = sender, ownRealm end
+  if not name then name = sender end
+  if not realm or canonRealm(realm) == "" then realm = ownRealm end
+  return name, realm
+end
+
+function Relay.Canonical(guildRealm, guildName, sender, ownRealm)
+  local name, realm = splitSender(sender, ownRealm)
   return canonRealm(guildRealm) .. "/" .. fold(guildName) .. "|" .. fold(name) .. "-" .. canonRealm(realm or "")
 end
 
+-- Tu reino: el de Data.Realm (WoW Forever ya no lo da; el último conocido, el de tus datos guardados o «Forever»). Así
+-- todos los de la hermandad calculan el mismo código para cada compañero y el tuyo coincide con el que calculan ellos.
 local function realmName()
-  if type(GetNormalizedRealmName) ~= "function" then return nil end
-  local ok, realm = pcall(GetNormalizedRealmName)
+  local Data = ns.Data
+  if type(Data) ~= "table" or type(Data.Realm) ~= "function" then return nil end
+  local ok, realm = pcall(Data.Realm)
   if ok and not secret(realm) and type(realm) == "string" and realm ~= "" then return realm end
   return nil
 end
@@ -173,23 +183,24 @@ local function salt()
   if not okGuild or secret(inGuild) or not inGuild then return nil end
   local ok, name, _, _, realm = pcall(GetGuildInfo, "player")
   if not ok or secret(name) or secret(realm) or type(name) ~= "string" or name == "" then return nil end
-  if type(realm) ~= "string" or realm == "" then realm = realmName() end
+  if type(realm) ~= "string" or canonRealm(realm) == "" then realm = realmName() end
   if not realm then return nil end
   return canonRealm(realm) .. "/" .. fold(name)
 end
 Relay.Salt = salt
 
--- Caché nombre -> código solo en memoria (Relay nunca guarda nombres).
+-- Caché nombre -> código solo en memoria (Relay nunca guarda nombres). Con el reino en la clave: el de quien llega sin
+-- reino es el tuyo, que /oro reino puede cambiar.
 local hashCache, hashCount = {}, 0
 local function senderHash(sender, s)
   s = s or salt()
   if not s or type(sender) ~= "string" or sender == "" or #sender > 100 then return nil end
-  local key = s .. "|" .. sender
+  local name, realm = splitSender(sender, nil)
+  realm = realm or realmName()
+  if not realm then return nil end
+  local key = s .. "|" .. name .. "-" .. realm
   local h = hashCache[key]
   if h then return h end
-  local name, realm = sender:match("^([^%-]+)%-(.*)$")
-  if not name then name, realm = sender, realmName() end
-  if not realm then return nil end
   h = fnv(s .. "|" .. fold(name) .. "-" .. canonRealm(realm))
   if hashCount >= 2000 then hashCache, hashCount = {}, 0 end
   hashCache[key], hashCount = h, hashCount + 1
@@ -204,6 +215,17 @@ local function ownHash(s)
   return senderHash(name .. "-" .. realm, s)
 end
 Relay.OwnHash = ownHash
+
+-- ¿Lo mandaste tú? Tu código o, si el servidor te nombra con un reino que no es el de Data.Realm (WoW Forever ya no lo
+-- da: el tuyo puede ser «Forever» o uno puesto con /oro reino), tu nombre sin reino. En un mundo de Forever no hay dos
+-- personajes con el mismo nombre. Así el eco de la hermandad de tu propio escaneo nunca se guarda como de un compañero.
+local function isOwn(sender, h, s)
+  if h == ownHash(s) then return true end
+  local okName, name = pcall(UnitName, "player")
+  if not okName or secret(name) or type(name) ~= "string" or name == "" then return false end
+  local short = sender:match("^([^%-]+)")
+  return short ~= nil and fold(short) == fold(name)
+end
 
 -- Etiqueta del mercado: el código FNV de "Reino-Facción" tal cual (otra subasta, otra etiqueta).
 local tagCache = {}
@@ -908,7 +930,7 @@ local function handleMessage(text, sender, channel)
   if not t then return reject("hora") end
   local h = senderHash(sender, s)
   if not h then return reject("remitente") end
-  if h == ownHash(s) or selfSet(History.Market(key))[h] then return false, "propio" end
+  if isOwn(sender, h, s) or selfSet(History.Market(key))[h] then return false, "propio" end
   local msg, why = Relay.Parse(text, t, channel, mk)
   if not msg then return reject(why) end
   if msg.kind == "P3" then return onP3(msg, sender, h, channel, key) end
@@ -1280,7 +1302,7 @@ local function onPeer(sender, kind, channel)
   local key = History.CurrentMarket()
   local t = unixNow()
   local h = s and senderHash(sender, s)
-  if not (h and key and t) or h == ownHash(s) then return end
+  if not (h and key and t) or isOwn(sender, h, s) then return end
   local market = History.Market(key)
   local entry = market and type(market.obs) == "table" and market.obs[h] or nil
   if not entry or entry.seen < t - TARGET_RECENT then return end

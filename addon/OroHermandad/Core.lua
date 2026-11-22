@@ -76,11 +76,12 @@ local function factionHouse()
   return ok and house == "faction"
 end
 
--- Precios de Auctionator: uno por reino y facción.
+-- Mercado: uno por reino y facción («Reino-Facción»). El reino lo decide Data.Realm (WoW Forever ya no lo da: el
+-- último conocido, el de tus datos guardados o «Forever»; /oro reino lo cambia).
 local function marketKey()
-  local realm = type(GetNormalizedRealmName) == "function" and GetNormalizedRealmName() or ""
+  local ok, realm = pcall(Data.Realm)
   local faction = type(UnitFactionGroup) == "function" and UnitFactionGroup("player") or ""
-  return (realm or "") .. "-" .. (faction or "")
+  return (ok and type(realm) == "string" and realm or "") .. "-" .. (faction or "")
 end
 
 -- Solo recetas de profesiones que el personaje tiene ahora. Las de una profesión abandonada no se borran (por si una
@@ -658,6 +659,7 @@ local HELP = {
   "/oro comision 5 — porcentaje que se queda la subasta (por defecto 5)",
   "/oro tabla — precios guardados de la lista vigilada, para copiarlos a Excel",
   "/oro vigilar [enlace] — guarda también los precios de ese objeto (hasta 40)  ·  /oro olvidar [enlace]",
+  "/oro reino — el reino de tus precios (WoW Forever ya no lo da)  ·  /oro reino <nombre> para usar el de tu hermandad (con sus mayúsculas)  ·  /oro reino borrar",
   "/oro sondeo — diagnóstico para pegarlo en una incidencia (sin nombres de personajes ni oro)",
   "/oro opciones — panel de opciones (también: auto, minimapa, sonido, info on|off)",
 }
@@ -841,6 +843,51 @@ local function tableCommand()
   say("tabla de " .. objects(count) .. ": cópiala de la ventana (Ctrl+C) y pégala en Excel.")
 end
 
+-- /oro reino [<nombre>|borrar]: el reino del mercado («Reino-Facción»), del almacén de la hermandad y de los precios
+-- compartidos (Data.Realm). WoW Forever ya no lo da: quien entra en una hermandad que sigue con otro puede ponerlo a mano
+-- para coincidir con ella. Si el juego lo da, manda el del juego.
+local function realmLine()
+  local realm, source = Data.Realm()
+  return "reino: " .. realm .. " (" .. (Data.REALM_SOURCE_TEXT[source] or source) .. "). Mercado: " .. marketKey() .. "."
+end
+
+local function realmCommand(input)
+  local rest = (input or ""):match("^%s*%S+%s*(.-)%s*$") or ""
+  local _, source = Data.Realm()
+  if rest == "" then
+    say(realmLine())
+    if source ~= "juego" then
+      say("para compartir precios, todos en la hermandad tienen que usar el mismo: si usan otro, /oro reino <nombre> "
+        .. "(/oro reino borrar vuelve a lo automático).")
+    end
+    return
+  end
+  if Data.Normalize(rest) == "borrar" then
+    Data.SetRealm(false)
+    say("he borrado el reino guardado de este personaje. Ahora, " .. realmLine())
+  elseif source == "juego" then
+    say("el juego da el reino (" .. Data.Realm() .. ") y es el que se usa: no hace falta ponerlo a mano.")
+    return
+  else
+    local realm, known = Data.SetRealm(rest)
+    if not realm then
+      say("uso: /oro reino (lo enseña), /oro reino <nombre> (de 1 a 64 letras, sin «|») o /oro reino borrar.")
+      return
+    end
+    say("reino de este personaje: " .. realm .. ". Mercado: " .. marketKey() .. ". Para compartir precios, tu hermandad "
+      .. "tiene que usar el mismo (cada uno lo ve con /oro reino).")
+    if not known then
+      -- El mercado distingue mayúsculas: «camwow…» y «CAMWOW…» no comparten nada.
+      say("ojo: las mayúsculas cuentan. Escríbelo exactamente igual que sale en el /oro reino de tus compañeros.")
+    end
+  end
+  -- Otro reino: otro mercado y otro almacén de la hermandad (lo de la hermandad pasa al nuevo); todo se rehace con el
+  -- nuevo, también la primera pasada de «Cuándo vender».
+  Guild.UpdateKey()
+  timingCall("MarketChanged")
+  invalidateMembers(); invalidateSpecTips(); refreshSoon()
+end
+
 local function probeCommand()
   local lines = History.Probe()
   if not relayLoaded() then
@@ -915,6 +962,8 @@ local function handleSlash(input)
     tableCommand()
   elseif cmd == "sondeo" then
     probeCommand()
+  elseif cmd == "reino" then
+    realmCommand(input)
   elseif cmd == "vigilar" then
     watchCommand(input)
   elseif cmd == "olvidar" then
@@ -969,6 +1018,9 @@ function handlers.ADDON_LOADED(name)
   OroHermandadDB = type(OroHermandadDB) == "table" and OroHermandadDB or {}
   OroHermandadCharDB = type(OroHermandadCharDB) == "table" and OroHermandadCharDB or {}
   db, cdb = OroHermandadDB, OroHermandadCharDB
+  -- El reino (WoW Forever ya no lo da): dónde se recuerda, y lo guardado que no valga, fuera. Antes que la hermandad y
+  -- el historial, que lo usan.
+  Data.RealmInit(db, cdb)
   for key, value in pairs(DEFAULTS) do if db[key] == nil then db[key] = value end end
   if not Engine.MODES[db.mode] then db.mode = "lazy" end
   db.window = type(db.window) == "table" and db.window or {}

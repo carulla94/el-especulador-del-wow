@@ -11,6 +11,7 @@
 - **Subidor del PC:** el subidor es ahora una ventana para Windows. En su PC, el botón **Guardar y subir** (o `/oro guardar`) recarga la interfaz cuando tú lo pides para que los precios lleguen al panel en segundos; el pie de la ventana dice el último envío aceptado y si el subidor no parece abierto. Quien tiene el subidor actualiza primero el addon y el subidor.
 - **Historial:** hasta 2 MB para lo tuyo y 4 MB para lo de los compañeros; se guarda un escaneo cada 30 min y 8 al día por reino y facción.
 - `/oro sondeo` explica el escáner, la subasta y «Cuándo vender» (solo cifras, sin nombres).
+- **Reino:** WoW Forever ya no da el reino; el addon usa el último conocido (o el de tus precios guardados, o el de tu hermandad, o «Forever»), así que tus precios, la hermandad y el panel siguen como antes. `/oro reino` lo enseña y, si tu hermandad usa otro, lo cambia (con las mismas mayúsculas).
 
 ## 0.5.1 (2026-11-18)
 

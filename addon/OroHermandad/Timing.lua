@@ -635,7 +635,7 @@ end
 ---------------------------------------------------------------------------
 local passDone = {}    -- mercado -> true: ya se sumó en esta sesión
 local pass = nil       -- {key, ids, i, acc, times, index, t, restart}
-local passStep, livePump
+local passStep, livePump, passSoon
 
 local function passIDs(key)
   local market = History.Market(key)
@@ -793,12 +793,15 @@ passStep = function(token)
     pass = nil
     commitPass(p)
     livePump()
+    -- El mercado cambió mientras se leía (el reino: /oro reino, o el juego o tus datos lo dan a media sesión).
+    if History.CurrentMarket() ~= p.key then passSoon() end
     return
   end
   after(0, function() protect("primera pasada", passStep, token) end)
 end
 
 local passSeq, noKeyTries = 0, 0
+local loggedIn, passAsked = false, false
 tryPass = function()
   if pass or not db then return end
   if not History.Hist() then return end
@@ -825,6 +828,16 @@ tryPass = function()
   after(0, function() protect("primera pasada", passStep, token) end)
 end
 
+-- Otro mercado a media sesión (el reino cambió: /oro reino, o el juego o tus datos lo dan tarde): su primera pasada en
+-- unos segundos, sin esperar a volver a entrar. Solo después de PLAYER_LOGIN y una petición cada vez.
+passSoon = function()
+  if not loggedIn or passAsked then return end
+  local key = History.CurrentMarket()
+  if not key or passDone[key] or (pass and pass.key == key) then return end
+  passAsked = true
+  after(Timing.RETRY, function() passAsked = false; protect("primera pasada", tryPass) end)
+end
+
 ---------------------------------------------------------------------------
 -- En directo: cada punto que escriben History (lo tuyo) y Relay (lo de compañeros)
 ---------------------------------------------------------------------------
@@ -838,9 +851,11 @@ local function onPoint(event, key, obs, ...)
   if not db or type(key) ~= "string" or not isObserver(obs) then return end
   if not passDone[key] then
     -- Antes de la primera pasada no se suma nada en directo: la pasada lo lee de lo guardado (si estaba leyendo,
-    -- vuelve a empezar para no dejar medio escaneo).
+    -- vuelve a empezar para no dejar medio escaneo). Si es el mercado de ahora y nadie la ha pedido (cambió a media
+    -- sesión), se pide.
     if pass and pass.key == key then pass.restart = true end
     stats.dropped = stats.dropped + 1
+    passSoon()
     return
   end
   -- Con la cola llena se pierden puntos, nunca el final de un escaneo: así nunca se suma dos veces.
@@ -954,8 +969,12 @@ end
 
 -- En PLAYER_LOGIN: la primera pasada, 30 s después (y cada 10 s hasta que el historial y la hermandad estén quietos).
 function Timing.Login()
+  loggedIn = true
   after(Timing.FIRST_DELAY, function() protect("primera pasada", tryPass) end)
 end
+
+-- Core, al cambiar el reino con /oro reino: la primera pasada del mercado nuevo, en unos segundos.
+function Timing.MarketChanged() protect("primera pasada", passSoon) end
 
 -- PLAYER_LOGOUT: termina en el acto los escaneos que ya se estaban sumando (como mucho uno o dos de 201 objetos) para
 -- no dejar medio escaneo; los que aún no habían empezado se quedan para la primera pasada de la próxima vez. Después
@@ -1212,6 +1231,7 @@ function Timing.View(arg)
   if not db or not key then return title, "Aún no se sabe en qué mercado estás.", "aún no se sabe en qué mercado estás." end
   local lines = {}
   local pending = not passDone[key] and " (aún se están leyendo los escaneos guardados: vuelve a mirarlo en unos segundos)" or ""
+  if not passDone[key] then protect("primera pasada", passSoon) end -- por si el mercado cambió a media sesión
   local id
   if type(arg) == "string" and arg:match("%S") then
     id = Timing.FindItem(arg)

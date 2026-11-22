@@ -73,6 +73,12 @@ Stub.slots = {
   [6] = {{itemID = 3858, stackCount = 40, quality = 1, isBound = false}},
 }
 
+-- Reino de GetNormalizedRealmName, GetRealmName y GetPlayerInfoByGUID; con un solo valor, el mismo en las tres.
+function Stub.setRealm(normalized, name, guid)
+  if name == nil and guid == nil then name, guid = normalized, normalized end
+  Stub.realms = {normalized = normalized, name = name, guid = guid}
+end
+
 -- opts (0.6.0): auctionator = false (sin Auctionator) o {autoscan = bool, replicate = bool} (sus opciones de escanear al
 -- abrir la subasta y de que ese escaneo sea el completo). Sin opts, como siempre (Auctionator sin escaneo al abrir).
 function Stub.install(opts)
@@ -116,9 +122,19 @@ function Stub.install(opts)
   end
   _G.UnitGUID = function(unit)
     if unit == "npc" and Stub.npcGUID then return Stub.npcGUID end
+    if unit == "player" then return Stub.playerGUID end
     return nil
   end
-  _G.GetNormalizedRealmName = function() return "Forever" end
+  -- Reino que da cada función del juego (Stub.setRealm): por defecto "Forever". El WoW Forever de noviembre de 2026 da
+  -- "" en las tres. GetPlayerInfoByGUID: el 7.º valor es el reino.
+  Stub.playerGUID = "Player-4170-0A1B2C3D"
+  Stub.setRealm("Forever")
+  _G.GetNormalizedRealmName = function() return Stub.realms.normalized end
+  _G.GetRealmName = function() return Stub.realms.name end
+  _G.GetPlayerInfoByGUID = function(guid)
+    if guid ~= Stub.playerGUID then return nil end
+    return "Guerrero", "WARRIOR", "Humano", "Human", 2, _G.UnitName("player"), Stub.realms.guid
+  end
   _G.GetLocale = function() return "esES" end
   _G.IsInGuild = function() return true end
   _G.GetGuildInfo = function() return "Los Mineros" end
