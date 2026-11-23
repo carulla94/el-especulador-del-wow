@@ -21,8 +21,8 @@ export const CATEGORY_ORDER = ["metal", "piedra", "gema", "hierba", "piel", "tel
 export const DURATIONS = [{value: 1, label: "Corta"}, {value: 2, label: "Media"}, {value: 3, label: "Larga"}];
 /** Chart colours, validated for the dark surface with the dataviz palette checks (see hermandad.css for the same
  * values as tokens). Text never wears them. */
-export const CHART = Object.freeze({price: "#c98500", normal: "#a9a18d", good: "#0ca30c", down: "#3987e5", up: "#e66767",
-  grid: "#3a3a32", surface: "#22231f", text: "#e9e0cd", muted: "#a9a18d"});
+export const CHART = Object.freeze({price: "#c98500", normal: "#a99b80", good: "#0ca30c", down: "#3987e5", up: "#e66767",
+  grid: "#33291c", surface: "#1d1811", text: "#ece1c9", muted: "#a99b80"});
 
 let E = null;
 /** The market rules module (src/especular.mjs, served as /especular.js). Must be set before most builders run. */
@@ -844,8 +844,8 @@ export function timingSummary(pattern) {
  * in the tooltip; the best cell of the advice gets a ring. With sales (timingSales, mode "ventas") a cell shows how much
  * more or less sells there than usual: green above, blue below, full at ×1,5 and ×0,5; an eighth row («todos») shows
  * the blocks of any day, which the advice reads, and its best block gets the ring. Returns {node, cells}. */
-export function timingHeatmapSVG(pattern, {best = null, width = 440, sales = null} = {}) {
-  const left = 40, top = 22, cols = BLOCK_LABELS.length, cellW = (width - left - 4) / cols, cellH = 30, gap = 8;
+export function timingHeatmapSVG(pattern, {best = null, width = 440, sales = null, cellH = 30} = {}) {
+  const left = 40, top = 22, cols = BLOCK_LABELS.length, cellW = (width - left - 4) / cols, gap = 8, textY = Math.round(cellH / 2) + 4;
   const height = top + 7 * cellH + 4 + (sales ? cellH + gap : 0);
   const cells = sales ? sales.cells : pattern?.cells ?? [];
   const salesCell = c => {
@@ -860,7 +860,7 @@ export function timingHeatmapSVG(pattern, {best = null, width = 440, sales = nul
       h("rect", {x, y, width: w, height: hgt, rx: 3, fill: c.usable ? (c.value >= 1 ? CHART.good : CHART.down) : "none",
         "fill-opacity": c.usable ? round1(0.12 + 0.68 * strength) : 0, stroke: ring ? CHART.text : c.usable ? "none" : CHART.grid,
         "stroke-width": ring ? 2 : 1, ...(c.usable || ring ? {} : {"stroke-dasharray": "3 3"})}),
-      h("text", {x: round1(x + w / 2), y: y + 19, "text-anchor": "middle", "font-size": 12, fill: c.usable ? CHART.text : CHART.muted},
+      h("text", {x: round1(x + w / 2), y: y + textY, "text-anchor": "middle", "font-size": 12, fill: c.usable ? CHART.text : CHART.muted},
         c.usable ? formatRate(c.value) : c.n > 0 ? "·" : ""),
       h("title", {}, tip));
   };
@@ -876,7 +876,7 @@ export function timingHeatmapSVG(pattern, {best = null, width = 440, sales = nul
       h("rect", {x, y, width: w, height: hgt, rx: 3, fill: c.usable ? (c.value >= 0 ? CHART.price : CHART.down) : "none",
         "fill-opacity": c.usable ? round1(0.12 + 0.68 * strength) : 0, stroke: ring ? CHART.text : c.usable ? "none" : CHART.grid,
         "stroke-width": ring ? 2 : 1, ...(c.usable || ring ? {} : {"stroke-dasharray": "3 3"})}),
-      h("text", {x: round1(x + w / 2), y: y + 19, "text-anchor": "middle", "font-size": 12, fill: c.usable ? CHART.text : CHART.muted},
+      h("text", {x: round1(x + w / 2), y: y + textY, "text-anchor": "middle", "font-size": 12, fill: c.usable ? CHART.text : CHART.muted},
         c.usable ? formatPct(c.value) : c.n > 0 ? "·" : ""),
       h("title", {}, tip));
   };
@@ -884,8 +884,8 @@ export function timingHeatmapSVG(pattern, {best = null, width = 440, sales = nul
     "aria-label": sales ? "Ventas estimadas por día de la semana y franja horaria frente a lo normal de esos objetos. Las mismas conclusiones están en las frases de arriba."
       : "Precio más bajo por día de la semana y franja horaria frente a su nivel de esa semana. Las mismas conclusiones están en las frases de arriba."},
     h("g", {"font-size": 12, fill: CHART.muted, "text-anchor": "middle"}, BLOCK_LABELS.map((label, b) => h("text", {x: round1(left + b * cellW + cellW / 2), y: 14}, width < 420 ? label.replace(" h", "") : label))),
-    h("g", {"font-size": 12, fill: CHART.muted}, WEEKDAYS_SHORT.map((label, wd) => h("text", {x: 2, y: top + wd * cellH + 19}, label)),
-      sales ? h("text", {x: 2, y: top + 7 * cellH + gap + 19}, "todos") : null),
+    h("g", {"font-size": 12, fill: CHART.muted}, WEEKDAYS_SHORT.map((label, wd) => h("text", {x: 2, y: top + wd * cellH + 1 + textY}, label)),
+      sales ? h("text", {x: 2, y: top + 7 * cellH + gap + 1 + textY}, "todos") : null),
     cells.map(sales ? salesCell : cell),
     sales ? sales.blocks.map(b => salesCell({wd: 7, block: b.block, value: b.rateIdx, usable: b.rateIdx !== null, n: b.n, days: 0, sec: b.sec})) : null);
   return {node, cells};
@@ -1052,7 +1052,52 @@ export function salesLines(sales) {
   return lines;
 }
 
-// ---- Pesca: qué pescar, dónde, qué hacer con cada pez (y cuándo venderlo, arriba) --------------------------------
+/** The bars beside the heatmap, each list with its best and worst marked when they differ. Price (no sales): the six
+ * blocks and the seven weekdays in basis points against the week. Sales (timingSales): the six blocks as times the
+ * usual rate, and no weekdays. Returns {unit: "bp" | "rate", hours: [6], days: [7] | null} of {label, value, text,
+ * usable, n, best, worst}. */
+export function timingSlots(pattern, sales = null) {
+  const mark = rows => {
+    const usable = rows.filter(r => r.usable);
+    if (usable.length >= 2) {
+      const best = usable.reduce((a, b) => b.value > a.value ? b : a), worst = usable.reduce((a, b) => b.value < a.value ? b : a);
+      if (best.value !== worst.value) { best.best = true; worst.worst = true; }
+    }
+    return rows;
+  };
+  const row = (label, value, usable, n, text) => ({label, value: usable ? value : null, usable, n, text: usable ? text : n ? "pocos" : "—", best: false, worst: false});
+  if (sales) return {unit: "rate", days: null,
+    hours: mark(sales.blocks.map(b => row(BLOCK_LABELS[b.block], b.rateIdx, b.rateIdx !== null, b.n, formatRate(b.rateIdx))))};
+  return {unit: "bp",
+    hours: mark((pattern?.blocks ?? []).map(b => row(BLOCK_LABELS[b.block], b.value, b.usable && isInt(b.value), b.n, formatPct(b.value)))),
+    days: mark((pattern?.weekdays ?? []).map(d => row(WEEKDAYS_LONG[d.wd], d.value, d.usable && isInt(d.value), d.n, formatPct(d.value))))};
+}
+/** The answers at the top of «Cuándo vender», most useful first: the best moment (and the worst) of the price pattern,
+ * and when to post from the sales advice. advice: timingSummary with .sales (timingSales) when known.
+ * [{key, label, name, note, tone: "good" | "bad" | null}]. */
+export function sellAnswers(advice) {
+  const out = [], cap = text => text.charAt(0).toUpperCase() + text.slice(1);
+  const moment = c => `${cap(WEEKDAYS_LONG[c.wd])}, ${BLOCK_LABELS[c.block]}`;
+  if (advice?.best) out.push({key: "best", label: "El mejor momento", name: moment(advice.best), tone: "good",
+    note: `Se paga ${pctWords(advice.best.value)} de lo normal de esa semana.`});
+  const s = advice?.sales?.advice;
+  if (s && s.best !== null && s.hint) out.push({key: "post", label: s.reason === "ventas" ? "Cuándo se vende más" : s.reason === "precio" ? "Cuándo se vende mejor" : "La franja con mejor precio",
+    name: `De ${4 * s.best} a ${4 * s.best + 4} h`, tone: advice?.best ? null : "good",
+    note: `Pon o iguala el precio hacia las ${s.hint[0]}-${s.hint[1]} h, con 2 h (u 8 h si no vas a volver).`});
+  if (advice?.worst) out.push({key: "worst", label: "El peor momento", name: moment(advice.worst), tone: "bad",
+    note: `Se paga ${pctWords(advice.worst.value)} de lo normal de esa semana.`});
+  return out;
+}
+/** What «Cuándo vender» can look at: the whole market, each category of the summary and the fishing groups.
+ * {market: {key: "todo", label, ids: null}, cats: [{key: "cat:<cat>", label, ids}], fish: [{key, label, ids}]}. */
+export function sellGroups(summary) {
+  const fish = fishGroups();
+  return {market: fish.find(g => g.key === "todo"),
+    cats: groupByCategory(summary?.items ?? []).map(g => ({key: "cat:" + g.cat, label: g.items[0].catLabel ?? g.cat, ids: g.items.map(e => e.id)})),
+    fish: fish.filter(g => g.key !== "todo")};
+}
+
+// ---- Pesca: qué pescar, dónde, qué hacer con cada pez (y cuándo venderlo, en su pestaña) -------------------------
 /** Raw fish the addon watches (Data.WATCH «comida» since 0.5.0) with the lowest fishing skill that catches it in
  * open water (3 % or more) or in a pool. */
 export const FISH = Object.freeze([
@@ -1452,8 +1497,8 @@ function boot(doc, win) {
   const $ = selector => doc.querySelector(selector);
   const state = {me: null, csrf: "", market: null, summary: null, detail: null, filters: {q: "", cat: "", show: "", conf: ""},
     sort: {key: "", dir: "asc"}, view: "hoy", lastUpload: null, pollTimer: null, members: null, busy: false,
-    compensa: {prof: "", skill: "", budget: "", rare: false, cat: ""}, favorites: new Set(),
-    pesca: {skill: "", cook: "", alch: "", rate: "", group: "pesca", mode: "precio"}, timing: null, timingKey: null, timingLoading: false, timingError: "",
+    compensa: {skills: {mining: "", herbalism: "", skinning: ""}, open: {}, budget: "", rare: false, cat: ""}, favorites: new Set(), chollosAll: false,
+    pesca: {skill: "", cook: "", alch: "", rate: ""}, vender: {group: "todo", mode: "precio"}, timing: null, timingKey: null, timingLoading: false, timingError: "",
     fishing: null, fishingKey: null, fishingLoading: false};
   let toastTimer;
   let cartera = null;
@@ -1531,9 +1576,9 @@ function boot(doc, win) {
   }
 
   // ---- views
-  const VIEWS = ["hoy", "mercado", "compensa", "pesca", "balance", "cartera", "hermandad"];
+  const VIEWS = ["hoy", "mercado", "compensa", "vender", "pesca", "balance", "cartera", "hermandad"];
   const VIEW_ALIASES = {miembros: "hermandad", unirse: "hermandad"};
-  const VIEWS_WITH_MARKET = ["hoy", "mercado", "compensa", "pesca", "balance", "cartera"];
+  const VIEWS_WITH_MARKET = ["hoy", "mercado", "compensa", "vender", "pesca", "balance", "cartera"];
   function showOnly(id) {
     const ids = [].concat(id);
     for (const section of doc.querySelectorAll("[data-screen]")) section.hidden = !ids.includes(section.id);
@@ -1571,11 +1616,14 @@ function boot(doc, win) {
       const active = tab.dataset.tab === view;
       tab.classList.toggle("active", active);
       if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
+      // On a phone the sections scroll sideways: the one in use stays in sight.
+      if (active && !tab.hidden && $("#tabs").scrollWidth > $("#tabs").clientWidth) tab.scrollIntoView({block: "nearest", inline: "center"});
     }
     showOnly(view === "hermandad" ? (state.me?.canAdmin ? ["screen-miembros", "screen-unirse"] : ["screen-unirse"]) : "screen-" + view);
     $("#market-bar").hidden = !VIEWS_WITH_MARKET.includes(view);
     if (view === "hermandad" && state.me?.canAdmin) loadMembers();
     if (view === "compensa") renderCompensa();
+    if (view === "vender") renderVender();
     if (view === "pesca") renderPesca();
     if (view === "cartera") owned()?.load();
     if (item && state.summary) openDetail(Number(item[1]));
@@ -1748,6 +1796,8 @@ function boot(doc, win) {
     $("#compensa-content").hidden = !s;
     $("#pesca-empty").hidden = !!s;
     $("#pesca-content").hidden = !s;
+    $("#vender-empty").hidden = !!s;
+    $("#vender-content").hidden = !s;
     if (!s) {
       $("#market-empty-text").textContent = state.me?.markets?.length
         ? "Todavía no hay datos de ese mercado."
@@ -1776,36 +1826,34 @@ function boot(doc, win) {
     renderBalance();
     renderHoy();
     if (state.view === "compensa") renderCompensa();
+    if (state.view === "vender") renderVender();
     if (state.view === "pesca") renderPesca();
   }
 
   // ---- "Chollos de hoy"
+  const CHOLLOS_SHOWN = 6;
+  $("#chollos-more").addEventListener("click", () => { state.chollosAll = !state.chollosAll; if (state.summary) renderChollos(); });
   function renderChollos() {
     const s = state.summary, byId = new Map(s.items.map(e => [e.id, e]));
     const list = s.chollos.map(id => byId.get(id)).filter(Boolean);
+    const shown = state.chollosAll ? list : list.slice(0, CHOLLOS_SHOWN);
     $("#chollos-count").textContent = String(list.length);
     $("#chollos-empty").hidden = list.length > 0;
     $("#chollos-empty").textContent = list.length ? "" : cholloEmptyText(s);
     $("#chollos-list").hidden = list.length === 0;
-    $("#chollos-list").replaceChildren(...list.map(e => {
-      const f = e.flip;
-      const figures = f && f.units > 0 ? el("dl", {class: "figures"},
-        el("div", {}, el("dt", {text: "Unidades"}), el("dd", {text: String(f.units)})),
-        el("div", {}, el("dt", {text: "Compra máx."}), el("dd", {}, money(f.maxBuy))),
-        el("div", {}, el("dt", {text: "Equilibrio"}), el("dd", {}, money(f.breakEven))),
-        el("div", {}, el("dt", {text: "Ganancia"}), el("dd", {}, money(f.profit)))) : null;
+    $("#chollos-more").hidden = list.length <= CHOLLOS_SHOWN;
+    $("#chollos-more").textContent = state.chollosAll ? "Ver solo los primeros" : `Ver los ${list.length} chollos`;
+    $("#chollos-list").replaceChildren(...shown.map(e => {
+      const f = e.flip, pays = !!f?.accept && f.units > 0;
       return el("li", {class: "chollo" + (f?.accept ? "" : " weak")},
         el("div", {class: "chollo-head"},
           el("button", {type: "button", class: "item-link", text: e.name || `Objeto ${e.id}`, onclick: () => navigateItem(e.id)}),
           el("span", {class: "badge verdict-CHOLLO", text: f?.accept ? "Chollo" : "Chollo · no compensa"})),
         el("p", {class: "chollo-price"}, money(e.price?.lo), el("span", {class: "muted", text: ` · ${(e.statusText || "").replace(/^Chollo: /, "")}`})),
-        el("p", {class: "seen muted", text: `Visto por ${f?.who ?? e.price?.member ?? "un compañero"}, ${formatWhen(f?.at ?? e.price?.at, Date.now())} · normal ${formatGSC(e.N)}`}),
-        figures,
-        owned() ? el("p", {class: "row"}, el("button", {type: "button", class: "button subtle small", text: "Registrar compra", onclick: () => owned()?.openMovement("buy", {itemId: e.id, name: e.name, unit: e.price?.lo})})) : null,
-        el("p", {class: "flip-text", text: f?.accept
-          ? `Objetivo de reventa ${formatGSC(f.Rs)} · tras la comisión del ${rules().texts.pct(f.cutBp ?? s.cutBp)} % y un depósito perdido${f.depositEstimated ? " (estimado)" : ""}`
-          : rules().texts.flip(f, formatGSC)}),
-        el("p", {class: "estimate", text: "estimado: confírmalo en la subasta"}));
+        pays ? el("p", {class: "chollo-gain"}, "Compra hasta ", el("strong", {text: String(f.units)}), " a ", money(f.maxBuy), " como máximo: ganas ", el("strong", {}, money(f.profit)))
+          : el("p", {class: "flip-text", text: rules().texts.flip(f, formatGSC)}),
+        el("p", {class: "seen muted", text: `Visto por ${f?.who ?? e.price?.member ?? "un compañero"}, ${formatWhen(f?.at ?? e.price?.at, Date.now())} · normal ${formatGSC(e.N)}${pays ? ` · revende a ${formatGSC(f.Rs)}` : ""}`}),
+        owned() ? el("p", {class: "row"}, el("button", {type: "button", class: "button subtle small", text: "Registrar compra", onclick: () => owned()?.openMovement("buy", {itemId: e.id, name: e.name, unit: e.price?.lo})})) : null);
     }));
   }
 
@@ -1927,17 +1975,26 @@ function boot(doc, win) {
   }
 
   // ---- "Qué compensa": everything is worked out here from the summary, so the filters answer at once
-  const COMPENSA_SAVED = [["#farm-prof", "prof"], ["#farm-skill", "skill"], ["#resale-budget", "budget"]];
+  const FARM_PROFS = ["mining", "herbalism", "skinning", "cloth"], FARM_SHOWN = 5;
+  const skillInputs = [...doc.querySelectorAll("#farm-profs [data-skill]")];
+  const saveCompensa = () => { try { win.localStorage.setItem("hermandad.compensa", JSON.stringify({skills: state.compensa.skills, budget: state.compensa.budget})); } catch { /* private mode */ } };
   try {
     const saved = JSON.parse(win.localStorage.getItem("hermandad.compensa") ?? "{}");
-    for (const [id, key] of COMPENSA_SAVED) if (typeof saved?.[key] === "string") { $(id).value = saved[key]; state.compensa[key] = $(id).value; }
+    // Before there was one skill per profession there was one skill and one profession: it goes where it was meant.
+    const old = typeof saved?.skill === "string" ? saved.skill : "";
+    for (const input of skillInputs) {
+      const prof = input.dataset.skill, kept = saved?.skills?.[prof];
+      const value = typeof kept === "string" ? kept : old && (!saved.prof || saved.prof === prof) ? old : "";
+      input.value = value.slice(0, 3); state.compensa.skills[prof] = input.value;
+    }
+    if (typeof saved?.budget === "string") { $("#resale-budget").value = saved.budget; state.compensa.budget = $("#resale-budget").value; }
   } catch { /* private mode or an old value */ }
-  for (const [id, key] of COMPENSA_SAVED) {
-    $(id).addEventListener(id === "#farm-prof" ? "change" : "input", event => {
-      state.compensa[key] = event.target.value;
-      try { win.localStorage.setItem("hermandad.compensa", JSON.stringify({prof: state.compensa.prof, skill: state.compensa.skill, budget: state.compensa.budget})); } catch { /* private mode */ }
-      renderCompensa();
-    });
+  for (const input of skillInputs) {
+    input.addEventListener("input", event => { state.compensa.skills[input.dataset.skill] = event.target.value; saveCompensa(); renderCompensa(); });
+  }
+  $("#resale-budget").addEventListener("input", event => { state.compensa.budget = event.target.value; saveCompensa(); renderCompensa(); });
+  for (const box of doc.querySelectorAll("#farm-profs .prof")) {
+    box.querySelector("[data-more]").addEventListener("click", () => { state.compensa.open[box.dataset.prof] = !state.compensa.open[box.dataset.prof]; renderCompensa(); });
   }
   $("#farm-rare").addEventListener("change", event => { state.compensa.rare = event.target.checked; renderCompensa(); });
   $("#map-cat").addEventListener("change", event => { state.compensa.cat = event.target.value; if (state.summary) renderMap(); });
@@ -1951,11 +2008,16 @@ function boot(doc, win) {
   /** The rows of "Qué compensa" with the player's filters; the home tab shows the same three best cards. */
   function compensaRows() {
     const s = state.summary, filters = state.compensa;
-    const skillText = filters.skill.trim(), budgetText = filters.budget.trim();
-    const skill = /^\d{1,3}$/.test(skillText) ? Number(skillText) : null;
+    const budgetText = filters.budget.trim();
+    const skillOf = prof => { const text = String(filters.skills[prof] ?? "").trim(); return /^\d{1,3}$/.test(text) ? Number(text) : null; };
     const typed = budgetText ? parseGSC(budgetText) : null, typedOk = typed !== null && typed >= 1 && typed <= 100000000000;
     const budget = typedOk ? typed : s.budget;
-    return {budgetBad: !!budgetText && !typedOk, farm: farmRows(s, {prof: filters.prof, skill, rare: filters.rare}), resale: resaleRows(s, {budget}), smelt: smeltRows(s, {budget})};
+    // Every profession with its own skill. The best card compares what is gathered (cloth has no drop rate: apart).
+    const profs = FARM_PROFS.map(prof => ({prof, ...farmRows(s, {prof, skill: skillOf(prof), rare: filters.rare})}));
+    const gathered = profs.filter(p => p.prof !== "cloth");
+    const farm = {profs, unpriced: gathered.reduce((n, p) => n + p.unpriced, 0),
+      rows: gathered.flatMap(p => p.rows).sort((a, b) => b.value - a.value || a.skill - b.skill || a.key.localeCompare(b.key))};
+    return {budgetBad: !!budgetText && !typedOk, farm, resale: resaleRows(s, {budget}), smelt: smeltRows(s, {budget})};
   }
   function bestCardNode(c, onJump) {
     return el("li", {class: "best-card" + (c.good ? " is-good" : "")},
@@ -2008,21 +2070,37 @@ function boot(doc, win) {
     track.append(bar);
     return track;
   }
+  /** One column per profession: its best node in large, then the next ones on the same scale. */
   function renderFarm(farm) {
-    const top = farm.rows.slice(0, 12), max = top[0]?.value || 1;
-    $("#farm-empty").hidden = top.length > 0;
-    $("#farm-empty").textContent = farm.unpriced ? "Todavía no hay precios de estos materiales: aparecerán cuando alguien de la hermandad escanee la subasta." : "Nada cumple estos filtros.";
-    $("#farm-twin").hidden = top.length === 0;
     const title = r => r.name + (r.note ? ` (${r.note})` : "");
-    const tag = r => `${r.label}${r.prof === "cloth" ? "" : ` · habilidad ${r.skill}`} · niveles ${r.level[0]}–${r.level[1]}${r.rare ? " · raro" : ""}`;
-    $("#farm-list").replaceChildren(...top.map(r => {
-      const fill = el("span", {class: "rank-fill"});
-      fill.style.width = Math.max(1, Math.round(100 * r.value / max)) + "%";
-      return rankRow({id: r.id, name: title(r), tag: tag(r), track: el("span", {class: "rank-base"}, fill), value: [money(r.value), el("small", {text: `por ${r.per}`})],
-        detail: `${partsText(r)}. Dónde: ${r.zones}.`});
-    }));
+    const any = farm.profs.some(p => p.rows.length > 0);
+    $("#farm-empty").hidden = any || farm.profs.every(p => p.unpriced === 0);
+    $("#farm-empty").textContent = "Todavía no hay precios de estos materiales: aparecerán cuando alguien de la hermandad escanee la subasta.";
+    $("#farm-twin").hidden = !any;
+    for (const p of farm.profs) {
+      const box = doc.querySelector(`#farm-profs .prof[data-prof="${p.prof}"]`), part = name => box.querySelector(`[data-${name}]`);
+      const cloth = p.prof === "cloth", open = !!state.compensa.open[p.prof], [best, ...rest] = p.rows;
+      const needs = r => `${cloth ? "" : `habilidad ${r.skill} · `}niveles ${r.level[0]}–${r.level[1]}${r.rare ? " · raro" : ""}`;
+      part("empty").hidden = p.rows.length > 0;
+      part("empty").textContent = p.unpriced ? "Aún no hay precios de esto." : "Con esa habilidad no hay nada de la lista que puedas recoger.";
+      part("best").replaceChildren(...(best ? [
+        itemButton(best.id, title(best), "item-link best-name"),
+        el("span", {class: "best-amount"}, money(best.value), " ", el("small", {text: `por ${best.per}`})),
+        el("span", {class: "prof-where", text: needs(best).replace(/^h/, "H").replace(/^n/, "N")}),
+        el("span", {class: "prof-where", text: `${cloth ? "Lo sueltan los " : `Da ${partsText(best)}. Dónde: `}${best.zones}.`})] : []));
+      const shown = open ? rest : rest.slice(0, FARM_SHOWN - 1), max = best?.value || 1;
+      part("list").replaceChildren(...shown.map(r => {
+        const fill = el("span", {class: "rank-fill"});
+        fill.style.width = Math.max(1, Math.round(100 * r.value / max)) + "%";
+        const row = rankRow({id: r.id, name: title(r), tag: needs(r), track: el("span", {class: "rank-base"}, fill), value: [money(r.value)]});
+        row.title = `${cloth ? "" : `Da ${partsText(r)}. `}Dónde: ${r.zones}.`;
+        return row;
+      }));
+      part("more").hidden = rest.length <= FARM_SHOWN - 1;
+      part("more").textContent = open ? "Ver menos" : `Ver los ${p.rows.length}`;
+    }
     $("#farm-table").replaceChildren(twinTable([["Objeto"], ["Profesión"], ["Habilidad", true], ["Niveles"], ["Vale", true], ["Por"], ["Δ7d", true], ["Oferta típica", true], ["Confianza"], ["Precio usado"], ["Da"], ["Zonas"]],
-      farm.rows.map(r => [itemButton(r.id, title(r)), cell(r.label), num(r.prof === "cloth" ? "—" : String(r.skill)), cell(`${r.level[0]}–${r.level[1]}`), num(money(r.value)), cell(r.per), num(pctNode(r.d7)), num(formatUnits(r.Q)),
+      farm.profs.flatMap(p => p.rows).map(r => [itemButton(r.id, title(r)), cell(r.label), num(r.prof === "cloth" ? "—" : String(r.skill)), cell(`${r.level[0]}–${r.level[1]}`), num(money(r.value)), cell(r.per), num(pctNode(r.d7)), num(formatUnits(r.Q)),
         cell(r.conf ? r.confLabel : "Aprendiendo"), cell(sourceText(r.source)), el("td", {class: "twin-wrap", text: partsText(r, {all: true})}), el("td", {class: "twin-wrap", text: r.zones})])));
   }
   function renderResale(rows) {
@@ -2130,21 +2208,26 @@ function boot(doc, win) {
   try {
     const saved = JSON.parse(win.localStorage.getItem("hermandad.pesca") ?? "{}");
     for (const [id, key] of PESCA_SAVED) if (typeof saved?.[key] === "string") { $(id).value = saved[key].slice(0, 3); state.pesca[key] = $(id).value; }
-    if (typeof saved?.group === "string") state.pesca.group = saved.group;
-    if (saved?.mode === "ventas") state.pesca.mode = "ventas";
   } catch { /* private mode or an old value */ }
   for (const [id, key] of PESCA_SAVED) {
     $(id).addEventListener("input", event => { state.pesca[key] = event.target.value; savePesca(); renderPesca(); });
   }
-  $("#sell-group").addEventListener("change", event => { state.pesca.group = event.target.value; savePesca(); renderPesca(); });
-  // «Precio / Ventas»: what the heatmap and its table show.
+  // ---- "Cuándo vender": its own tab; what it looks at and «Precio / Ventas» are kept in this browser
+  const saveVender = () => { try { win.localStorage.setItem("hermandad.vender", JSON.stringify(state.vender)); } catch { /* private mode */ } };
+  try {
+    const saved = JSON.parse(win.localStorage.getItem("hermandad.vender") ?? "{}");
+    if (typeof saved?.group === "string") state.vender.group = saved.group;
+    if (saved?.mode === "ventas") state.vender.mode = "ventas";
+  } catch { /* private mode or an old value */ }
+  $("#sell-group").addEventListener("change", event => { state.vender.group = event.target.value; saveVender(); renderVender(); });
   for (const mode of ["precio", "ventas"]) {
-    $(`#sell-mode-${mode}`).addEventListener("click", () => { state.pesca.mode = mode; savePesca(); renderPesca(); });
+    $(`#sell-mode-${mode}`).addEventListener("click", () => { state.vender.mode = mode; saveVender(); renderVender(); });
   }
+  // The heatmap is drawn at its real width, so its text stays readable: it is redrawn when that width changes.
   let heatWidth = 0, heatTimer;
   win.addEventListener("resize", () => {
     clearTimeout(heatTimer);
-    heatTimer = setTimeout(() => { if (state.view === "pesca" && state.summary && $("#sell-holder").clientWidth !== heatWidth) renderPesca(); }, 150);
+    heatTimer = setTimeout(() => { if (state.view === "vender" && state.summary && $("#sell-holder").clientWidth !== heatWidth) renderVender(); }, 150);
   });
   /** The player's skills and pace: a number in range, or null (show everything). */
   function pescaInputs() {
@@ -2175,6 +2258,7 @@ function boot(doc, win) {
     } finally {
       state.timingLoading = false;
       if (state.view === "pesca") renderPesca();
+      if (state.view === "vender") renderVender();
     }
   }
   /** /api/guild/fishing once per upload (Forever Fishing sessions are not tied to a market); the view redraws when it arrives. */
@@ -2211,8 +2295,10 @@ function boot(doc, win) {
     $("#fish-season").textContent = zones.season === "invierno"
       ? "Ahora es invierno en el juego: pica el calamar de invierno y no la lubina (de abril a septiembre, al revés). El pargo nocturno sale de noche y el salmón escama de sol de día: las cuentas usan la media del día."
       : "Ahora es verano en el juego: pica la lubina y no el calamar de invierno (de octubre a marzo, al revés). El pargo nocturno sale de noche y el salmón escama de sol de día: las cuentas usan la media del día.";
-    const advice = renderSell();
-    $("#fish-cards").replaceChildren(...fishCards(zones, pools, uses, advice, {rate: inputs.rate}).map(c => bestCardNode(c, () => $(c.target).scrollIntoView())));
+    const advice = sellData("pesca").advice;
+    $("#fish-cards").replaceChildren(...fishCards(zones, pools, uses, advice, {rate: inputs.rate}).map(c => bestCardNode(c, c.key === "sell"
+      ? () => { state.vender.group = "pesca"; saveVender(); win.location.hash = "vender"; }
+      : () => $(c.target).scrollIntoView())));
     renderMine(s, zones, inputs);
     renderZones(zones, inputs);
     renderPools(pools);
@@ -2220,59 +2306,90 @@ function boot(doc, win) {
     $("#pesca-caveat").textContent = "De dónde sale: lo que pica en cada zona y las recetas son de Wowhead Classic (pueden cambiar en Forever); los bancos no tienen datos allí y se cuentan con 4 de cada 5 capturas de su pez. "
       + "Los precios son los que ha visto la hermandad, tras la comisión de la subasta; las especias y los viales, a precio de mercader. " + $("#caveat").textContent;
   }
-  /** "Cuándo vender": the group select, the advice (sales first, then prices), the «Precio / Ventas» heatmap and its
-   * table. Returns the price summary with the sales in .sales, for the cards. */
-  function renderSell() {
+  /** What «Cuándo vender» knows about one choice ("todo", "cat:metal", a fishing group or "id:123"): the price pattern,
+   * the sales and the advice (timingSummary with the sales in .sales, as the cards take it). */
+  function sellData(chosen) {
     const timing = state.timing?.market === state.market ? state.timing.data : null;
-    const groups = fishGroups(), select = $("#sell-group");
-    const withData = new Set((timing?.items ?? []).filter(i => (i.cells ?? []).length || (i.wd ?? []).length).map(i => i.id));
-    const byId = new Map((state.summary?.items ?? []).map(e => [e.id, e]));
-    const singles = groups[0].ids.filter(id => withData.has(id)).map(id => ({id, name: byId.get(id) ? nameOf(byId.get(id)) : FISH_VENDOR[id]?.name ?? `Objeto ${id}`}))
-      .sort((a, b) => a.name.localeCompare(b.name, "es"));
-    const signature = JSON.stringify(singles.map(x => x.id));
-    if (select.dataset.signature !== signature || !select.options.length) {
-      select.dataset.signature = signature;
-      select.replaceChildren(el("optgroup", {label: "Grupos"}, ...groups.map(g => el("option", {value: g.key, text: g.label}))),
-        singles.length ? el("optgroup", {label: "Un objeto"}, ...singles.map(x => el("option", {value: "id:" + x.id, text: x.name}))) : null);
-    }
-    const wanted = state.pesca.group || "pesca";
-    select.value = [...select.options].some(o => o.value === wanted) ? wanted : "pesca";
-    const chosen = select.value, group = groups.find(g => g.key === chosen);
+    const groups = sellGroups(state.summary), group = [groups.market, ...groups.cats, ...groups.fish].find(g => g.key === chosen);
     const ids = chosen.startsWith("id:") ? [Number(chosen.slice(3))] : group?.ids ?? null;
     const pattern = timing ? timingPattern(timing, ids) : null;
     const sales = timing ? timingSales(timing, ids, pattern) : null;
     const summary = pattern ? timingSummary(pattern) : {level: "sin-datos", title: state.timingLoading ? "Cargando los escaneos…" : "Aún no hay escaneos", best: null, worst: null,
       lines: [state.timingError || (state.timingLoading ? "" : SCAN_MORE)].filter(Boolean)};
-    const advice = {...summary, sales};
-    const allPattern = timing && chosen !== "todo" && pattern && pattern.points === 0 ? timingPattern(timing, null) : null;
-    $("#sell-feedback").hidden = !(allPattern && allPattern.points > 0);
-    $("#sell-feedback").textContent = allPattern && allPattern.points > 0
-      ? "De esto aún no hay escaneos con hora (llegan desde el addon 0.5.0). Mientras tanto, «Todo el mercado» ya tiene escaneos y suele seguir el mismo ritmo." : "";
-    // The advice line (best block and when to post) goes first, then the price lines, then why there is no sales pattern
-    // yet. A sales pattern also names the title.
-    const measured = !!sales && sales.cells.some(c => c.n > 0), salesPattern = !!sales && (sales.advice.reason === "ventas" || sales.advice.reason === "precio");
-    const title = salesPattern ? (sales.advice.reason === "ventas" ? "Cuándo se vende más" : "Cuándo se vende mejor")
-      : measured && summary.level === "sin-datos" ? "Aún hay pocas ventas medidas" : summary.title;
+    return {timing, groups, pattern, sales, advice: {...summary, sales}};
+  }
+  function renderVender() {
+    if (!state.summary) return;
+    loadTiming();
+    renderSell();
+  }
+  /** The tab: what to look at, the answers in large, the heatmap by weekday and time with the bars by time and by weekday
+   * beside it, and the table twin. */
+  function renderSell() {
+    const whole = sellData("todo"), {timing, groups} = whole, select = $("#sell-group");
+    const withData = (timing?.items ?? []).filter(i => (i.cells ?? []).length || (i.wd ?? []).length).map(i => i.id);
+    const byId = new Map((state.summary?.items ?? []).map(e => [e.id, e]));
+    const singles = withData.map(id => ({id, name: byId.get(id) ? nameOf(byId.get(id)) : FISH_VENDOR[id]?.name ?? `Objeto ${id}`}))
+      .sort((a, b) => a.name.localeCompare(b.name, "es"));
+    const option = g => el("option", {value: g.key, text: g.label});
+    const signature = JSON.stringify([groups.cats.map(g => g.key), singles.map(x => x.id)]);
+    if (select.dataset.signature !== signature || !select.options.length) {
+      select.dataset.signature = signature;
+      select.replaceChildren(option(groups.market),
+        groups.cats.length ? el("optgroup", {label: "Por categoría"}, ...groups.cats.map(option)) : null,
+        el("optgroup", {label: "Pesca"}, ...groups.fish.map(option)),
+        singles.length ? el("optgroup", {label: "Un objeto"}, ...singles.map(x => el("option", {value: "id:" + x.id, text: x.name}))) : null);
+    }
+    const wanted = state.vender.group || "todo";
+    select.value = [...select.options].some(o => o.value === wanted) ? wanted : "todo";
+    const chosen = select.value;
+    const {pattern, sales, advice} = chosen === "todo" ? whole : sellData(chosen);
+    const fallback = chosen !== "todo" && pattern && pattern.points === 0 && whole.pattern.points > 0;
+    $("#sell-feedback").hidden = !fallback;
+    $("#sell-feedback").textContent = fallback
+      ? "De esto aún no hay escaneos con hora. Mientras tanto, «Todo el mercado» ya tiene escaneos y suele seguir el mismo ritmo." : "";
+    // The answers in large; the sentences stay for what the answers do not say: why there is no pattern yet, or no sales.
+    const answers = sellAnswers(advice);
+    $("#sell-answer").replaceChildren(...answers.map(a => el("li", {class: "best-card" + (a.tone === "good" ? " is-good" : a.tone === "bad" ? " is-bad" : "")},
+      el("span", {class: "eyebrow", text: a.label}), el("span", {class: "best-name", text: a.name}), el("span", {class: "best-note", text: a.note}))));
+    const measured = !!sales && sales.cells.some(c => c.n > 0);
     const lead = timing ? adviceText(sales.advice) : null, why = timing ? salesLines(sales).filter(line => line !== lead) : [];
-    const lines = [lead, ...summary.lines.filter(line => line !== SCAN_MORE || !measured), ...why].filter(Boolean);
-    $("#sell-advice").replaceChildren(el("h3", {text: title}), ...lines.map(line => el("p", {text: line})));
-    const mode = state.pesca.mode === "ventas" ? "ventas" : "precio";
+    const lines = answers.length ? why : [...advice.lines.filter(line => line !== SCAN_MORE || !measured), ...why];
+    const title = answers.length ? null : measured && advice.level === "sin-datos" ? "Aún hay pocas ventas medidas" : advice.title;
+    $("#sell-advice").replaceChildren(...(title ? [el("h3", {text: title})] : []), ...lines.map(line => el("p", {text: line})));
+    const mode = state.vender.mode === "ventas" ? "ventas" : "precio";
     for (const m of ["precio", "ventas"]) $(`#sell-mode-${m}`).setAttribute("aria-pressed", m === mode ? "true" : "false");
     const show = mode === "ventas" ? measured : !!pattern && pattern.points > 0;
     $("#sell-modes").hidden = !(measured || (pattern && pattern.points > 0));
     $("#sell-legend").hidden = !show || mode !== "precio";
     $("#sell-legend-sales").hidden = !show || mode !== "ventas";
     $("#sell-twin").hidden = !show;
+    $("#sell-charts").hidden = !show;
     const holder = $("#sell-holder");
-    heatWidth = holder.clientWidth;
     if (!show) {
-      holder.replaceChildren(...(mode === "ventas" && pattern?.points > 0 ? [el("p", {class: "empty-line", text: sales?.any ? FEW_SALES : NO_SALES_YET})] : []));
+      holder.replaceChildren();
+      $("#sell-hours").replaceChildren(); $("#sell-days").replaceChildren();
       $("#sell-table").replaceChildren();
+      if (mode === "ventas" && pattern?.points > 0) $("#sell-advice").append(el("p", {class: "empty-line", text: sales?.any ? FEW_SALES : NO_SALES_YET}));
       return advice;
     }
-    const width = Math.max(300, Math.min(640, heatWidth || 440));
+    heatWidth = holder.clientWidth;
+    const width = Math.max(300, Math.min(720, heatWidth || 440)), cellH = width < 420 ? 34 : 40;
+    // The bars beside the map: the same numbers read by time of day and by weekday, the best one in gold.
+    const slots = timingSlots(pattern, mode === "ventas" ? sales : null);
+    const amount = r => slots.unit === "rate" ? Math.round((r.value - 1) * 1000) : r.value;
+    const bars = rows => {
+      const maxAbs = Math.max(slots.unit === "rate" ? 200 : 300, ...rows.filter(r => r.usable).map(r => Math.abs(amount(r))));
+      return rows.map(r => el("li", {class: r.best ? "is-best" : r.usable ? null : "is-few", title: r.usable ? null : r.n ? "Pocos datos todavía" : "Nadie ha escaneado entonces"},
+        el("span", {class: "slot-name", text: r.label}),
+        el("span", {"aria-hidden": "true"}, divergingTrack(r.usable ? amount(r) : null, maxAbs, !r.usable ? "rest" : amount(r) < 0 ? "cheap" : slots.unit === "rate" ? "gain" : "dear")),
+        el("span", {class: "slot-value", text: r.text})));
+    };
+    $("#sell-hours").replaceChildren(...bars(slots.hours));
+    $("#sell-days-block").hidden = !slots.days;
+    $("#sell-days").replaceChildren(...(slots.days ? bars(slots.days) : []));
     if (mode === "ventas") {
-      holder.replaceChildren(svg(timingHeatmapSVG(pattern, {width, sales}).node));
+      holder.replaceChildren(svg(timingHeatmapSVG(pattern, {width, sales, cellH}).node));
       const cellText = c => c.n === 0 ? "—" : c.usable ? formatRate(c.value) : `pocos (${c.n})`;
       $("#sell-table").replaceChildren(twinTable([["Día"], ...BLOCK_LABELS.map(label => [label, true])],
         [...WEEKDAYS_LONG.map((day, wd) => [day, ...sales.cells.filter(c => c.wd === wd).map(c => num(cellText(c)))]),
@@ -2281,8 +2398,7 @@ function boot(doc, win) {
           ["Mediciones", ...sales.blocks.map(b => num(String(b.n)))]]));
       return advice;
     }
-    const chart = timingHeatmapSVG(pattern, {best: summary.best, width});
-    holder.replaceChildren(svg(chart.node));
+    holder.replaceChildren(svg(timingHeatmapSVG(pattern, {best: advice.best, width, cellH}).node));
     const cellText = c => c.n === 0 ? "—" : c.usable ? formatPct(c.value) : `pocos (${c.n})`;
     $("#sell-table").replaceChildren(twinTable([["Día"], ...BLOCK_LABELS.map(label => [label, true]), ["Con el precio del día", true]],
       [...WEEKDAYS_LONG.map((day, wd) => [day, ...pattern.cells.filter(c => c.wd === wd).map(c => num(cellText(c))),
@@ -2445,7 +2561,9 @@ function boot(doc, win) {
     const item = detail.item, b = detail.baseline, a = detail.assess, price = detail.price;
     $("#detail-title").textContent = item.name || `Objeto ${item.id}`;
     const series = Object.fromEntries(detail.days.map(x => [x.d, x]));
-    const from = detail.T - 59, to = detail.T;
+    // The chart starts where the prices start (never less than two weeks wide), not sixty days back with half of it empty.
+    const to = detail.T, first = detail.days.reduce((d, x) => isInt(x.d) && x.d < d ? x.d : d, to);
+    const from = Math.min(Math.max(to - 59, first), to - 13);
     const markers = dumpDays(series, from, to);
     const chartWidth = Math.min(880, Math.max(300, ($("#detail-body").clientWidth || 760) - 32));
     const chart = bandChartSVG({days: detail.days, from, to, N: b.N, dumpLine: a.dumpLine, markers, price: price?.lo ?? null, width: chartWidth, height: chartWidth < 480 ? 220 : 260});
@@ -2454,6 +2572,7 @@ function boot(doc, win) {
       el("p", {class: "detail-meta muted", text: `${item.catLabel} · ID ${item.id}${item.watch ? " · lista fija de la hermandad" : " · objeto vigilado por algún miembro"}${item.vendor ? ` · se vende al vendedor por ${formatGSC(item.vendor)}` : ""}`}),
       el("div", {class: "detail-status"}, el("span", {class: "badge verdict-" + a.verdict, text: detail.verdictLabel}), el("span", {text: detail.statusText}), el("span", {class: "muted", text: " · " + detail.confText})),
       el("div", {class: "row detail-actions"}, starButton(item.id, item.name),
+        el("button", {type: "button", class: "button subtle small", text: "Cuándo venderlo", onclick: () => { state.vender.group = "id:" + item.id; saveVender(); win.location.hash = "vender"; }}),
         owned() ? el("button", {type: "button", class: "button primary small", text: "Registrar compra", onclick: () => owned()?.openMovement("buy", {itemId: item.id, name: item.name, unit: price?.lo})}) : null,
         owned() ? el("button", {type: "button", class: "button secondary small", text: "Registrar venta", onclick: () => owned()?.openMovement("sell", {itemId: item.id, name: item.name, unit: price?.lo})}) : null),
       el("div", {class: "stats"},
@@ -2464,7 +2583,7 @@ function boot(doc, win) {
         stat("Reventa prudente", money(b.Rs), isInt(b.Rs) ? "objetivo de reventa" : null),
         stat("Oferta típica", el("span", {text: formatUnits(b.Q)}), isInt(b.Q) ? "a la venta en un día" : null)),
       el("section", {class: "detail-section", "aria-labelledby": "chart-title"},
-        el("h3", {id: "chart-title", text: "Últimos 60 días"}),
+        el("h3", {id: "chart-title", text: `Últimos ${to - from + 1} días`}),
         chart ? el("ul", {class: "legend"},
           el("li", {}, el("span", {class: "key key-band"}), "Mín – máx del día"),
           el("li", {}, el("span", {class: "key key-line"}), "Valor del día"),
