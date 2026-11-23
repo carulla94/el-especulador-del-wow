@@ -470,3 +470,8 @@ details.cartera-block summary{cursor:pointer;font-weight:600}
   .sell-answer .best-card{padding:10px 14px}
   .sell-answer .best-name{font-size:20px}
 }
+/* A long market name must not push the page wider than the phone: the select shrinks and cuts its text instead. */
+@media(max-width:760px){
+  .market-select{min-width:0}
+  .market-select select{min-width:0;width:100%}
+}
