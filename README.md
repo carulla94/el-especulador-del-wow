@@ -88,7 +88,7 @@ Las claves del PC solo permiten enviar datos de mercado, no leer movimientos, ex
 
 ## Panel de la hermandad
 
-Todo el mundo entra por el mismo sitio: `/` lleva a `/hermandad`, y el mismo campo admite la clave `gld_…` de un miembro o la contraseña del propietario. Pestañas: **Hoy** (lo primero que hay que mirar), **Mercado**, **Qué compensa**, **Pesca**, **Balance** (aparece cuando ya hay dos semanas de precios), **Mi cartera** (solo el propietario) y **Hermandad** (miembros, unirse y descargas).
+Todo el mundo entra por el mismo sitio: `/` lleva a `/hermandad`, y el mismo campo admite la clave `gld_…` de un miembro o la contraseña del propietario. Pestañas: **Hoy** (lo primero que hay que mirar), **Mercado**, **Qué compensa** (con qué farmear en una columna por profesión), **Cuándo vender** (qué día y a qué hora se paga más y se vende más, para todo el mercado, una categoría o un objeto), **Pesca**, **Balance** (aparece cuando ya hay dos semanas de precios), **Mi cartera** (solo el propietario) y **Hermandad** (miembros, unirse y descargas).
 
 **Mi cartera** es `public/cartera.js`, que el Worker solo sirve con la sesión del propietario. Sigue usando su propio Durable Object (`Portfolio`) y su API (`/api/state`, `/api/transactions`, `/api/settings`): lee los precios del panel para valorar el inventario, pero nada de la cartera se envía a la hermandad. La página antigua sigue en `/index.html` para Auctioneer y para restaurar copias.
 
@@ -114,7 +114,7 @@ Para cerrarlo, pon `"GUILD_PUBLIC_VIEW": "0"` y publica. Desde ese momento solo 
 
 **Enlace para ver**
 
-Al final de **Hermandad → Miembros**, quien administra (el propietario o un administrador) puede pulsar **Crear enlace**. Sale una dirección `…/hermandad?ver=<código>`: quien la abra ve el panel **en solo lectura y sin entrar**, con las pestañas Hoy, Mercado, Qué compensa, Pesca y Balance, el detalle de cada objeto y las exportaciones CSV.
+Al final de **Hermandad → Miembros**, quien administra (el propietario o un administrador) puede pulsar **Crear enlace**. Sale una dirección `…/hermandad?ver=<código>`: quien la abra ve el panel **en solo lectura y sin entrar**, con las pestañas Hoy, Mercado, Qué compensa, Cuándo vender, Pesca y Balance, el detalle de cada objeto y las exportaciones CSV.
 
 - **No ve nombres.** El nombre de quien vio cada precio sale como «un compañero», y tampoco aparece quién hizo el último envío.
 - **No ve lo personal:** las sesiones de pesca de cada uno (solo lo que pica en cada zona, sumado), la cartera, los miembros, las claves ni la descarga del subidor.

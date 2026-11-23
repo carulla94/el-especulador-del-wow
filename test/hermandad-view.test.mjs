@@ -1154,3 +1154,85 @@ test("the view link: the page reads ?ver=, sends it as X-Guild-View and hides wh
   assert.match(js, /\$\("#view-link-open"\)\.hidden = !state\.me\.openView/);
   assert.match(html, /<p id="view-link-open" class="muted" hidden>/);
 });
+
+// ---- «Cuándo vender» as its own tab, and «Qué farmear» by profession ------------------------------------------------
+test("timingSlots reads the pattern by time of day and by weekday and marks the best and the worst of each", () => {
+  const pattern = H.timingPattern(sellingWeeks()), slots = H.timingSlots(pattern);
+  assert.equal(slots.unit, "bp");
+  assert.deepEqual(slots.hours.map(r => r.label), H.BLOCK_LABELS);
+  assert.deepEqual(slots.days.map(r => r.label), ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]);
+  assert.deepEqual(slots.hours.filter(r => r.best).map(r => r.label), ["20–24 h"]);
+  assert.deepEqual(slots.hours.filter(r => r.worst).map(r => r.label), ["8–12 h"]);
+  for (const r of slots.hours.filter(r => !r.usable)) assert.deepEqual([r.value, r.text, r.best], [null, "—", false], "nobody scans at night here");
+  for (const r of [...slots.hours, ...slots.days].filter(r => r.usable)) assert.match(r.text, /^(?:[+-][\d,]+|0) %$/);
+  assert.ok(slots.days.filter(r => r.best).length <= 1 && slots.days.filter(r => r.worst).length <= 1);
+  // Sales: the six blocks as times the usual rate, and no weekdays.
+  const sales = {blocks: H.BLOCK_LABELS.map((_, block) => ({block, rateIdx: block === 5 ? 1.9 : block === 0 ? null : 0.8, n: block === 0 ? 0 : 6}))};
+  const sold = H.timingSlots(pattern, sales);
+  assert.deepEqual([sold.unit, sold.days], ["rate", null]);
+  assert.deepEqual(sold.hours.map(r => r.text), ["—", "×0,8", "×0,8", "×0,8", "×0,8", "×1,9"]);
+  assert.deepEqual(sold.hours.map(r => r.best), [false, false, false, false, false, true]);
+  // Nothing to compare: nothing is marked.
+  const flat = H.timingSlots({blocks: [{block: 0, value: 100, usable: true, n: 9}], weekdays: []});
+  assert.ok(flat.hours.every(r => !r.best && !r.worst));
+  assert.deepEqual(H.timingSlots(null).hours, []);
+});
+
+test("sellAnswers puts the best moment first, then when to post, then the worst", () => {
+  const pattern = H.timingPattern(sellingWeeks()), advice = H.timingSummary(pattern);
+  const answers = H.sellAnswers(advice);
+  assert.deepEqual(answers.map(a => [a.key, a.name, a.tone]), [["best", "Domingo, 20–24 h", "good"], ["worst", "Martes, 8–12 h", "bad"]]);
+  assert.equal(answers[0].note, "Se paga un 12 % por encima de lo normal de esa semana.");
+  assert.equal(answers[1].note, "Se paga un 8 % por debajo de lo normal de esa semana.");
+  const post = H.sellAnswers({...advice, sales: {advice: {best: 5, reason: "ventas", hint: [19, 20]}}});
+  assert.deepEqual(post.map(a => a.key), ["best", "post", "worst"]);
+  assert.deepEqual([post[1].label, post[1].name, post[1].tone], ["Cuándo se vende más", "De 20 a 24 h", null]);
+  assert.equal(post[1].note, "Pon o iguala el precio hacia las 19-20 h, con 2 h (u 8 h si no vas a volver).");
+  const only = H.sellAnswers({best: null, worst: null, sales: {advice: {best: 3, reason: "precio-alto", hint: [11, 12]}}});
+  assert.deepEqual(only.map(a => [a.label, a.tone]), [["La franja con mejor precio", "good"]]);
+  assert.deepEqual(H.sellAnswers({best: null, worst: null, sales: {advice: {best: null, reason: "pocos", hint: null}}}), []);
+  assert.deepEqual(H.sellAnswers(null), []);
+});
+
+test("sellGroups offers the whole market, every category of the summary and the fishing groups", () => {
+  const groups = H.sellGroups(marketOf([stock(1, {cat: "hierba", catLabel: "Hierba"}), stock(2), stock(3, {cat: "hierba", catLabel: "Hierba"})]));
+  assert.deepEqual([groups.market.key, groups.market.ids], ["todo", null]);
+  assert.deepEqual(groups.cats, [{key: "cat:metal", label: "metal", ids: [2]}, {key: "cat:hierba", label: "Hierba", ids: [1, 3]}]);
+  assert.deepEqual(groups.fish.map(g => g.key), ["pesca", "crudo", "cocinado", "aceites"]);
+  assert.deepEqual(H.sellGroups(null).cats, []);
+});
+
+test("the heatmap grows taller cells when asked and keeps its 42 cells and its one ring", () => {
+  const pattern = H.timingPattern(sellingWeeks()), advice = H.timingSummary(pattern);
+  const small = svgText(H.timingHeatmapSVG(pattern, {best: advice.best}).node);
+  const tall = svgText(H.timingHeatmapSVG(pattern, {best: advice.best, cellH: 40, width: 720}).node);
+  assert.match(small, /viewBox="0 0 440 236"/);
+  assert.match(tall, /viewBox="0 0 720 306"/);
+  for (const markup of [small, tall]) {
+    assert.equal((markup.match(/<rect /g) ?? []).length, 42);
+    assert.equal((markup.match(/stroke-width="2"/g) ?? []).length, 1);
+    assert.ok(!/NaN|undefined/.test(markup));
+  }
+});
+
+test("«Cuándo vender» is its own tab and «Qué farmear» has one column per profession", () => {
+  const html = read("public/hermandad.html"), js = read("public/hermandad.js"), css = read("public/hermandad.css");
+  assert.match(html, /<a href="#vender" data-tab="vender">Cuándo vender<\/a>/);
+  assert.match(html, /id="screen-vender" data-screen/);
+  const tabs = [...html.matchAll(/data-tab="(\w+)"/g)].map(m => m[1]);
+  assert.deepEqual(tabs, ["hoy", "mercado", "compensa", "vender", "pesca", "balance", "cartera", "hermandad"]);
+  assert.match(js, /const VIEWS = \["hoy", "mercado", "compensa", "vender", "pesca", "balance", "cartera", "hermandad"\];/);
+  const vender = html.slice(html.indexOf('id="screen-vender"'), html.indexOf('id="screen-pesca"'));
+  for (const id of ["sell-group", "sell-answer", "sell-holder", "sell-hours", "sell-days", "sell-table"]) assert.match(vender, new RegExp(`id="${id}"`), id);
+  const pesca = html.slice(html.indexOf('id="screen-pesca"'), html.indexOf('id="screen-balance"'));
+  assert.doesNotMatch(pesca, /id="sell-/, "the heatmap left the fishing tab");
+  const profs = [...html.matchAll(/<section class="prof" data-prof="(\w+)"/g)].map(m => m[1]);
+  assert.deepEqual(profs, ["mining", "herbalism", "skinning", "cloth"]);
+  assert.deepEqual(profs, Object.keys(H.PROFESSIONS));
+  for (const prof of profs) assert.match(html, new RegExp(`<h3 id="farm-h-${prof}">${H.PROFESSIONS[prof].label}</h3>`));
+  assert.deepEqual([...html.matchAll(/data-skill="(\w+)"/g)].map(m => m[1]), ["mining", "herbalism", "skinning"], "cloth needs no skill");
+  // A phone gets the page without sideways scroll: the wide table drops columns instead of asking for 1080 px.
+  const phone = css.slice(css.indexOf("@media(max-width:760px)"));
+  assert.match(phone, /\.market-table\{min-width:0\}/);
+  assert.match(phone, /\.market-table th:nth-child\(4\)[^{]*\{display:none\}/);
+});

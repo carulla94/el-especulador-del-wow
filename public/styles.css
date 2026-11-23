@@ -7,7 +7,7 @@
 @media(prefers-reduced-motion:no-preference){.button,.nav-button,.table-action{transition:background .15s ease,border-color .15s ease}.toast{animation:toast-in .2s ease}@keyframes toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}}
 
 /* El Especulador del WoW — original stone, brass and Alliance-inspired theme */
-:root{--bg:#171714;--surface:#22231f;--surface-2:#2b2c24;--border:#514a35;--text:#e9e0cd;--muted:#a9a18d;--gold:#cda85a;--gold-bright:#efd28b;--blue:#8eafce;--green:#a4bf83;--red:#d99783;--radius:4px;font-family:"Segoe UI",Tahoma,Arial,sans-serif;font-size:14px;color-scheme:dark}
+:root{--bg:#14100c;--surface:#1d1811;--surface-2:#282017;--border:#4d3f2a;--text:#ece1c9;--muted:#a99b80;--gold:#c9a24c;--gold-bright:#f2cf6b;--blue:#8fb4dc;--green:#9ccf7a;--red:#e09a86;--radius:3px;font-family:"Segoe UI",Tahoma,Arial,sans-serif;font-size:14px;color-scheme:dark}
 body{background:radial-gradient(ellipse at 80% 0,#42372333,transparent 65%),repeating-linear-gradient(0deg,#ffffff01 0,#ffffff01 1px,transparent 1px,transparent 4px),#171714;color:var(--text)}
 h1,h2,h3{font-family:Georgia,"Palatino Linotype","Book Antiqua",serif}
 h1{font-size:clamp(31px,3.2vw,46px);font-weight:500;letter-spacing:-.7px;color:#f4dfaa;text-shadow:0 2px 3px #0009}
