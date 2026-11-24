@@ -4,7 +4,7 @@ Aplicación para WoW Forever, Europa, PvP y Alianza, con acceso por contraseña.
 
 La interfaz, contabilidad, inventario, cálculos y datos persistentes se ejecutan en Cloudflare Workers con SQLite en un Durable Object. Puedes importar los archivos de Auctioneer desde el navegador o emparejar el sincronizador del PC para enviar sus cambios por HTTPS.
 
-El código está en el repositorio público [carulla94/el-especulador-del-wow](https://github.com/carulla94/el-especulador-del-wow): cualquiera puede leerlo, pero solo quien está invitado en **Settings > Collaborators** puede subir ramas. Que el código sea público no abre la app: la cuenta en la nube, en [el-especulador-del-wow.arqcon-cat.workers.dev](https://el-especulador-del-wow.arqcon-cat.workers.dev/), sigue pidiendo la contraseña del propietario, y el panel de la hermandad, una clave personal. No subas nunca contraseñas, claves ni SavedVariables personales. Lee [CONTRIBUTING.md](CONTRIBUTING.md) para el entorno de desarrollo y el flujo de ramas.
+El código está en el repositorio público [carulla94/el-especulador-del-wow](https://github.com/carulla94/el-especulador-del-wow): cualquiera puede leerlo, pero solo quien está invitado en **Settings > Collaborators** puede subir ramas. Que el código sea público no abre la app: la cuenta en la nube, en [oro-hermandad.pages.dev](https://oro-hermandad.pages.dev/), sigue pidiendo la contraseña del propietario, y el panel de la hermandad, una clave personal o el código de 4 cifras. No subas nunca contraseñas, claves ni SavedVariables personales. Lee [CONTRIBUTING.md](CONTRIBUTING.md) para el entorno de desarrollo y el flujo de ramas.
 
 ## Edición local para GitHub Pages
 
@@ -104,13 +104,22 @@ Es independiente de la cartera: usa su propio Durable Object (`GuildMarket`), su
 2. Entra en la app con tu contraseña y pulsa **Hermandad** en el menú. Como propietario puedes hacerlo todo.
 3. En **Miembros**, añade a cada compañero con el nombre que quieras mostrar (no hace falta que sea su personaje). Se crea su clave personal `gld_…`: **se muestra una sola vez**, cópiala y envíasela por privado. Se guarda solo su SHA-256.
 4. Si quieres ayuda, haz administrador a alguien: podrá crear y revocar claves de miembros normales. Revocar a un miembro corta sus claves al momento (el panel lo saca en el siguiente minuto); marca «borrar también sus precios» si subió datos falsos.
-5. Ahora el panel está **abierto a todos en solo lectura** (ver abajo): basta con pasar la dirección `…/hermandad`. Si lo cierras, quien quieras que lo vea sin clave necesita el **enlace para ver**.
+5. Para que la hermandad vea el panel sin clave, pon el **código de 4 cifras** (ver abajo) y pásales la dirección `https://oro-hermandad.pages.dev/hermandad` y el código.
 
-**Panel abierto a todos**
+**Dirección del panel**
 
-Con `"vars": {"GUILD_PUBLIC_VIEW": "1"}` en `wrangler.jsonc` (así está desde noviembre de 2026), quien abra `…/hermandad` sin entrar ve el panel en solo lectura, sin clave ni enlace. Ve exactamente lo mismo que con el enlace para ver (ver abajo): sin nombres, sin lo personal y sin poder cambiar nada. Arriba sale «Solo lectura» y el botón **Entrar**, para quien tenga clave o contraseña. Un enlace para ver antiguo también abre el panel.
+El panel está en **https://oro-hermandad.pages.dev** desde noviembre de 2026. Es un proyecto de Cloudflare Pages (`entrada/`) que pasa cada petición, tal cual, al Worker `el-especulador-del-wow`: los datos, las claves y el código son los mismos. Lo publica `deploy-cloudflare.yml` justo después del Worker; la clave `CLOUDFLARE_API_TOKEN` necesita para eso el permiso **Cloudflare Pages: Edit**, además de los del Worker.
 
-Para cerrarlo, pon `"GUILD_PUBLIC_VIEW": "0"` y publica. Desde ese momento solo se ve con clave o con el enlace para ver, si está creado. No hace falta tocar Cloudflare: la variable va en el archivo y se publica con el resto.
+La dirección antigua, `el-especulador-del-wow.arqcon-cat.workers.dev`, sigue funcionando: los subidores configurados con ella siguen enviando. Para pasar un subidor a la nueva, abre `HERMANDAD.cmd --reset` y vuelve a poner la dirección nueva, la carpeta de WoW y tu clave. No la quites mientras quede algún subidor con la antigua. Las cookies son de cada dirección: en la nueva hay que volver a entrar (con clave, contraseña o código).
+
+**Código de 4 cifras para ver el panel**
+
+Quien abra `…/hermandad` sin entrar ve la pantalla de entrada con el campo **Código de la hermandad**. Con el código correcto ve el panel en solo lectura, igual que con el enlace para ver (ver abajo): sin nombres, sin lo personal y sin poder cambiar nada. Arriba sale «Solo lectura» y el botón **Entrar**, para quien tenga clave o contraseña. Su aparato lo recuerda **30 días** (cookie `__Host-especulador_codigo`, firmada, que no lleva el código).
+
+- **El código es un secreto del Worker, `GUILD_VIEW_PIN`**, de exactamente 4 cifras. Se pone en Cloudflare: Workers y Pages → `el-especulador-del-wow` → Configuración → Variables y secretos → Añadir → tipo **Secreto**, nombre `GUILD_VIEW_PIN`. No va nunca en el repositorio. Sin él (o si no son 4 cifras), el panel solo se ve con clave, contraseña o enlace para ver.
+- **Para cambiarlo**, edita el secreto: quien entró con el código viejo tiene que escribir el nuevo. Para quitarlo, borra el secreto.
+- **Intentos:** solo cuentan los códigos equivocados. 5 desde una misma conexión la cierran 15 minutos; 10 en una hora o 40 en un día, vengan de donde vengan, cierran el código para todos hasta que pase esa hora o ese día (las claves y la contraseña siguen funcionando). Con 10.000 códigos posibles, adivinarlo así llevaría meses; aun así, cámbialo si se filtra.
+- Se comprueba con `POST /api/guild/pin` y `{"code": "1234"}`; abre lo mismo que el enlace para ver.
 
 **Enlace para ver**
 

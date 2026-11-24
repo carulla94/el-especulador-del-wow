@@ -50,6 +50,14 @@
       <div class="card login-card">
         <p class="eyebrow">WOW FOREVER · PRECIOS DE TODA LA HERMANDAD</p>
         <h1 id="login-title">El Especulador del WoW</h1>
+        <form id="pin-form" autocomplete="off" novalidate hidden>
+          <p class="lead">Para ver el panel, escribe el código de 4 cifras de la hermandad. Este aparato lo recordará 30 días.</p>
+          <label for="pin-code">Código de la hermandad</label>
+          <input id="pin-code" name="code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" spellcheck="false">
+          <button id="pin-submit" class="button primary" type="submit">Ver el panel</button>
+          <p id="pin-feedback" class="feedback" role="alert" aria-live="polite"></p>
+          <p class="login-or">¿Tienes clave personal o eres el propietario? Entra aquí abajo.</p>
+        </form>
         <p class="lead">Entra con tu clave personal de la hermandad. Empieza por <code>gld_</code> y te la da quien administra el panel; es la misma que usa el subidor de tu PC. Si eres el propietario, escribe aquí tu contraseña.</p>
         <form id="login-form" autocomplete="off">
           <label for="login-key">Tu clave o contraseña</label>
@@ -549,7 +557,7 @@
       <section id="view-link-card" class="card view-link" hidden aria-labelledby="view-link-title">
         <h2 id="view-link-title">Enlace para ver sin clave</h2>
         <p class="muted small-print">Quien tenga este enlace ve el panel en solo lectura sin entrar: Hoy, Mercado, Qué compensa, Cuándo vender, Pesca y Balance. No ve los nombres de los miembros, ni las sesiones de pesca de cada uno, ni la cartera, ni esta pestaña. Pásalo solo a quien quieras: si se filtra, cámbialo y el viejo dejará de valer. Si cambias la contraseña del propietario, el enlace también cambia.</p>
-        <p id="view-link-open" class="muted" hidden>Ahora el panel está abierto a todos en solo lectura: cualquiera con la dirección del panel lo ve sin entrar, igual que con este enlace. El enlace solo hace falta si se vuelve a cerrar (ver el README).</p>
+        <p id="view-link-open" class="muted" hidden>El panel tiene código de 4 cifras: quien lo sepa lo ve en solo lectura, igual que con este enlace, y su aparato lo recuerda 30 días. El código se cambia en Cloudflare (ver el README); al cambiarlo, quien entró con el viejo tiene que escribir el nuevo.</p>
         <p id="view-link-off" class="muted">Ahora no hay enlace: solo se entra con clave.</p>
         <button id="view-link-create" class="button primary small" type="button">Crear enlace</button>
         <div id="view-link-on" hidden>

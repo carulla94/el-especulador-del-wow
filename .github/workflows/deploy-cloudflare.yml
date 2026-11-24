@@ -83,6 +83,23 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: npm run deploy
 
+      # oro-hermandad.pages.dev: a Cloudflare Pages project that passes every request to the Worker just published
+      # (entrada/). The project is created the first time only. The token needs «Cloudflare Pages: Edit» for this.
+      - name: Publicar la direccion oro-hermandad.pages.dev
+        if: steps.deployment.outputs.enabled == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        shell: bash
+        run: |
+          status=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/oro-hermandad")
+          if [[ "$status" == 404 ]]; then
+            npx wrangler pages project create oro-hermandad --production-branch main
+          elif [[ "$status" != 200 ]]; then
+            echo "::error::Cloudflare responde $status al buscar el proyecto de Pages oro-hermandad. Si es 403, a la clave CLOUDFLARE_API_TOKEN le falta el permiso «Cloudflare Pages: Edit»."
+            exit 1
+          fi
+          npm run deploy:entrada
+
       - name: Resumir el despliegue
         if: steps.deployment.outputs.enabled == 'true'
         shell: bash
@@ -90,9 +107,11 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
           ### Despliegue completado
 
-          Wrangler ha publicado `el-especulador-del-wow` en la cuenta Cloudflare configurada.
-          Consulta la URL confirmada por Wrangler en el paso Publicar en Cloudflare.
+          Wrangler ha publicado `el-especulador-del-wow` en la cuenta Cloudflare configurada,
+          y la direccion del panel https://oro-hermandad.pages.dev (proyecto de Pages que pasa todo al Worker).
+          Consulta las URL confirmadas por Wrangler en los pasos de publicar.
 
           Para habilitar el acceso privado, configura `OWNER_PASSWORD` como secreto del Worker en Cloudflare.
           Debe tener al menos 16 caracteres. No lo guardes en este repositorio ni como variable de construccion.
+          El codigo de 4 cifras para ver el panel es otro secreto del Worker, `GUILD_VIEW_PIN`; sin el, el panel solo se ve con clave.
           SUMMARY

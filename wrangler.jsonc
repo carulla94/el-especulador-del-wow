@@ -15,6 +15,5 @@
   },
   "durable_objects": {"bindings": [{"name": "PORTFOLIO", "class_name": "Portfolio"}, {"name": "GUILD", "class_name": "GuildMarket"}]},
   "migrations": [{"tag": "v1", "new_sqlite_classes": ["Portfolio"]}, {"tag": "v2", "new_sqlite_classes": ["GuildMarket"]}],
-  "vars": {"GUILD_PUBLIC_VIEW": "1"},
   "observability": {"enabled": false}
 }

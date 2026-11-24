@@ -1,6 +1,6 @@
 import {createLocalApi, createIndexedDbRepository} from "./local-api.mjs";
 
-const CLOUD_URL = "https://el-especulador-del-wow.arqcon-cat.workers.dev/";
+const CLOUD_URL = "https://oro-hermandad.pages.dev/";
 let api;
 try {
   const repository = createIndexedDbRepository({databaseName: `el-especulador-pages-v1:${location.pathname.replace(/index\.html$/, "")}`});
