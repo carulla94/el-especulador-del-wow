@@ -1148,11 +1148,24 @@ test("the view link: the page reads ?ver=, sends it as X-Guild-View and hides wh
   assert.match(html, /<a href="#hermandad" data-tab="hermandad" id="tab-hermandad">/);
   assert.match(html, /<section id="view-link-card" class="card view-link" hidden/);
   assert.match(js, /\/hermandad\?ver=\$\{token\}/);
-  // The open panel (GUILD_PUBLIC_VIEW): the server says so in /me, and the login screen offers to keep looking.
-  assert.match(js, /openView = !!me\.openView/);
-  assert.match(js, /\$\("#login-view"\)\.hidden = !\(viewToken \|\| openView\) \|\| viewDead/);
-  assert.match(js, /\$\("#view-link-open"\)\.hidden = !state\.me\.openView/);
   assert.match(html, /<p id="view-link-open" class="muted" hidden>/);
+});
+
+test("the access code: the login screen asks for 4 digits when the server has a code, and keeps looking with it", () => {
+  const js = read("public/hermandad.js"), html = read("public/hermandad.html");
+  // The 401 and /me say whether there is a code; /me says whether this device is looking with it.
+  assert.match(js, /pinView = !!error\.body\?\.pin; pinSession = false;/);
+  assert.match(js, /pinView = !!me\.pinView; pinSession = !!me\.viaPin;/);
+  assert.match(js, /throw new PanelError\([^\n]*, response\.status, body\)/);
+  // Asked only to who is not already looking with it; «Seguir viendo» for who is.
+  assert.match(js, /const askPin = pinView && !pinSession;\s+\$\("#pin-form"\)\.hidden = !askPin;/);
+  assert.match(js, /\$\("#login-view"\)\.hidden = !\(\(viewToken && !viewDead\) \|\| pinSession\)/);
+  assert.match(js, /await request\("\/api\/guild\/pin", \{code\}\)/);
+  assert.match(js, /if \(!\/\^\[0-9\]\{4\}\$\/\.test\(code\)\)/);
+  assert.match(js, /\$\("#view-link-open"\)\.hidden = !state\.me\.pinView/);
+  assert.match(html, /<form id="pin-form" autocomplete="off" novalidate hidden>/);
+  assert.match(html, /<input id="pin-code" name="code" type="password" inputmode="numeric" pattern="\[0-9\]\{4\}" maxlength="4"/);
+  assert.ok(!/openView|GUILD_PUBLIC_VIEW/.test(js + html), "nothing of the panel open to everyone is left");
 });
 
 // ---- «Cuándo vender» as its own tab, and «Qué farmear» by profession ------------------------------------------------

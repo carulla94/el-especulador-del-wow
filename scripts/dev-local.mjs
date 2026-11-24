@@ -5,6 +5,7 @@
  *                                                 pattern (dearer on Sunday evenings, cheaper on Tuesday mornings) for
  *                                                 «Cuándo vender», and fish priced so the Pesca tab has something to say
  *   node scripts/dev-local.mjs --demo=lanzamiento the launch day: one day of invented prices, nothing to compare yet
+ *   add --codigo=1234                             the panel's 4-digit access code (GUILD_VIEW_PIN), for the code screen
  * All the data is invented and lives in memory; it disappears when the server stops. */
 import http from "node:http";
 import fs from "node:fs";
@@ -21,6 +22,7 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
 const ORIGIN="http://localhost:8787";
 const demoArg=process.argv.find(a=>a==="--demo"||a.startsWith("--demo="));
 const launchDay=demoArg==="--demo=lanzamiento";
+const codeArg=process.argv.find(a=>a.startsWith("--codigo="))?.slice("--codigo=".length);
 const databases=[];
 function context(){
   const db=new DatabaseSync(":memory:");databases.push(db);
@@ -33,7 +35,7 @@ function context(){
   }},transactionSync(callback){db.exec("BEGIN IMMEDIATE");try{const result=callback();if(result instanceof Promise)throw new Error("async transaction");db.exec("COMMIT");return result;}catch(error){db.exec("ROLLBACK");throw error;}}}};
 }
 const types={".html":"text/html; charset=utf-8",".css":"text/css; charset=utf-8",".js":"text/javascript; charset=utf-8",".svg":"image/svg+xml",".zip":"application/zip"};
-const env={OWNER_PASSWORD:process.env.ESPECULADOR_PREVIEW_PASSWORD||"vista-previa-privada-sin-datos",GUILD_WRITE_ROWS_PER_DAY:"1000000",ASSETS:{async fetch(request){const relative=new URL(request.url).pathname;const filename=path.resolve(root,"public","."+relative);if(!filename.startsWith(path.join(root,"public")+path.sep)||!fs.existsSync(filename)||!fs.statSync(filename).isFile())return new Response("No encontrado",{status:404});return new Response(fs.readFileSync(filename),{headers:{"Content-Type":types[path.extname(filename)]||"application/octet-stream"}});}}};
+const env={OWNER_PASSWORD:process.env.ESPECULADOR_PREVIEW_PASSWORD||"vista-previa-privada-sin-datos",GUILD_WRITE_ROWS_PER_DAY:"1000000",...(codeArg?{GUILD_VIEW_PIN:codeArg}:{}),ASSETS:{async fetch(request){const relative=new URL(request.url).pathname;const filename=path.resolve(root,"public","."+relative);if(!filename.startsWith(path.join(root,"public")+path.sep)||!fs.existsSync(filename)||!fs.statSync(filename).isFile())return new Response("No encontrado",{status:404});return new Response(fs.readFileSync(filename),{headers:{"Content-Type":types[path.extname(filename)]||"application/octet-stream"}});}}};
 const object=new Portfolio(context(),env);env.PORTFOLIO={idFromName:name=>name,get:()=>({fetch:request=>object.fetch(request)})};
 const market=new GuildMarket(context(),env);env.GUILD={idFromName:name=>name,get:()=>({fetch:request=>market.fetch(request)})};
 

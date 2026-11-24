@@ -35,6 +35,10 @@ import {FISHING, validateFishing, fishingReport} from "./fishing.mjs";
 export const GUILD_ID = "guild-forever-eu-v1";
 export const GUILD_COOKIE = "__Host-especulador_hermandad";
 export const SESSION_SECONDS = 7 * 86400;
+/** The panel's access code (GUILD_VIEW_PIN, a Worker secret of 4 digits): who types it sees the read-only panel, and
+ * this cookie keeps it 30 days on that device. Changing the code closes every one of these sessions. */
+export const PIN_COOKIE = "__Host-especulador_codigo";
+export const PIN_SECONDS = 30 * 86400;
 export const KEY_PATTERN = /^gld_[A-Za-z0-9_-]{43}$/;
 /** The newest uploader (pc_sync/hermandad.py VERSION) the panel offers: every sync answer says it (subidor.ultima) and
  * the 0.6.0 window tells its user when theirs is older. Raise it only in a pull request of its own, after the new
@@ -46,6 +50,10 @@ export const LIMITS = Object.freeze({
   keys: 50, members: 50, markets: 20, itemsPerMarket: 300,
   marketsPerUpload: 8, itemsPerUpload: 300, daysPerItem: 130, pointsPerItem: 130,
   uploadsPerDay: 24, syncPerHour: 60, loginAttempts: 8, loginWindowMs: 15 * 60000,
+  // The access code has only 10.000 values. Only wrong codes count: 5 from one connection close it there for 15
+  // minutes; 10 in an hour or 40 in a day, from anywhere, close it for everybody until that hour or day is over (keys
+  // and the owner's password still work). Guessing it then takes months on average.
+  pinAttempts: 5, pinWindowMs: 15 * 60000, pinHourAttempts: 10, pinHourMs: 3600000, pinDayAttempts: 40, pinDayMs: 86400000,
   // Points are read 14 days back (pointSeconds) everywhere except «Cuándo vender», which keeps them TIMING.days (28) days;
   // pointsKept covers that month at a dozen scans a day.
   retentionDays: 180, pointSeconds: 14 * 86400, pointsKept: 400,
@@ -226,6 +234,35 @@ export async function readGuildSession(request, env, nowMs = Date.now()) {
 }
 const setCookie = value => `${GUILD_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_SECONDS}`;
 const clearCookie = `${GUILD_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
+/** GUILD_VIEW_PIN, the panel's 4-digit access code, or null while it is not set (or is not 4 digits): then the panel is
+ * seen only with a key, the owner's password or the view link. */
+export const viewPin = env => typeof env?.GUILD_VIEW_PIN === "string" && /^[0-9]{4}$/.test(env.GUILD_VIEW_PIN.trim()) ? env.GUILD_VIEW_PIN.trim() : null;
+/** Ties a code session to the code it was opened with (an HMAC, so the code itself is never in the cookie). */
+const pinTag = async (pin, env) => (await guildSign("guild-view-pin:" + pin, env)).slice(0, 22);
+export async function issuePinSession(env, nowMs = Date.now()) {
+  const pin = viewPin(env);
+  if (!pin) return null;
+  const payload = base64url(encoder.encode(JSON.stringify({v: 1, exp: Math.floor(nowMs / 1000) + PIN_SECONDS, nonce: randomToken(), c: await pinTag(pin, env)})));
+  return payload + "." + await guildSign("pin:" + payload, env);
+}
+/** True when the request carries a code session opened with the current code. */
+export async function readPinSession(request, env, nowMs = Date.now()) {
+  const pin = viewPin(env);
+  if (!pin) return false;
+  const cookie = request.headers.get("Cookie") || "";
+  const value = cookie.split(";").map(v => v.trim()).find(v => v.startsWith(PIN_COOKIE + "="))?.slice(PIN_COOKIE.length + 1);
+  if (!value || value.length > 600) return false;
+  try {
+    const [payload, signature, extra] = value.split(".");
+    if (extra !== undefined || !signature || !equal(signature, await guildSign("pin:" + payload, env))) return false;
+    const parsed = JSON.parse(new TextDecoder().decode(unbase64(payload)));
+    const now = Math.floor(nowMs / 1000);
+    return parsed.v === 1 && Number.isSafeInteger(parsed.exp) && parsed.exp > now && parsed.exp <= now + PIN_SECONDS &&
+      typeof parsed.nonce === "string" && parsed.nonce.length === 43 && equal(parsed.c, await pinTag(pin, env));
+  } catch { return false; }
+}
+const setPinCookie = value => `${PIN_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${PIN_SECONDS}`;
+const clearPinCookie = `${PIN_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
 function originCheck(request) {
   const origin = request.headers.get("Origin");
   if (origin && origin !== new URL(request.url).origin) fail("Origen de petición no válido.", 403);
@@ -234,7 +271,7 @@ function originCheck(request) {
 
 // ---- Worker side: authentication and forwarding. Called by worker.mjs for every /api/guild/* path.
 const ROUTES = new Map([
-  ["POST /api/guild/sync", "key"], ["POST /api/guild/fishing", "key"], ["GET /api/guild/fishing", "session"], ["POST /api/guild/login", "public"], ["POST /api/guild/logout", "session"],
+  ["POST /api/guild/sync", "key"], ["POST /api/guild/fishing", "key"], ["GET /api/guild/fishing", "session"], ["POST /api/guild/login", "public"], ["POST /api/guild/pin", "pin"], ["POST /api/guild/logout", "session"],
   ["GET /api/guild/me", "session"], ["GET /api/guild/market", "session"], ["GET /api/guild/item", "session"], ["GET /api/guild/timing", "session"],
   ["GET /api/guild/export.csv", "session"], ["GET /api/guild/download/sincronizador", "session"],
   ["GET /api/guild/members", "session"], ["POST /api/guild/members", "session"], ["POST /api/guild/members/role", "session"],
@@ -242,17 +279,15 @@ const ROUTES = new Map([
   ["POST /api/guild/view-link", "session"]
 ]);
 const PATHS = new Set([...ROUTES.keys()].map(route => route.slice(route.indexOf(" ") + 1)));
-/** What the secret view link opens without signing in (X-Guild-View): the read-only market views, never a member's
- * own data, the members, the keys, the uploader or any POST. The Durable Object checks the link and hides the names. */
+/** What the access code and the secret view link (X-Guild-View) open without signing in: the read-only market views,
+ * never a member's own data, the members, the keys, the uploader or any POST. The Durable Object checks the code or the
+ * link and hides the names. */
 const VIEW_ROUTES = new Set(["GET /api/guild/me", "GET /api/guild/market", "GET /api/guild/item", "GET /api/guild/timing",
   "GET /api/guild/export.csv", "GET /api/guild/fishing"]);
 const VIEW_PATHS = new Set([...VIEW_ROUTES].map(route => route.slice(route.indexOf(" ") + 1)));
 const VIEW_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const VIEW_GONE = "Este enlace para ver ya no vale. Pide el nuevo a quien administra la hermandad.";
-const OPEN_GONE = "El panel ya no se puede ver sin entrar. Entra con tu clave de la hermandad.";
-/** The panel open to everyone in read only, without a link: GUILD_PUBLIC_VIEW = "1" (wrangler.jsonc "vars"). It opens
- * exactly what the view link opens, with the same names hidden, and an old view link opens it too. */
-export const publicView = env => env?.GUILD_PUBLIC_VIEW === "1";
+const PIN_GONE = "El código para ver el panel ha cambiado. Escribe el nuevo o entra con tu clave de la hermandad.";
 /** The token of view link number `version`: an HMAC of the session secret and the owner password, so nothing secret is
  * stored and changing either of them changes the link too. */
 const viewToken = (version, env) => guildSign("guild-view-link:" + version, env);
@@ -293,16 +328,38 @@ export async function guildFetch(request, env, {ownerSession} = {}) {
     const session = await issueGuildSession(env, {memberId: member.id, keyId: member.keyId});
     return json({ok: true, member: {id: member.id, label: member.label, role: member.role}, csrf: session.csrf}, 200, {"Set-Cookie": setCookie(session.value)});
   }
+  if (access === "pin") {
+    originCheck(request);
+    const pin = viewPin(env);
+    if (!pin) return json({error: "El panel no tiene código: entra con tu clave de la hermandad."}, 403);
+    const ip = await sha256("guild-pin:" + (request.headers.get("CF-Connecting-IP") || "unknown"));
+    const data = parseObject(await readBody(request, LIMITS.loginBody));
+    const code = typeof data.code === "string" ? data.code.trim() : "";
+    // Compared here, where the secret is; the Durable Object counts the wrong ones and says when to stop, also for the
+    // right code, so a closed door tells nothing about the code.
+    const ok = /^[0-9]{4}$/.test(code) && equal(code, pin);
+    const answer = await internal(env, "/internal/pin", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ip, ok})});
+    if (!answer.ok) return answer;
+    return json({ok: true}, 200, {"Set-Cookie": setPinCookie(await issuePinSession(env))});
+  }
   const owner = ownerSession ? await ownerSession() : null;
   const guest = owner ? null : await readGuildSession(request, env);
   let who = owner ? {actor: {kind: "owner"}, csrf: await guildSign("owner-csrf:" + owner.value, env)}
     : guest ? {actor: {kind: "member", memberId: guest.memberId, keyId: guest.keyId}, csrf: guest.csrf} : null;
+  const pinSession = !who && await readPinSession(request, env);
   if (!who && VIEW_ROUTES.has(request.method + " " + path)) {
     const view = request.headers.get("X-Guild-View");
-    if (publicView(env)) who = {actor: {kind: "viewer", open: true}, csrf: ""};
+    if (pinSession) who = {actor: {kind: "viewer", pin: true}, csrf: ""};
     else if (view && VIEW_TOKEN.test(view)) who = {actor: {kind: "viewer", token: view}, csrf: ""};
   }
-  if (!who) return json({error: "Inicia sesión con tu clave de la hermandad."}, 401, request.headers.get("Cookie")?.includes(GUILD_COOKIE + "=") ? {"Set-Cookie": clearCookie} : {});
+  if (!who) {
+    // pin: whether the login screen offers the access code. A cookie that no longer opens anything is removed.
+    const response = json({error: "Inicia sesión con tu clave de la hermandad.", pin: !!viewPin(env)}, 401);
+    const cookies = request.headers.get("Cookie") || "";
+    if (cookies.includes(GUILD_COOKIE + "=")) response.headers.append("Set-Cookie", clearCookie);
+    if (cookies.includes(PIN_COOKIE + "=") && !pinSession) response.headers.append("Set-Cookie", clearPinCookie);
+    return response;
+  }
   if (request.method !== "GET") {
     originCheck(request);
     if (!equal(request.headers.get("X-CSRF-Token"), who.csrf)) return json({error: "La sesión ha cambiado. Recarga la página."}, 403);
@@ -615,6 +672,31 @@ export class GuildStore {
     });
   }
   resetRateLimit(key) { this.run("DELETE FROM guild_rate_limits WHERE bucket_key=?", key); }
+  /** Tries counted in the current window of a bucket (0 once that window is over), without counting a new one. */
+  attempts(key, nowMs, windowMs) {
+    const prior = this.rows("SELECT window_start,attempts FROM guild_rate_limits WHERE bucket_key=?", key)[0];
+    return prior && nowMs - prior.window_start < windowMs ? prior.attempts : 0;
+  }
+  /** One try with the access code (ok: it was the right one). "closed" (this connection) or "closed-all" (everybody)
+   * while there have been too many wrong codes, whatever this one is; otherwise "ok", or "wrong" after counting it. */
+  pinTry(ip, ok, nowMs) {
+    const mine = "pin:" + ip;
+    // One more wrong try in a bucket, in a new window once the last one is over (inside this transaction: no nesting).
+    const count = (key, windowMs) => {
+      const prior = this.rows("SELECT window_start,attempts FROM guild_rate_limits WHERE bucket_key=?", key)[0];
+      const fresh = !prior || nowMs - prior.window_start >= windowMs;
+      this.run("INSERT OR REPLACE INTO guild_rate_limits(bucket_key,window_start,attempts) VALUES (?,?,?)", key, fresh ? nowMs : prior.window_start, fresh ? 1 : prior.attempts + 1);
+    };
+    return this.transaction(() => {
+      this.run("DELETE FROM guild_rate_limits WHERE window_start<?", nowMs - 4 * 86400000);
+      if (this.attempts(mine, nowMs, LIMITS.pinWindowMs) >= LIMITS.pinAttempts) return "closed";
+      if (this.attempts("pin:hour", nowMs, LIMITS.pinHourMs) >= LIMITS.pinHourAttempts ||
+          this.attempts("pin:day", nowMs, LIMITS.pinDayMs) >= LIMITS.pinDayAttempts) return "closed-all";
+      if (ok) { this.resetRateLimit(mine); return "ok"; }
+      count(mine, LIMITS.pinWindowMs); count("pin:hour", LIMITS.pinHourMs); count("pin:day", LIMITS.pinDayMs);
+      return "wrong";
+    });
+  }
 
   // ---- Members and keys
   keyByHash(hash) {
@@ -628,9 +710,9 @@ export class GuildStore {
     let data = null;
     try { data = JSON.parse(header || "null"); } catch { data = null; }
     if (data?.kind === "owner") return {kind: "owner", role: "owner", memberId: null, keyId: null, label: "Propietario"};
-    // The open panel (publicView) and the view link: GuildMarket.fetch checks that the panel is still open, or the link
-    // against the current one (the token is an HMAC, so that check is asynchronous).
-    if (data?.kind === "viewer" && data.open === true) return {kind: "viewer", role: "viewer", memberId: null, keyId: null, label: null, token: null, open: true};
+    // The access code and the view link: GuildMarket.fetch checks that there is still a code, or the link against the
+    // current one (the token is an HMAC, so that check is asynchronous).
+    if (data?.kind === "viewer" && data.pin === true) return {kind: "viewer", role: "viewer", memberId: null, keyId: null, label: null, token: null, pin: true};
     if (data?.kind === "viewer" && typeof data.token === "string" && VIEW_TOKEN.test(data.token)) return {kind: "viewer", role: "viewer", memberId: null, keyId: null, label: null, token: data.token};
     if (data?.kind === "member" && isInt(data.memberId, 1, Number.MAX_SAFE_INTEGER) && isInt(data.keyId, 1, Number.MAX_SAFE_INTEGER)) {
       const row = this.rows(`SELECT m.label, m.role, m.revoked_at AS member_revoked, k.revoked_at AS key_revoked
@@ -1546,6 +1628,14 @@ export class GuildMarket {
         store.run("UPDATE guild_keys SET last_login_at=? WHERE id=?", nowSec, key.keyId);
         return json({id: key.memberId, keyId: key.keyId, label: key.label, role: key.role});
       }
+      if (path === "/internal/pin" && method === "POST") {
+        const data = parseObject(await readBody(request, LIMITS.loginBody));
+        if (typeof data.ip !== "string" || !/^[a-f0-9]{64}$/.test(data.ip) || typeof data.ok !== "boolean") fail("Petición interna no válida.");
+        const result = store.pinTry(data.ip, data.ok, nowMs);
+        if (result === "closed") return json({error: "Demasiados códigos equivocados. Vuelve a intentarlo dentro de 15 minutos."}, 429);
+        if (result === "closed-all") return json({error: "Ha habido demasiados códigos equivocados y el código está cerrado un rato para todos. Vuelve a intentarlo más tarde o entra con tu clave."}, 429);
+        return result === "ok" ? json({ok: true}) : json({error: "Ese no es el código. Revisa las 4 cifras."}, 401);
+      }
       if (path === "/api/guild/sync" && method === "POST") return await this.sync(request, nowMs, nowSec, T);
       if (path === "/api/guild/fishing" && method === "POST") return await this.fishingUpload(request, nowMs, nowSec, T);
       if (method === "POST") {
@@ -1557,8 +1647,8 @@ export class GuildMarket {
       const actor = store.actor(request.headers.get("X-Guild-Actor"));
       const viewer = actor.kind === "viewer";
       if (viewer) {
-        if (actor.open) {
-          if (!publicView(this.env)) return json({error: OPEN_GONE}, 401);
+        if (actor.pin) {
+          if (!viewPin(this.env)) return json({error: PIN_GONE}, 401);
         } else {
           const link = store.viewLink();
           if (!link.on || !equal(actor.token, await viewToken(link.version, this.env))) return json({error: VIEW_GONE}, 401);
@@ -1567,7 +1657,7 @@ export class GuildMarket {
       }
       const params = url.searchParams;
       if (path === "/api/guild/me") {
-        const me = {role: actor.role, isOwner: actor.role === "owner", canAdmin: canAdmin(actor), viewer, openView: publicView(this.env),
+        const me = {role: actor.role, isOwner: actor.role === "owner", canAdmin: canAdmin(actor), viewer, pinView: !!viewPin(this.env), viaPin: actor.pin === true,
           member: actor.kind === "member" ? {id: actor.memberId, label: actor.label} : null, rules: VERSION, T, date: dateOfDay(T),
           dayOfLaunch: T - LAUNCH + 1, launchDay: LAUNCH, guardUntil: LAUNCH + GUARD_DAYS, markets: store.markets(nowSec),
           limits: {uploadsPerDay: LIMITS.uploadsPerDay, maxKeys: LIMITS.keys, maxMembers: LIMITS.members, itemsPerMarket: LIMITS.itemsPerMarket,

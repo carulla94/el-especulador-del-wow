@@ -7,7 +7,7 @@ import {DatabaseSync} from "node:sqlite";
 import worker, {Portfolio, GuildMarket as WorkerGuildMarket} from "../src/worker.mjs";
 import {FISHING} from "../src/fishing.mjs";
 import {GuildMarket, GuildStore, validateUpload, issueGuildSession, goldCell, pctCell, textCell, dateOfDay, LIMITS, WATCHLIST,
-  GUILD_COOKIE, LATEST_UPLOADER} from "../src/guild.mjs";
+  GUILD_COOKIE, LATEST_UPLOADER, PIN_COOKIE, PIN_SECONDS, issuePinSession, readPinSession, viewPin} from "../src/guild.mjs";
 import {DAY0, BUDGET, buildDays, baseline, assess, flip, deltas, weekday, texts, mergeDay, dayValue, median} from "../src/especular.mjs";
 
 const BASE = "https://especulador.test";
@@ -148,7 +148,7 @@ test("without the GUILD binding every guild route answers 503 and nothing reache
     ["GET", "/api/guild/export.csv?market=a-Alliance"], ["GET", "/api/guild/members"], ["GET", "/api/guild/download/sincronizador"],
     ["POST", "/api/guild/sync"], ["GET", "/api/guild/fishing"], ["POST", "/api/guild/fishing"], ["POST", "/api/guild/login"], ["POST", "/api/guild/logout"], ["POST", "/api/guild/members"],
     ["POST", "/api/guild/members/role"], ["POST", "/api/guild/members/revoke"], ["POST", "/api/guild/keys"], ["POST", "/api/guild/keys/revoke"],
-    ["POST", "/api/guild/view-link"],
+    ["POST", "/api/guild/view-link"], ["POST", "/api/guild/pin"],
     ["GET", "/api/guild/unknown"], ["GET", "/api/guild"]];
   for (const [method, path] of routes) {
     const response = await f.call(path, {method, ...(method === "POST" ? {data: {}} : {}), token: "gld_" + "a".repeat(43), origin: BASE});
@@ -178,7 +178,7 @@ test("wrangler and the worker entry add GuildMarket without touching Portfolio o
   assert.deepEqual(config.durable_objects.bindings, [{name: "PORTFOLIO", class_name: "Portfolio"}, {name: "GUILD", class_name: "GuildMarket"}]);
   assert.deepEqual(config.migrations, [{tag: "v1", new_sqlite_classes: ["Portfolio"]}, {tag: "v2", new_sqlite_classes: ["GuildMarket"]}]);
   assert.equal(config.main, "src/worker.mjs");
-  assert.deepEqual(config.vars, {GUILD_PUBLIC_VIEW: "1"}, "the panel is open to everyone in read only");
+  assert.equal(config.vars, undefined, "no plain vars: the panel's access code is a secret (GUILD_VIEW_PIN), never in this file");
   assert.equal(WorkerGuildMarket, GuildMarket);
   assert.equal(WATCH_IDS.length, 161);
   assert.equal(new Set(WATCH_IDS).size, 161);
@@ -1411,44 +1411,132 @@ test("the secret view link: off at first, read-only without names, and a changed
   assert.equal(f.calls.portfolio, portfolioCalls, "no request with the link reached Portfolio");
 });
 
-test("the open panel (GUILD_PUBLIC_VIEW): anyone sees the read-only views without a link or names, and nothing else", async t => {
+test("the access code (GUILD_VIEW_PIN): the right 4 digits open the read-only views for 30 days, without names, and nothing else", async t => {
   const f = fixture(t), owner = await f.owner(), ana = await f.member(owner, "Ana");
   const portfolioCalls = f.calls.portfolio;
   assert.equal((await f.sync(ana.key, upload([item(2589, {days: flat(1000, T0 - 14, T0), points: [[at(T0, 8), 990, 1, 1]]})]))).status, 200);
   assert.equal((await f.call("/api/guild/fishing", {method: "POST", raw: JSON.stringify(fishBody([fishSession(at(T0, 9))])), token: ana.key})).status, 200);
   const market = encodeURIComponent(MARKET);
-  // Closed (the default of these tests): without a session or a link nothing opens.
-  assert.equal((await f.call("/api/guild/me")).status, 401);
-  assert.equal((await (await f.call("/api/guild/me", {cookie: owner.cookie})).json()).openView, false);
-  f.env.GUILD_PUBLIC_VIEW = "1";
-  const me = await (await f.call("/api/guild/me")).json();
-  assert.deepEqual([me.role, me.viewer, me.openView, me.isOwner, me.canAdmin, me.member, me.csrf], ["viewer", true, true, false, false, null, ""]);
-  for (const key of ["writesToday", "viewLink", "uploadsToday", "lastUploadAt"]) assert.ok(!(key in me), key);
+  const pin = (code, ip = "198.51.100.20", origin = BASE) => f.call("/api/guild/pin", {method: "POST", data: {code}, origin, ip});
+  // Without a code (the default of these tests) nothing opens, and the login screen is told there is no code to ask.
+  const closed = await f.call("/api/guild/me");
+  assert.equal(closed.status, 401);
+  assert.equal((await closed.json()).pin, false);
+  assert.equal((await pin("1234")).status, 403);
+  assert.deepEqual(await (await f.call("/api/guild/me", {cookie: owner.cookie})).json().then(me => [me.pinView, me.viaPin]), [false, false]);
+  f.env.GUILD_VIEW_PIN = "12345";
+  assert.equal((await pin("12345")).status, 403, "a code that is not 4 digits is no code");
+  f.env.GUILD_VIEW_PIN = "0427";
+  const asked = await f.call("/api/guild/me");
+  assert.equal(asked.status, 401);
+  assert.deepEqual(await asked.json(), {error: "Inicia sesión con tu clave de la hermandad.", pin: true});
+  // Wrong codes open nothing and set no cookie; another site cannot even try.
+  const wrong = await pin("1234");
+  assert.equal(wrong.status, 401);
+  assert.equal((await wrong.json()).error, "Ese no es el código. Revisa las 4 cifras.");
+  assert.equal(wrong.headers.get("Set-Cookie"), null);
+  for (const bad of ["", "042", "abcd", 427]) assert.equal((await pin(bad, "198.51.100.21")).status, 401, String(bad));
+  assert.equal((await pin("0427", "198.51.100.22", "https://otro.example")).status, 403);
+  // The right one: an HttpOnly cookie for 30 days that holds no code.
+  const right = await pin(" 0427 ");
+  assert.equal(right.status, 200, await right.clone().text());
+  const setCookie = right.headers.get("Set-Cookie");
+  assert.match(setCookie, /^__Host-especulador_codigo=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+; Path=\/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000$/);
+  assert.ok(!setCookie.includes("0427"));
+  const cookie = setCookie.split(";")[0];
+  const me = await (await f.call("/api/guild/me", {cookie})).json();
+  assert.deepEqual([me.role, me.viewer, me.pinView, me.viaPin, me.isOwner, me.canAdmin, me.member, me.csrf], ["viewer", true, true, true, false, false, null, ""]);
+  for (const key of ["writesToday", "viewLink", "uploadsToday", "lastUploadAt", "openView"]) assert.ok(!(key in me), key);
   for (const path of [`/api/guild/market?market=${market}`, `/api/guild/item?market=${market}&id=2589`, `/api/guild/timing?market=${market}`,
     `/api/guild/export.csv?market=${market}`, "/api/guild/fishing"]) {
-    const response = await f.call(path);
+    const response = await f.call(path, {cookie});
     assert.equal(response.status, 200, path);
     assert.ok(!(await bodyText(response)).includes("Ana"), `${path} shows a name`);
   }
-  const fishing = await (await f.call("/api/guild/fishing")).json();
+  const fishing = await (await f.call("/api/guild/fishing", {cookie})).json();
   assert.deepEqual([fishing.scope, fishing.sessions, fishing.guild.sessions], ["viewer", [], 1]);
-  // An old or made-up view link opens the same panel; everything else stays closed.
-  assert.equal((await f.call("/api/guild/me", {headers: {"X-Guild-View": "a".repeat(43)}})).status, 200);
+  // Everything else stays closed, and those refusals keep the code's cookie.
   for (const [method, path] of [["GET", "/api/guild/members"], ["GET", "/api/guild/download/sincronizador"], ["POST", "/api/guild/members"],
     ["POST", "/api/guild/view-link"], ["POST", "/api/guild/keys"], ["POST", "/api/guild/logout"]]) {
-    const response = await f.call(path, {method, origin: BASE, ...(method === "POST" ? {data: {action: "on", label: "Intruso", memberId: ana.id}} : {})});
+    const response = await f.call(path, {method, cookie, origin: BASE, ...(method === "POST" ? {data: {action: "on", label: "Intruso", memberId: ana.id}} : {})});
     assert.equal(response.status, 401, `${method} ${path}`);
+    assert.equal(response.headers.get("Set-Cookie"), null, `${method} ${path}`);
   }
   assert.equal(f.gdb.prepare("SELECT count(*) AS n FROM guild_members").get().n, 1, "nobody was added");
-  // A session still wins, and whoever administers sees that the panel is open.
+  // The Durable Object's own route is not reachable from outside.
+  const guildCalls = f.calls.guild;
+  await f.call("/internal/pin", {method: "POST", data: {ip: "0".repeat(64), ok: true}, origin: BASE});
+  assert.equal(f.calls.guild, guildCalls);
+  // A session still wins, and whoever administers sees that the panel has a code.
   const anaSession = await f.login(ana.key);
-  const anaMe = await (await f.call("/api/guild/me", {cookie: anaSession.cookie})).json();
-  assert.deepEqual([anaMe.role, anaMe.viewer, anaMe.openView], ["member", false, true]);
-  assert.equal((await (await f.call("/api/guild/me", {cookie: owner.cookie})).json()).openView, true);
-  // Closing it again needs no link change: the next request is refused.
-  f.env.GUILD_PUBLIC_VIEW = "0";
-  const closed = await f.call(`/api/guild/market?market=${market}`);
-  assert.equal(closed.status, 401);
-  assert.match((await closed.json()).error, /Inicia sesión/);
-  assert.equal(f.calls.portfolio, portfolioCalls, "no open request reached Portfolio");
+  const anaMe = await (await f.call("/api/guild/me", {cookie: anaSession.cookie + "; " + cookie})).json();
+  assert.deepEqual([anaMe.role, anaMe.viewer, anaMe.pinView, anaMe.viaPin], ["member", false, true, false]);
+  assert.equal((await (await f.call("/api/guild/me", {cookie: owner.cookie})).json()).pinView, true);
+  // A new code closes every device that entered with the old one, and its cookie is removed.
+  f.env.GUILD_VIEW_PIN = "9876";
+  const changed = await f.call(`/api/guild/market?market=${market}`, {cookie});
+  assert.equal(changed.status, 401);
+  assert.equal((await changed.json()).pin, true);
+  assert.equal(changed.headers.get("Set-Cookie"), "__Host-especulador_codigo=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0");
+  assert.equal((await pin("0427", "198.51.100.23")).status, 401);
+  const again = (await pin("9876", "198.51.100.23")).headers.get("Set-Cookie").split(";")[0];
+  assert.equal((await f.call("/api/guild/me", {cookie: again})).status, 200);
+  // Without a code, nothing is open any more.
+  delete f.env.GUILD_VIEW_PIN;
+  const gone = await f.call("/api/guild/me", {cookie: again});
+  assert.equal(gone.status, 401);
+  assert.equal((await gone.json()).pin, false);
+  assert.equal(f.calls.portfolio, portfolioCalls, "no request with the code reached Portfolio");
+});
+
+test("the access code session lasts 30 days, is signed and belongs to one code", async () => {
+  const env = {OWNER_PASSWORD: PASSWORD, SESSION_SECRET: "test-only-independent-session-secret-99", GUILD_VIEW_PIN: "0427"};
+  const now = Date.UTC(2026, 11, 5, 18);
+  const value = await issuePinSession(env, now);
+  const ask = (cookie, ms, e = env) => readPinSession(new Request(BASE + "/api/guild/me", {headers: {Cookie: cookie}}), e, ms);
+  assert.equal(await ask(PIN_COOKIE + "=" + value, now), true);
+  assert.equal(await ask("otra=1; " + PIN_COOKIE + "=" + value, now + PIN_SECONDS * 1000 - 1000), true);
+  assert.equal(await ask(PIN_COOKIE + "=" + value, now + PIN_SECONDS * 1000), false, "30 days and no more");
+  const [payload, signature] = value.split(".");
+  assert.equal(await ask(PIN_COOKIE + "=" + payload + "." + signature.slice(1) + "A", now), false, "a forged signature");
+  assert.equal(await ask(PIN_COOKIE + "=" + value + ".x", now), false);
+  assert.equal(await ask(PIN_COOKIE + "=" + value, now, {...env, GUILD_VIEW_PIN: "1111"}), false, "another code");
+  assert.equal(await ask(PIN_COOKIE + "=" + value, now, {...env, SESSION_SECRET: "test-only-rotated-session-secret-777"}), false, "another secret");
+  assert.equal(await ask(PIN_COOKIE + "=" + value, now, {...env, GUILD_VIEW_PIN: undefined}), false, "no code");
+  assert.equal(await issuePinSession({...env, GUILD_VIEW_PIN: "abcd"}, now), null);
+  assert.deepEqual([viewPin({GUILD_VIEW_PIN: " 0427 "}), viewPin({GUILD_VIEW_PIN: "042"}), viewPin({GUILD_VIEW_PIN: 427}), viewPin({})], ["0427", null, null, null]);
+});
+
+test("the access code: 5 wrong codes close it for that connection 15 minutes; 10 in an hour or 40 in a day, for everybody", async t => {
+  const f = fixture(t), owner = await f.owner(), ana = await f.member(owner, "Ana");
+  f.env.GUILD_VIEW_PIN = "0427";
+  const pin = (code, ip) => f.call("/api/guild/pin", {method: "POST", data: {code}, origin: BASE, ip});
+  const status = async (code, ip) => (await pin(code, ip)).status;
+  for (let i = 0; i < 5; i++) assert.equal(await status("1111", "198.51.100.30"), 401);
+  const mine = await pin("1111", "198.51.100.30");
+  assert.equal(mine.status, 429);
+  assert.equal((await mine.json()).error, "Demasiados códigos equivocados. Vuelve a intentarlo dentro de 15 minutos.");
+  assert.equal(await status("0427", "198.51.100.30"), 429, "closed for the right code too: a closed door tells nothing");
+  assert.equal(await status("0427", "198.51.100.31"), 200, "another connection still enters");
+  f.advance(15 * 60000);
+  assert.equal(await status("0427", "198.51.100.30"), 200);
+  // 10 wrong codes within the hour, from anywhere: closed for everybody until the hour is over. Keys still work.
+  for (let i = 0; i < 5; i++) assert.equal(await status("2222", "198.51.100.32"), 401);
+  const all = await pin("0427", "198.51.100.33");
+  assert.equal(all.status, 429);
+  assert.match((await all.json()).error, /cerrado un rato para todos/);
+  assert.equal((await f.login(ana.key, {ip: "198.51.100.33"})).response.status, 200);
+  f.advance(45 * 60000);
+  assert.equal(await status("0427", "198.51.100.33"), 200);
+  // 40 in a day: 10 now and 10 more in each of the next two hours make 40 with the 10 before.
+  for (let hour = 0; hour < 3; hour++) {
+    for (let i = 0; i < 10; i++) assert.equal(await status("3333", `198.51.100.${40 + hour * 2 + (i % 2)}`), 401, `hour ${hour}, try ${i}`);
+    f.advance(61 * 60000);
+  }
+  assert.equal(await status("0427", "198.51.100.60"), 429, "the day is full");
+  f.advance(20 * 3600000);
+  assert.equal(await status("0427", "198.51.100.60"), 200, "a new day opens it again");
+  // Nothing personal is kept: only hashes of the connections and the two shared counters.
+  const buckets = f.gdb.prepare("SELECT bucket_key FROM guild_rate_limits WHERE bucket_key LIKE 'pin:%'").all().map(r => r.bucket_key);
+  assert.ok(buckets.every(key => /^pin:(?:[a-f0-9]{64}|hour|day)$/.test(key)), buckets.join(", "));
 });

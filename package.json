@@ -12,7 +12,8 @@
     "build:dashboard": "node scripts/prepare-downloads.mjs && node scripts/bundle-dashboard.mjs",
     "dev": "wrangler dev",
     "check:deploy": "wrangler deploy --dry-run",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "deploy:entrada": "cd entrada && wrangler pages deploy --branch main --commit-dirty=true"
   },
   "devDependencies": {"wrangler": "^4.102.0", "@playwright/test": "1.64.1"}
 }

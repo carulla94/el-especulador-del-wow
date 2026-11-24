@@ -1507,8 +1507,9 @@ function boot(doc, win) {
   try { state.favorites = new Set(parseFavorites(win.localStorage.getItem("hermandad.lista"))); } catch { /* private mode */ }
   // The secret view link (/hermandad?ver=…): read-only without signing in. Kept for this tab only, so the brand link
   // (/hermandad) keeps it; a session always wins over it.
-  // openView: the server says the panel is open to everyone in read only (GUILD_PUBLIC_VIEW), link or not.
-  let viewToken = null, viewDead = false, openView = false;
+  // pinView: the panel has a 4-digit access code (GUILD_VIEW_PIN), so the login screen asks for it; pinSession: this
+  // device is looking with that code (the server keeps it 30 days in an HttpOnly cookie).
+  let viewToken = null, viewDead = false, pinView = false, pinSession = false;
   try {
     const given = new URLSearchParams(win.location.search).get("ver");
     if (given && VIEW_TOKEN.test(given)) { viewToken = given; win.sessionStorage.setItem("hermandad.ver", given); }
@@ -1550,7 +1551,7 @@ function boot(doc, win) {
     toastTimer = setTimeout(() => { node.hidden = true; }, isError ? 9000 : 5000);
   }
 
-  class PanelError extends Error { constructor(message, status) { super(message); this.status = status; } }
+  class PanelError extends Error { constructor(message, status, body = null) { super(message); this.status = status; this.body = body; } }
   async function request(path, data) {
     const options = {headers: {Accept: "application/json"}, cache: "no-store", credentials: "same-origin"};
     if (viewToken) options.headers["X-Guild-View"] = viewToken;
@@ -1565,10 +1566,15 @@ function boot(doc, win) {
     catch { throw new PanelError("No se puede conectar con el panel. Comprueba tu conexión y vuelve a intentarlo.", 0); }
     let body = null;
     try { body = await response.json(); } catch { /* handled below */ }
-    if (!response.ok || !body || body.error) throw new PanelError(body?.error || `No se ha podido completar la petición (${response.status}).`, response.status);
+    if (!response.ok || !body || body.error) throw new PanelError(body?.error || `No se ha podido completar la petición (${response.status}).`, response.status, body);
     return body;
   }
   function handle(error) {
+    if (error?.status === 401 && state.me?.viewer && pinSession) {
+      // The code was changed (or removed): the cookie no longer opens the panel.
+      pinSession = false; pinView = !!error.body?.pin;
+      return pinView ? showLogin("El código de la hermandad ha cambiado. Escribe el nuevo.", "#pin-feedback") : showLogin(error.message);
+    }
     if (error?.status === 401 && state.me?.viewer) { viewDead = true; return showLogin(error.message); }
     if (error?.status === 401) return showLogin("Tu sesión ha terminado o tu clave ya no es válida. Vuelve a entrar con tu clave o contraseña.");
     if (error?.status === 503) return showFatal(error.message);
@@ -1583,7 +1589,8 @@ function boot(doc, win) {
     const ids = [].concat(id);
     for (const section of doc.querySelectorAll("[data-screen]")) section.hidden = !ids.includes(section.id);
   }
-  function showLogin(message = "") {
+  /** feedback: where the message goes, under the key (#login-feedback) or under the code (#pin-feedback). */
+  function showLogin(message = "", feedback = "#login-feedback") {
     stopPolling();
     state.me = null; state.csrf = "";
     cartera?.unmount();
@@ -1592,10 +1599,14 @@ function boot(doc, win) {
     $("#account").hidden = true; $("#tabs").hidden = true; $("#market-bar").hidden = true;
     showOnly("screen-login");
     $("#key-value").value = ""; $("#key-panel").hidden = true;
-    $("#login-feedback").textContent = message;
-    $("#login-view").hidden = !(viewToken || openView) || viewDead;
+    $("#login-feedback").textContent = ""; $("#pin-feedback").textContent = ""; $("#pin-code").value = "";
+    $(feedback).textContent = message;
+    // The code is asked only to who is not already looking with it.
+    const askPin = pinView && !pinSession;
+    $("#pin-form").hidden = !askPin;
+    $("#login-view").hidden = !((viewToken && !viewDead) || pinSession);
     if ($("#detail").open) $("#detail").close();
-    $("#login-key").focus();
+    $(askPin ? "#pin-code" : "#login-key").focus();
   }
   function showFatal(message) {
     stopPolling();
@@ -1666,6 +1677,21 @@ function boot(doc, win) {
     const owner = await (await win.fetch("/api/state", options)).json();
     await win.fetch("/api/logout", {...options, method: "POST", headers: {"Content-Type": "application/json", "X-CSRF-Token": owner.token ?? ""}, body: "{}"});
   }
+  $("#pin-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const input = $("#pin-code"), button = $("#pin-submit");
+    const code = input.value.trim();
+    if (!/^[0-9]{4}$/.test(code)) { $("#pin-feedback").textContent = "El código son 4 cifras, sin letras ni espacios."; input.focus(); return; }
+    button.disabled = true; $("#pin-feedback").textContent = "";
+    try {
+      await request("/api/guild/pin", {code});
+      input.value = "";
+      await start();
+    } catch (error) {
+      $("#pin-feedback").textContent = error.message || "No se ha podido comprobar el código.";
+      input.value = ""; input.focus();
+    } finally { button.disabled = false; }
+  });
   $("#login-show").addEventListener("change", event => { $("#login-key").type = event.target.checked ? "text" : "password"; });
   $("#login-view").addEventListener("click", () => { $("#login-feedback").textContent = ""; start(); });
   $("#logout").addEventListener("click", async () => {
@@ -1681,6 +1707,8 @@ function boot(doc, win) {
     try { me = await request("/api/guild/me"); }
     catch (error) {
       if (error.status !== 401) return showFatal(error.message);
+      // The 401 says whether the panel has an access code to offer.
+      pinView = !!error.body?.pin; pinSession = false;
       // With a view link and no session, a 401 means the link was changed or turned off.
       if (viewToken) viewDead = true;
       return showLogin(viewToken ? error.message : "");
@@ -1707,7 +1735,7 @@ function boot(doc, win) {
     } catch { toast("No se ha podido cargar tu cartera. Recarga la página.", true); }
   }
   function applyMe(me) {
-    state.me = me; state.csrf = me.csrf || state.csrf; openView = !!me.openView;
+    state.me = me; state.csrf = me.csrf || state.csrf; pinView = !!me.pinView; pinSession = !!me.viaPin;
     $("#account").hidden = false; $("#tabs").hidden = false;
     $("#tab-cartera").hidden = !me.isOwner;
     $("#tab-hermandad").hidden = !!me.viewer;
@@ -2824,7 +2852,7 @@ function boot(doc, win) {
     const link = state.me?.viewLink ?? null;
     $("#view-link-card").hidden = !link;
     if (!link) return;
-    $("#view-link-open").hidden = !state.me.openView;
+    $("#view-link-open").hidden = !state.me.pinView;
     $("#view-link-off").hidden = link.on;
     $("#view-link-create").hidden = link.on;
     $("#view-link-on").hidden = !link.on;
